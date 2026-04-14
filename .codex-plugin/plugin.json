@@ -1,0 +1,24 @@
+{
+  "name": "codex-telegram-gateway",
+  "version": "0.1.0",
+  "description": "Sync Codex App threads to Telegram forum topics with a plugin-local MCP gateway.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Telegram Gateway",
+    "shortDescription": "Map Codex App threads to Telegram topics.",
+    "longDescription": "Installs a Telegram gateway into Codex App. The plugin provides MCP tools and a companion skill that operate in app context to inspect loaded projects and threads, bind Telegram forum topics, and sync Telegram messages with persisted Codex thread mappings.",
+    "developerName": "Kangmo Kim",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Show the loaded Codex App projects and threads for the Telegram gateway.",
+      "Link the current Codex App thread to Telegram.",
+      "Sync Telegram with the currently bound Codex App threads."
+    ],
+    "brandColor": "#229ED9"
+  }
+}

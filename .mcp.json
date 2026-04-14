@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "codex-telegram-gateway": {
+      "command": "./.venv/bin/python",
+      "args": ["-m", "codex_telegram_gateway.mcp_server", "--env-file", ".env"],
+      "note": "Local MCP server for the Telegram gateway. Run this plugin from Codex App context so loaded projects and threads come from the app, not CLI session history."
+    }
+  }
+}

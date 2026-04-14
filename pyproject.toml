@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-telegram-gateway"
+version = "0.1.0"
+description = "Telegram gateway plugin for Codex."
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.27,<2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+codex-telegram-gateway = "codex_telegram_gateway.cli:main"
+codex-telegram-gateway-mcp = "codex_telegram_gateway.mcp_server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

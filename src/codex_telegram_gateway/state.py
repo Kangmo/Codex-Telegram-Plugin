@@ -1,0 +1,708 @@
+import json
+import sqlite3
+from pathlib import Path
+
+from codex_telegram_gateway.models import (
+    Binding,
+    CodexProject,
+    InboundMessage,
+    OutboundMessage,
+    PendingTurn,
+    TopicHistoryEntry,
+    TopicProject,
+)
+
+
+class SqliteGatewayState:
+    """SQLite-backed persistence boundary for thread-id to topic-id bindings."""
+
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = Path(database_path)
+        self._database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(str(self._database_path))
+        self._connection.row_factory = sqlite3.Row
+        self._initialize()
+
+    def _initialize(self) -> None:
+        """Create the small schema needed by the current test slice."""
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS bindings (
+                codex_thread_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                topic_name TEXT,
+                sync_mode TEXT NOT NULL,
+                project_id TEXT,
+                UNIQUE(chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS seen_events (
+                codex_thread_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (codex_thread_id, event_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS outbound_messages (
+                codex_thread_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                telegram_message_ids_json TEXT NOT NULL,
+                text TEXT NOT NULL,
+                reply_markup_json TEXT,
+                PRIMARY KEY (codex_thread_id, event_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS inbound_queue (
+                telegram_update_id INTEGER PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                from_user_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                local_image_paths_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS telegram_cursor (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                next_update_id INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                project_name TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_projects (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                topic_name TEXT,
+                project_id TEXT,
+                picker_message_id INTEGER,
+                pending_update_id INTEGER,
+                pending_user_id INTEGER,
+                pending_text TEXT,
+                pending_local_image_paths_json TEXT NOT NULL DEFAULT '[]',
+                browse_path TEXT,
+                browse_page INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_turns (
+                codex_thread_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                turn_id TEXT NOT NULL,
+                waiting_for_approval INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                local_image_paths_json TEXT NOT NULL DEFAULT '[]'
+            );
+            """
+        )
+        self._ensure_bindings_column("project_id", "TEXT")
+        self._ensure_table_column("inbound_queue", "local_image_paths_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_table_column("outbound_messages", "reply_markup_json", "TEXT")
+        self._ensure_table_column("topic_projects", "pending_update_id", "INTEGER")
+        self._ensure_table_column("topic_projects", "pending_user_id", "INTEGER")
+        self._ensure_table_column("topic_projects", "pending_text", "TEXT")
+        self._ensure_table_column(
+            "topic_projects",
+            "pending_local_image_paths_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._ensure_table_column("topic_projects", "browse_path", "TEXT")
+        self._ensure_table_column("topic_projects", "browse_page", "INTEGER NOT NULL DEFAULT 0")
+        self._connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_topic_identity
+            ON bindings (chat_id, message_thread_id)
+            """
+        )
+        self._connection.commit()
+
+    def create_binding(self, binding: Binding) -> Binding:
+        # Persist the stable thread-id to topic-id mapping; topic_name is metadata only.
+        self._connection.execute(
+            """
+            INSERT OR REPLACE INTO bindings (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                topic_name,
+                sync_mode,
+                project_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                binding.codex_thread_id,
+                binding.chat_id,
+                binding.message_thread_id,
+                binding.topic_name,
+                binding.sync_mode,
+                binding.project_id,
+            ),
+        )
+        self._connection.commit()
+        return binding
+
+    def list_bindings(self) -> list[Binding]:
+        rows = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            FROM bindings
+            ORDER BY codex_thread_id
+            """
+        ).fetchall()
+        return [self._binding_from_row(row) for row in rows]
+
+    def get_binding_by_thread(self, codex_thread_id: str) -> Binding:
+        row = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            FROM bindings
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(codex_thread_id)
+        return self._binding_from_row(row)
+
+    def get_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        row = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            FROM bindings
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._binding_from_row(row)
+
+    def upsert_project(self, project: CodexProject) -> CodexProject:
+        self._connection.execute(
+            """
+            INSERT INTO projects (project_id, project_name)
+            VALUES (?, ?)
+            ON CONFLICT(project_id)
+            DO UPDATE SET project_name = excluded.project_name
+            """,
+            (project.project_id, project.project_name),
+        )
+        self._connection.commit()
+        return project
+
+    def list_projects(self) -> list[CodexProject]:
+        rows = self._connection.execute(
+            """
+            SELECT project_id, project_name
+            FROM projects
+            ORDER BY project_name, project_id
+            """
+        ).fetchall()
+        return [
+            CodexProject(project_id=row["project_id"], project_name=row["project_name"])
+            for row in rows
+        ]
+
+    def get_project(self, project_id: str) -> CodexProject:
+        row = self._connection.execute(
+            """
+            SELECT project_id, project_name
+            FROM projects
+            WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(project_id)
+        return CodexProject(project_id=row["project_id"], project_name=row["project_name"])
+
+    def upsert_topic_project(self, topic_project: TopicProject) -> TopicProject:
+        self._connection.execute(
+            """
+            INSERT INTO topic_projects (
+                chat_id,
+                message_thread_id,
+                topic_name,
+                project_id,
+                picker_message_id,
+                pending_update_id,
+                pending_user_id,
+                pending_text,
+                pending_local_image_paths_json,
+                browse_path,
+                browse_page
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                topic_name = excluded.topic_name,
+                project_id = excluded.project_id,
+                picker_message_id = excluded.picker_message_id,
+                pending_update_id = excluded.pending_update_id,
+                pending_user_id = excluded.pending_user_id,
+                pending_text = excluded.pending_text,
+                pending_local_image_paths_json = excluded.pending_local_image_paths_json,
+                browse_path = excluded.browse_path,
+                browse_page = excluded.browse_page
+            """,
+            (
+                topic_project.chat_id,
+                topic_project.message_thread_id,
+                topic_project.topic_name,
+                topic_project.project_id,
+                topic_project.picker_message_id,
+                topic_project.pending_update_id,
+                topic_project.pending_user_id,
+                topic_project.pending_text,
+                _paths_to_json(topic_project.pending_local_image_paths),
+                topic_project.browse_path,
+                topic_project.browse_page,
+            ),
+        )
+        self._connection.commit()
+        return topic_project
+
+    def get_topic_project(self, chat_id: int, message_thread_id: int) -> TopicProject | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                topic_name,
+                project_id,
+                picker_message_id,
+                pending_update_id,
+                pending_user_id,
+                pending_text,
+                pending_local_image_paths_json,
+                browse_path,
+                browse_page
+            FROM topic_projects
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return TopicProject(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            topic_name=row["topic_name"],
+            project_id=row["project_id"],
+            picker_message_id=row["picker_message_id"],
+            pending_update_id=row["pending_update_id"],
+            pending_user_id=row["pending_user_id"],
+            pending_text=row["pending_text"],
+            pending_local_image_paths=_paths_from_json(row["pending_local_image_paths_json"]),
+            browse_path=row["browse_path"],
+            browse_page=row["browse_page"] or 0,
+        )
+
+    def delete_topic_project(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM topic_projects
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def mark_event_seen(self, codex_thread_id: str, event_id: str) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO seen_events (codex_thread_id, event_id)
+            VALUES (?, ?)
+            """,
+            (codex_thread_id, event_id),
+        )
+        self._connection.commit()
+
+    def has_seen_event(self, codex_thread_id: str, event_id: str) -> bool:
+        row = self._connection.execute(
+            """
+            SELECT 1
+            FROM seen_events
+            WHERE codex_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, event_id),
+        ).fetchone()
+        return row is not None
+
+    def delete_seen_event(self, codex_thread_id: str, event_id: str) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM seen_events
+            WHERE codex_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, event_id),
+        )
+        self._connection.commit()
+
+    def enqueue_inbound(self, inbound_message: InboundMessage) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO inbound_queue (
+                telegram_update_id,
+                chat_id,
+                message_thread_id,
+                from_user_id,
+                codex_thread_id,
+                text,
+                local_image_paths_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                inbound_message.telegram_update_id,
+                inbound_message.chat_id,
+                inbound_message.message_thread_id,
+                inbound_message.from_user_id,
+                inbound_message.codex_thread_id,
+                inbound_message.text,
+                _paths_to_json(inbound_message.local_image_paths),
+            ),
+        )
+        self._connection.commit()
+
+    def list_pending_inbound(self) -> list[InboundMessage]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                telegram_update_id,
+                chat_id,
+                message_thread_id,
+                from_user_id,
+                codex_thread_id,
+                text,
+                local_image_paths_json
+            FROM inbound_queue
+            ORDER BY telegram_update_id
+            """
+        ).fetchall()
+        return [
+            InboundMessage(
+                telegram_update_id=row["telegram_update_id"],
+                chat_id=row["chat_id"],
+                message_thread_id=row["message_thread_id"],
+                from_user_id=row["from_user_id"],
+                codex_thread_id=row["codex_thread_id"],
+                text=row["text"],
+                local_image_paths=_paths_from_json(row["local_image_paths_json"]),
+            )
+            for row in rows
+        ]
+
+    def mark_inbound_delivered(self, telegram_update_id: int) -> None:
+        self._connection.execute(
+            "DELETE FROM inbound_queue WHERE telegram_update_id = ?",
+            (telegram_update_id,),
+        )
+        self._connection.commit()
+
+    def set_telegram_cursor(self, update_id: int) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO telegram_cursor (singleton_key, next_update_id)
+            VALUES (1, ?)
+            ON CONFLICT(singleton_key)
+            DO UPDATE SET next_update_id = excluded.next_update_id
+            """,
+            (update_id,),
+        )
+        self._connection.commit()
+
+    def get_telegram_cursor(self) -> int:
+        row = self._connection.execute(
+            "SELECT next_update_id FROM telegram_cursor WHERE singleton_key = 1"
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["next_update_id"])
+
+    def pending_inbound_count(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS total FROM inbound_queue").fetchone()
+        return int(row["total"])
+
+    def upsert_outbound_message(self, outbound_message: OutboundMessage) -> OutboundMessage:
+        self._connection.execute(
+            """
+            INSERT INTO outbound_messages (
+                codex_thread_id,
+                event_id,
+                telegram_message_ids_json,
+                text,
+                reply_markup_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id, event_id)
+            DO UPDATE SET
+                telegram_message_ids_json = excluded.telegram_message_ids_json,
+                text = excluded.text,
+                reply_markup_json = excluded.reply_markup_json
+            """,
+            (
+                outbound_message.codex_thread_id,
+                outbound_message.event_id,
+                json.dumps(list(outbound_message.telegram_message_ids)),
+                outbound_message.text,
+                _json_or_none(outbound_message.reply_markup),
+            ),
+        )
+        self._connection.commit()
+        return outbound_message
+
+    def get_outbound_message(self, codex_thread_id: str, event_id: str) -> OutboundMessage | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                event_id,
+                telegram_message_ids_json,
+                text,
+                reply_markup_json
+            FROM outbound_messages
+            WHERE codex_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, event_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return OutboundMessage(
+            codex_thread_id=row["codex_thread_id"],
+            event_id=row["event_id"],
+            telegram_message_ids=_message_ids_from_json(row["telegram_message_ids_json"]),
+            text=row["text"],
+            reply_markup=_reply_markup_from_json(row["reply_markup_json"]),
+        )
+
+    def delete_outbound_messages(self, codex_thread_id: str) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM outbound_messages
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        )
+        self._connection.commit()
+
+    def record_topic_history(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        text: str = "",
+        local_image_paths: tuple[str, ...] = (),
+    ) -> None:
+        normalized_text = text.strip()
+        if not normalized_text and not local_image_paths:
+            return
+        latest = self.list_topic_history(chat_id, message_thread_id, limit=1)
+        candidate = TopicHistoryEntry(
+            text=normalized_text,
+            local_image_paths=local_image_paths,
+        )
+        if latest and latest[0] == candidate:
+            return
+        self._connection.execute(
+            """
+            INSERT INTO topic_history (
+                chat_id,
+                message_thread_id,
+                text,
+                local_image_paths_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                message_thread_id,
+                normalized_text,
+                _paths_to_json(local_image_paths),
+            ),
+        )
+        self._connection.execute(
+            """
+            DELETE FROM topic_history
+            WHERE history_id NOT IN (
+                SELECT history_id
+                FROM topic_history
+                WHERE chat_id = ? AND message_thread_id = ?
+                ORDER BY history_id DESC
+                LIMIT 20
+            )
+            AND chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id, chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def list_topic_history(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        limit: int = 20,
+    ) -> list[TopicHistoryEntry]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                text,
+                local_image_paths_json
+            FROM topic_history
+            WHERE chat_id = ? AND message_thread_id = ?
+            ORDER BY history_id DESC
+            LIMIT ?
+            """,
+            (chat_id, message_thread_id, limit),
+        ).fetchall()
+        return [
+            TopicHistoryEntry(
+                text=row["text"],
+                local_image_paths=_paths_from_json(row["local_image_paths_json"]),
+            )
+            for row in rows
+        ]
+
+    def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
+        self._connection.execute(
+            """
+            INSERT INTO pending_turns (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                turn_id,
+                waiting_for_approval
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id)
+            DO UPDATE SET
+                chat_id = excluded.chat_id,
+                message_thread_id = excluded.message_thread_id,
+                turn_id = excluded.turn_id,
+                waiting_for_approval = excluded.waiting_for_approval
+            """,
+            (
+                pending_turn.codex_thread_id,
+                pending_turn.chat_id,
+                pending_turn.message_thread_id,
+                pending_turn.turn_id,
+                1 if pending_turn.waiting_for_approval else 0,
+            ),
+        )
+        self._connection.commit()
+        return pending_turn
+
+    def get_pending_turn(self, codex_thread_id: str) -> PendingTurn | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                turn_id,
+                waiting_for_approval
+            FROM pending_turns
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._pending_turn_from_row(row)
+
+    def list_pending_turns(self) -> list[PendingTurn]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                turn_id,
+                waiting_for_approval
+            FROM pending_turns
+            ORDER BY codex_thread_id
+            """
+        ).fetchall()
+        return [self._pending_turn_from_row(row) for row in rows]
+
+    def delete_pending_turn(self, codex_thread_id: str) -> None:
+        self._connection.execute(
+            "DELETE FROM pending_turns WHERE codex_thread_id = ?",
+            (codex_thread_id,),
+        )
+        self._connection.commit()
+
+    @staticmethod
+    def _binding_from_row(row: sqlite3.Row) -> Binding:
+        return Binding(
+            codex_thread_id=row["codex_thread_id"],
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            topic_name=row["topic_name"],
+            sync_mode=row["sync_mode"],
+            project_id=row["project_id"],
+        )
+
+    @staticmethod
+    def _pending_turn_from_row(row: sqlite3.Row) -> PendingTurn:
+        return PendingTurn(
+            codex_thread_id=row["codex_thread_id"],
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            turn_id=row["turn_id"],
+            waiting_for_approval=bool(row["waiting_for_approval"]),
+        )
+
+    def _ensure_bindings_column(self, column_name: str, column_type: str) -> None:
+        self._ensure_table_column("bindings", column_name, column_type)
+
+    def _ensure_table_column(self, table_name: str, column_name: str, column_type: str) -> None:
+        existing_columns = {
+            row["name"]
+            for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name in existing_columns:
+            return
+        self._connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+
+def _paths_to_json(paths: tuple[str, ...]) -> str:
+    return json.dumps(list(paths))
+
+
+def _paths_from_json(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    loaded = json.loads(raw)
+    if not isinstance(loaded, list):
+        return ()
+    return tuple(str(path) for path in loaded if isinstance(path, str))
+
+
+def _message_ids_from_json(raw: str | None) -> tuple[int, ...]:
+    if not raw:
+        return ()
+    loaded = json.loads(raw)
+    if not isinstance(loaded, list):
+        return ()
+    return tuple(int(message_id) for message_id in loaded if isinstance(message_id, int))
+
+
+def _json_or_none(value: dict[str, object] | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True)
+
+
+def _reply_markup_from_json(raw: str | None) -> dict[str, object] | None:
+    if not raw:
+        return None
+    loaded = json.loads(raw)
+    if not isinstance(loaded, dict):
+        return None
+    return loaded

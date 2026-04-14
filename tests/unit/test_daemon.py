@@ -1,0 +1,1640 @@
+from codex_telegram_gateway.config import GatewayConfig
+from codex_telegram_gateway.daemon import GatewayDaemon
+from pathlib import Path
+
+from codex_telegram_gateway.models import (
+    Binding,
+    CodexEvent,
+    CodexThread,
+    InboundMessage,
+    PendingTurn,
+    StartedTurn,
+    TopicProject,
+    TurnResult,
+)
+
+from tests.unit.support import DummyCodexBridge, DummyState, DummyTelegramClient
+
+
+def make_binding() -> Binding:
+    return Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="(gateway-project) thread-1",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+
+
+def make_config() -> GatewayConfig:
+    return GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+
+
+def test_sync_codex_once_emits_only_unseen_events() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Completed the refactor.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [(-100100, 77, "Completed the refactor.", None)]
+    assert state.list_projects() == [
+        __import__("codex_telegram_gateway.models", fromlist=["CodexProject"]).CodexProject(
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+        )
+    ]
+
+
+def test_sync_codex_once_edits_existing_message_when_same_event_grows() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="I found the first issue.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    codex.replace_event("thread-1", "thread-1:turn-1:item-1", "I found the first issue.\nAnd the second one.")
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [(-100100, 77, "I found the first issue.", None)]
+    assert telegram.edited_messages == [
+        (-100100, 1, "I found the first issue.\nAnd the second one.", None),
+    ]
+
+
+def test_sync_codex_once_attaches_response_widget_with_recent_history() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.record_topic_history(-100100, 77, text="go ahead implement it")
+    state.record_topic_history(-100100, 77, text="i created a new project")
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Completed the gateway update.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.edited_reply_markups == [
+        (
+            -100100,
+            1,
+            {
+                "inline_keyboard": [
+                        [{"text": "✓ Ready", "callback_data": "gw:resp:noop"}],
+                        [
+                            {"text": "↑ i created a new pro…", "callback_data": "gw:resp:recall:0"},
+                            {"text": "↑ go ahead implement…", "callback_data": "gw:resp:recall:1"},
+                        ],
+                    [
+                        {"text": "↺ New", "callback_data": "gw:resp:new"},
+                        {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                        {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                        {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                    ],
+                ]
+            },
+        )
+    ]
+
+
+def test_sync_codex_once_updates_response_widget_from_running_to_ready() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Working on it.",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="completed")
+    daemon.sync_codex_once()
+
+    assert telegram.edited_reply_markups == [
+        (
+            -100100,
+            1,
+            {"inline_keyboard": [[{"text": "⏳ Working", "callback_data": "gw:resp:noop"}]]},
+        ),
+        (
+            -100100,
+            1,
+            {
+                "inline_keyboard": [
+                    [{"text": "✓ Ready", "callback_data": "gw:resp:noop"}],
+                    [
+                        {"text": "↺ New", "callback_data": "gw:resp:new"},
+                        {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                        {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                        {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                    ],
+                ]
+            },
+        ),
+    ]
+
+
+def test_sync_codex_once_links_newly_loaded_codex_app_threads() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/other-project", "fresh thread")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    linked = state.get_binding_by_thread("thread-2")
+    assert linked.topic_name == "(other-project) fresh thread"
+    assert telegram.created_topics == [(-100100, "(other-project) fresh thread")]
+    assert codex.ensured_projects == [
+        "/Users/kangmo/sacle/src/other-project",
+        "/Users/kangmo/sacle/src/gateway-project",
+    ]
+
+
+def test_sync_codex_once_pushes_telegram_known_project_back_into_codex_sidebar_state() -> None:
+    state = DummyState()
+    state.upsert_project(
+        __import__("codex_telegram_gateway.models", fromlist=["CodexProject"]).CodexProject(
+            project_id="/Users/kangmo/sacle/src/sacle-deposit-final",
+            project_name="sacle-deposit-final",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert codex.ensured_projects == [
+        "/Users/kangmo/sacle/src/gateway-project",
+        "/Users/kangmo/sacle/src/sacle-deposit-final",
+    ]
+
+
+def test_poll_telegram_once_queues_only_authorized_updates() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=999,
+        text="Ignore me.",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please continue.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    pending = state.list_pending_inbound()
+    assert pending == [
+        InboundMessage(
+            telegram_update_id=2,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please continue.",
+        )
+    ]
+
+
+def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway help",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == []
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Available gateway commands:\n"
+            "/gateway <subcommand> - Run a gateway control action\n\n"
+            "Gateway subcommands:\n"
+            "/gateway doctor - Show Telegram and Codex App gateway status\n"
+            "/gateway projects - List loaded Codex App projects\n"
+            "/gateway threads - List loaded Codex App threads\n"
+            "/gateway bindings - List Codex thread to Telegram topic bindings\n"
+            "/gateway create_thread - Create a new Codex thread in this topic\n"
+            "/gateway project - Choose or switch the Codex project for this topic\n"
+            "/gateway status - Show the current topic binding and thread status\n"
+            "/gateway sync - Audit bindings and recover deleted topics\n"
+            "/gateway help - Show available gateway commands\n\n"
+            "Compatibility aliases inside `/gateway`: new, start, sessions, commands\n"
+            "All other slash commands are passed through to the bound Codex thread unchanged.",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_requeues_recent_message_from_response_widget() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.record_topic_history(
+        -100100,
+        77,
+        text="please check the screenshot",
+        local_image_paths=("/tmp/example-image.png",),
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=5,
+        callback_query_id="cb-recall",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        from_user_id=111,
+        data="gw:resp:recall:0",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=5,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="please check the screenshot",
+            local_image_paths=("/tmp/example-image.png",),
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-recall", "Queued.")]
+
+
+def test_poll_telegram_once_gateway_create_thread_rebinds_bound_topic() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway create_thread",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_topic(-100100, 77)
+    assert rebound.codex_thread_id == "thread-2"
+    assert rebound.topic_name == "(gateway-project) untitled"
+    assert codex.created_threads == [
+        CodexThread(
+            thread_id="thread-2",
+            title="untitled",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    ]
+    assert telegram.edited_topics == [(-100100, 77, "(gateway-project) untitled")]
+    assert state.list_pending_inbound() == []
+
+
+def test_poll_telegram_once_gateway_project_opens_picker_for_bound_topic() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway project",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    topic_project = state.get_topic_project(-100100, 77)
+    assert topic_project == TopicProject(
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="(gateway-project) thread-1",
+        project_id=None,
+        picker_message_id=1,
+        pending_update_id=None,
+        pending_user_id=None,
+        pending_text=None,
+    )
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Select Codex Project\n\n"
+            "Topic: (gateway-project) thread-1\n\n"
+            "Choose an existing loaded Codex App project below, or browse folders from your Mac home directory.\n\n"
+            "First message:\n"
+            "(empty message)",
+            {
+                "inline_keyboard": [
+                    [{"text": "📁 gateway-project", "callback_data": "tp:prj:0"}],
+                    [{"text": "📂 Browse Home Folder", "callback_data": "tp:browse:open"}],
+                    [{"text": "Cancel", "callback_data": "tp:cancel"}],
+                ]
+            },
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_refreshes() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway bindings",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Gateway bindings\n\n"
+            "🟢 (gateway-project) thread-1\n"
+            "topic `77` • thread `thread-1`\n\n"
+            "Use `/gateway sync` to audit bindings and recover deleted topics.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Refresh", "callback_data": "gw:sessions:refresh"},
+                        {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
+                    ]
+                ]
+            },
+        )
+    ]
+
+    codex.set_thread_title("thread-1", "renamed thread")
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-sessions",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:refresh",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Gateway bindings\n\n"
+        "🟢 (gateway-project) renamed thread\n"
+        "topic `77` • thread `thread-1`\n\n"
+        "Use `/gateway sync` to audit bindings and recover deleted topics.",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "Refresh", "callback_data": "gw:sessions:refresh"},
+                    {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
+                ]
+            ]
+        },
+    )
+    assert telegram.answered_callback_queries[-1] == ("cb-sessions", "Refreshed.")
+
+
+def test_poll_telegram_once_aligned_command_names_show_codex_app_summaries() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway doctor",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway projects",
+    )
+    telegram.push_update(
+        update_id=3,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway threads",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Gateway doctor\n\n"
+            "Chat: `dummy-chat` (supergroup)\n"
+            "Loaded projects: `1`\n"
+            "Loaded threads: `1`\n"
+            "Current topic binding: `thread-1`",
+            None,
+        ),
+        (
+            -100100,
+            77,
+            "Loaded Codex App projects\n\n"
+            "- `gateway-project`\n"
+            "  `/Users/kangmo/sacle/src/gateway-project`",
+            None,
+        ),
+        (
+            -100100,
+            77,
+            "Loaded Codex App threads\n\n"
+            "- `(gateway-project) thread-1`\n"
+            "  status `idle` • id `thread-1`",
+            None,
+        ),
+    ]
+
+
+def test_poll_telegram_once_gateway_sync_audits_and_fix_recovers_dead_topic() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.dead_topics.add((-100100, 77))
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sync",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="event-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="latest reply",
+        )
+    )
+    state.mark_event_seen("thread-1", "event-1")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Gateway sync\n\n"
+            "Loaded Codex App threads: 1\n"
+            "Bound Telegram topics: 1\n"
+            "✓ All loaded threads have Telegram topics\n"
+            "⚠ 1 bound topic(s) were deleted in Telegram",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔧 Fix 1", "callback_data": "gw:sync:fix"},
+                        {"text": "Dismiss", "callback_data": "gw:sync:dismiss"},
+                    ]
+                ]
+            },
+        )
+    ]
+
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-sync",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sync:fix",
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_thread("thread-1")
+    assert rebound.message_thread_id == 1
+    assert telegram.created_topics == [(-100100, "(gateway-project) thread-1")]
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Fixed 1 issue(s).\n\n"
+        "Loaded Codex App threads: 1\n"
+        "Bound Telegram topics: 1\n"
+        "✓ All loaded threads have Telegram topics\n"
+        "✓ All bound Telegram topics are reachable\n\n"
+        "No fixes needed.",
+        None,
+    )
+    assert telegram.answered_callback_queries[-1] == ("cb-sync", "Fixed 1 issue(s).")
+
+
+def test_poll_telegram_once_passthroughs_non_gateway_slash_commands_to_codex() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/doctor",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == []
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=1,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="/doctor",
+        )
+    ]
+
+
+def test_poll_telegram_once_queues_photo_message_for_bound_topic(tmp_path) -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    photo_path = tmp_path / "telegram-photo.jpg"
+    photo_path.write_bytes(b"image-bytes")
+    telegram._updates.append(
+        {
+            "kind": "message",
+            "update_id": 3,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "text": "Please inspect the attachment.",
+            "local_image_paths": (str(photo_path),),
+        }
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=3,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please inspect the attachment.",
+            local_image_paths=(str(photo_path),),
+        )
+    ]
+
+
+def test_poll_telegram_once_queues_message_during_active_turn_and_sends_steer_widget() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-9",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=9,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please add queue metrics.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=9,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please add queue metrics.",
+        )
+    ]
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Queued while Codex is still answering. This will run after the current answer finishes.\n\n"
+            "Queued message:\n"
+            "Please add queue metrics.",
+            {
+                "inline_keyboard": [[{"text": "Steer", "callback_data": "gw:queue:steer:9"}]]
+            },
+        )
+    ]
+
+
+def test_poll_telegram_once_steers_queued_message_into_active_turn() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-9",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=9,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please add queue metrics.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=10,
+        callback_query_id="cb-steer",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:queue:steer:9",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.steered_turns == [
+        (
+            "turn-9",
+            StartedTurn(thread_id="thread-1", text="Please add queue metrics."),
+        )
+    ]
+    assert state.pending_inbound_count() == 0
+    assert telegram.edited_reply_markups[-1] == (-100100, 1, None)
+    assert telegram.answered_callback_queries[-1] == ("cb-steer", "Steered.")
+    assert telegram.sent_chat_actions[-1] == (-100100, 77, "typing")
+
+
+def test_deliver_inbound_once_submits_first_message_to_idle_thread() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=2,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please continue.",
+        )
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(thread_id="thread-1", text="Please continue."),
+    ]
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert state.pending_inbound_count() == 0
+    assert state.get_pending_turn("thread-1") == PendingTurn(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        turn_id="turn-1",
+        waiting_for_approval=False,
+    )
+
+
+def test_deliver_inbound_once_submits_message_to_not_loaded_thread() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="notLoaded",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=3,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Resume from Telegram.",
+        )
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(thread_id="thread-1", text="Resume from Telegram."),
+    ]
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert state.pending_inbound_count() == 0
+    assert state.get_pending_turn("thread-1") is not None
+
+
+def test_deliver_inbound_once_submits_message_with_local_image() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=4,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please inspect the screenshot.",
+            local_image_paths=("/tmp/example-image.png",),
+        )
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-1",
+            text="Please inspect the screenshot.",
+            local_image_paths=("/tmp/example-image.png",),
+        ),
+    ]
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert state.pending_inbound_count() == 0
+    assert state.get_pending_turn("thread-1") is not None
+
+
+def test_sync_codex_once_reports_interrupted_turn_to_telegram() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.next_turn_result = TurnResult(turn_id="turn-9", status="interrupted")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=5,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please continue.",
+        )
+    )
+
+    daemon.deliver_inbound_once()
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Codex started processing your message, but the turn was interrupted before a final answer was produced.",
+            None,
+        )
+    ]
+    assert state.pending_inbound_count() == 0
+    assert state.get_pending_turn("thread-1") is None
+
+
+def test_deliver_inbound_once_keeps_typing_pending_for_approval_blocked_turn() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.next_turn_result = TurnResult(
+        turn_id="turn-10",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=6,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Query the local database.",
+        )
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert state.get_pending_turn("thread-1") == PendingTurn(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        turn_id="turn-10",
+        waiting_for_approval=True,
+    )
+    assert telegram.sent_messages == []
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert state.pending_inbound_count() == 0
+
+
+def test_sync_codex_once_continues_typing_for_approval_blocked_turn() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-10",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-10")] = TurnResult(
+        turn_id="turn-10",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert state.get_pending_turn("thread-1") is not None
+
+
+def test_sync_codex_once_clears_pending_turn_after_matching_reply() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-10",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-10")] = TurnResult(
+        turn_id="turn-10",
+        status="completed",
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-10:item-2",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="The query needs approval first.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 77, "The query needs approval first.", None),
+    ]
+    assert state.get_pending_turn("thread-1") is None
+
+
+def test_poll_telegram_once_shows_project_picker_for_first_unbound_topic_message() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_topic_created_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=88,
+        from_user_id=111,
+        topic_name="lingodb",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=88,
+        from_user_id=111,
+        text="hi",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    topic_project = state.get_topic_project(-100100, 88)
+    assert topic_project == TopicProject(
+        chat_id=-100100,
+        message_thread_id=88,
+        topic_name="lingodb",
+        project_id=None,
+        picker_message_id=1,
+        pending_update_id=2,
+        pending_user_id=111,
+        pending_text="hi",
+    )
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            88,
+            "Select Codex Project\n\n"
+            "Topic: lingodb\n\n"
+            "Choose an existing loaded Codex App project below, or browse folders from your Mac home directory.\n\n"
+            "First message:\n"
+            "hi",
+            {
+                "inline_keyboard": [
+                    [{"text": "📁 gateway-project", "callback_data": "tp:prj:0"}],
+                    [{"text": "📂 Browse Home Folder", "callback_data": "tp:browse:open"}],
+                    [{"text": "Cancel", "callback_data": "tp:cancel"}],
+                ]
+            },
+        )
+    ]
+    assert state.pending_inbound_count() == 0
+
+
+def test_poll_telegram_once_binds_topic_after_project_selection() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_topic_created_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=88,
+        from_user_id=111,
+        topic_name="lingodb",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=88,
+        from_user_id=111,
+        text="hi",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-1",
+        chat_id=-100100,
+        message_thread_id=88,
+        message_id=1,
+        from_user_id=111,
+        data="tp:prj:0",
+    )
+
+    daemon.poll_telegram_once()
+
+    binding = state.get_binding_by_topic(-100100, 88)
+    assert binding.codex_thread_id == "thread-2"
+    assert binding.project_id == "/Users/kangmo/sacle/src/gateway-project"
+    assert binding.topic_name == "(gateway-project) untitled"
+    assert codex.created_threads == [
+        CodexThread(
+            thread_id="thread-2",
+            title="untitled",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    ]
+    assert telegram.edited_topics == [(-100100, 88, "(gateway-project) untitled")]
+    assert telegram.edited_reply_markups == [(-100100, 1, None)]
+    assert telegram.answered_callback_queries == [("cb-1", "Selected gateway-project.")]
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=2,
+            chat_id=-100100,
+            message_thread_id=88,
+            from_user_id=111,
+            codex_thread_id="thread-2",
+            text="hi",
+        )
+    ]
+    assert state.get_topic_project(-100100, 88) is None
+
+
+def test_poll_telegram_once_browses_home_folder_and_binds_selected_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home_path = tmp_path / "home"
+    home_path.mkdir()
+    project_a = home_path / "project-a"
+    project_b = home_path / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    monkeypatch.setattr("codex_telegram_gateway.daemon._browser_home_path", lambda: home_path)
+
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_topic_created_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=91,
+        from_user_id=111,
+        topic_name="new feature",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=91,
+        from_user_id=111,
+        text="please investigate",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-open",
+        chat_id=-100100,
+        message_thread_id=91,
+        message_id=1,
+        from_user_id=111,
+        data="tp:browse:open",
+    )
+    telegram.push_callback_query(
+        update_id=4,
+        callback_query_id="cb-enter",
+        chat_id=-100100,
+        message_thread_id=91,
+        message_id=1,
+        from_user_id=111,
+        data="tp:browse:enter:0",
+    )
+    telegram.push_callback_query(
+        update_id=5,
+        callback_query_id="cb-select",
+        chat_id=-100100,
+        message_thread_id=91,
+        message_id=1,
+        from_user_id=111,
+        data="tp:browse:select",
+    )
+
+    daemon.poll_telegram_once()
+    daemon.poll_telegram_once()
+    daemon.poll_telegram_once()
+
+    binding = state.get_binding_by_topic(-100100, 91)
+    assert binding.codex_thread_id == "thread-2"
+    assert binding.project_id == str(project_a.resolve())
+    assert binding.topic_name == "(project-a) untitled"
+    assert state.get_project(str(project_a.resolve())).project_name == "project-a"
+    assert telegram.edited_messages[:2] == [
+        (
+            -100100,
+            1,
+            "Select Working Directory\n\n"
+            "Current: ~\n\n"
+            "Tap a folder to enter, or select current directory.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "📁 project-a", "callback_data": "tp:browse:enter:0"},
+                        {"text": "📁 project-b", "callback_data": "tp:browse:enter:1"},
+                    ],
+                    [
+                        {"text": "..", "callback_data": "tp:browse:up"},
+                        {"text": "🏠", "callback_data": "tp:browse:home"},
+                        {"text": "Select", "callback_data": "tp:browse:select"},
+                    ],
+                    [
+                        {"text": "← Projects", "callback_data": "tp:browse:back"},
+                        {"text": "Cancel", "callback_data": "tp:cancel"},
+                    ],
+                ]
+            },
+        ),
+        (
+            -100100,
+            1,
+            "Select Working Directory\n\n"
+            "Current: ~/project-a\n\n"
+            "Tap a folder to enter, or select current directory.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "..", "callback_data": "tp:browse:up"},
+                        {"text": "🏠", "callback_data": "tp:browse:home"},
+                        {"text": "Select", "callback_data": "tp:browse:select"},
+                    ],
+                    [
+                        {"text": "← Projects", "callback_data": "tp:browse:back"},
+                        {"text": "Cancel", "callback_data": "tp:cancel"},
+                    ],
+                ]
+            },
+        ),
+    ]
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=2,
+            chat_id=-100100,
+            message_thread_id=91,
+            from_user_id=111,
+            codex_thread_id="thread-2",
+            text="please investigate",
+        )
+    ]
+
+
+def test_sync_codex_once_renames_topic_when_codex_thread_title_changes() -> None:
+    state = DummyState()
+    binding = state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) untitled",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="untitled",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    codex.set_thread_title("thread-1", "actual thread title")
+    daemon.sync_codex_once()
+
+    assert telegram.edited_topics == [(-100100, 77, "(gateway-project) actual thread title")]
+    assert state.get_binding_by_thread(binding.codex_thread_id).topic_name == "(gateway-project) actual thread title"

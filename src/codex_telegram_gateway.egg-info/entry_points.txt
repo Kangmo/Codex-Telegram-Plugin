@@ -1,0 +1,2 @@
+[console_scripts]
+codex-telegram-gateway = codex_telegram_gateway.cli:main

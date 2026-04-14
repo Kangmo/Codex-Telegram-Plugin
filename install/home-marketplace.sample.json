@@ -1,0 +1,20 @@
+{
+  "name": "kangmo-local",
+  "interface": {
+    "displayName": "Kangmo Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "codex-telegram-gateway",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-telegram-gateway"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

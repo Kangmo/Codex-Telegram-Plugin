@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.sample
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+.ccgram-uploads/
+.codex-telegram/
+.codex-plugin/

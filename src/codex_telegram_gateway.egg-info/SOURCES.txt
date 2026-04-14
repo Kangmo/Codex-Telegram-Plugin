@@ -1,0 +1,17 @@
+pyproject.toml
+src/codex_telegram_gateway/__init__.py
+src/codex_telegram_gateway/cli.py
+src/codex_telegram_gateway/codex_api.py
+src/codex_telegram_gateway/config.py
+src/codex_telegram_gateway/daemon.py
+src/codex_telegram_gateway/models.py
+src/codex_telegram_gateway/ports.py
+src/codex_telegram_gateway/service.py
+src/codex_telegram_gateway/state.py
+src/codex_telegram_gateway/telegram_api.py
+src/codex_telegram_gateway.egg-info/PKG-INFO
+src/codex_telegram_gateway.egg-info/SOURCES.txt
+src/codex_telegram_gateway.egg-info/dependency_links.txt
+src/codex_telegram_gateway.egg-info/entry_points.txt
+src/codex_telegram_gateway.egg-info/requires.txt
+src/codex_telegram_gateway.egg-info/top_level.txt
