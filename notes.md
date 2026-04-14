@@ -147,3 +147,28 @@
 - transcript history browsers
 - provider command discovery beyond the gateway’s own commands
 - tmux/provider-specific orphan adoption, kill flows, and recovery callbacks
+
+## ccgram Parity Plan Notes
+
+### Deliverable
+- `ccgram_feature_parity_plan.md`
+
+### Planning focus
+- Convert the missing-feature inventory from the line-by-line `ccgram` review into a structured implementation roadmap.
+- Keep the plan explicit about what is:
+  - directly portable
+  - adapted to Codex App
+  - compatibility-only
+  - intentionally deferred
+
+### Highest-priority parity targets
+- Topic lifecycle ingestion and recovery
+- `/history`, `/resume`, `/unbind`, `/restore`, `/send`, `/verbose`
+- Richer sessions dashboard and status bubble
+- Interactive prompt bridge if Codex app-server supports it
+- Generalized media intake and outbound artifact delivery
+
+### Explicitly deferred or compatibility-only
+- `/panes` as compatibility messaging only
+- inter-agent mailbox
+- shell/NL-to-command provider mode

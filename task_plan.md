@@ -1,33 +1,25 @@
-# Task Plan: ccgram Feature Sweep
+# Task Plan: ccgram Parity Planning
 
 ## Goal
-Adopt as many high-value Telegram gateway behaviors from `ccgram` as fit the current Codex App architecture, with working code and tests.
+Produce a feature-by-feature parity plan for the missing `ccgram` Telegram gateway behaviors, with detailed design, implementation, and automated test strategy.
 
 ## Phases
 - [x] Phase 1: Review current gateway and `ccgram` source
-- [x] Phase 2: Port the highest-value missing behaviors
-- [x] Phase 3: Test and document the sweep
+- [x] Phase 2: Enumerate missing and partial-parity features
+- [x] Phase 3: Write the dedicated parity plan document
+- [x] Phase 4: Update notes and deliver the plan path
 
 ## Key Questions
-1. Which `ccgram` behaviors transfer directly to a Codex App gateway without tmux/session infrastructure?
-2. Which missing Telegram-side UX pieces matter most right now?
-3. Which `ccgram` features depend on tmux/provider hooks and therefore should not be copied blindly?
+1. Which `ccgram` features are directly portable to a Codex App gateway?
+2. Which features need an app-native redesign rather than a tmux-style port?
+3. Which features should remain compatibility-only or deferred?
 
 ## Decisions Made
-- Focus this pass on Telegram-native features that fit the current architecture: command handling, command menu registration, topic/title sync, and in-place message growth.
-- Do not try to port tmux-, pane-, or provider-specific `ccgram` flows into this Codex App gateway.
-- Keep one topic mapped to one Codex thread, and use commands to create/rebind threads within that constraint.
+- Keep the parity plan separate from the older implementation plan so the `ccgram` gap review stays actionable.
+- Preserve `codex_thread_id <-> telegram topic id` as the primary routing model.
+- Mark tmux-only features as adapted or compatibility-only rather than pretending direct parity exists.
 
 ## Errors Encountered
 
 ## Status
-**Completed** - the gateway now includes a broader `ccgram`-style Telegram UX surface on top of the Codex App bridge:
-- bot command menu registration
-- topic commands: `/new`, `/start`, `/project`, `/status`, `/sessions`, `/sync`, `/commands`, `/help`
-- in-place Telegram message growth for active Codex assistant blocks
-- automatic adoption of newly loaded Codex App threads during sync
-- `/sync` audit and fix flow for unbound loaded threads and deleted Telegram topics
-- `/sessions` dashboard with refresh
-
-Remaining live step:
-- restart or reload the running Codex App plugin process if you want the installed plugin instance to pick up the latest code immediately
+**Completed** - the parity planning deliverable is written in `ccgram_feature_parity_plan.md` and recorded in `notes.md`.
