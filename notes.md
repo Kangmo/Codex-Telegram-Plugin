@@ -463,6 +463,8 @@
 ### FP-26 verification
 - Branch and merge:
   - feature branch `feature/fp-26-voice-transcription-flow`
+  - feature commit `040e4c0`
+  - merge commit on `main` `9dc93ae`
 - Reviewed `ccgram` voice flow in `handlers/voice_handler.py`, `handlers/voice_callbacks.py`, and the `whisper/` provider layer before implementation.
 - Added `voice_ingest.py` with a pluggable transcription interface, OpenAI-compatible multipart uploads, and the confirm/discard widget helpers.
 - `TelegramBotClient.get_updates()` now downloads voice notes into `.ccgram-uploads` and emits dedicated `voice_message` updates.

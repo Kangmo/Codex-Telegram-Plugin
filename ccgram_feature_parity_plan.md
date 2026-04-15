@@ -1938,6 +1938,8 @@ Match `ccgram`’s voice-message workflow with confirm/discard behavior.
 
 - Branch and merge:
   - feature branch `feature/fp-26-voice-transcription-flow`
+  - feature commit `040e4c0`
+  - merge commit on `main` `9dc93ae`
 - Reviewed `ccgram` voice-handling references before coding the parity path:
   - `src/ccgram/handlers/voice_handler.py`
   - `src/ccgram/handlers/voice_callbacks.py`
