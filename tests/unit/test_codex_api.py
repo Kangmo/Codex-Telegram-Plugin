@@ -261,6 +261,50 @@ def test_list_history_entries_normalizes_user_assistant_and_command_items() -> N
     ]
 
 
+def test_list_events_builds_tool_batches_and_terminal_summary_from_thread_read() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+
+    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "thread/read"
+        assert params == {"threadId": "thread-1", "includeTurns": True}
+        return {
+            "thread": {
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "status": "failed",
+                        "items": [
+                            {
+                                "id": "cmd-1",
+                                "type": "commandExecution",
+                                "command": "pytest -q",
+                                "exitCode": 1,
+                                "aggregatedOutput": "tests failed\nAssertionError: boom",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    assert client.list_events("thread-1") == [
+        __import__("codex_telegram_gateway.models", fromlist=["CodexEvent"]).CodexEvent(
+            event_id="thread-1:turn-1:tool-batch:0",
+            thread_id="thread-1",
+            kind="tool_batch",
+            text="⚡ 1 command\n• pytest -q  ❌ AssertionError: boom",
+        ),
+        __import__("codex_telegram_gateway.models", fromlist=["CodexEvent"]).CodexEvent(
+            event_id="thread-1:turn-1:completion-summary",
+            thread_id="thread-1",
+            kind="completion_summary",
+            text="⚠ Turn failed — pytest -q: AssertionError: boom",
+        ),
+    ]
+
+
 def test_list_resumable_threads_uses_app_store_threads_and_marks_unloaded() -> None:
     client = CodexAppServerClient.__new__(CodexAppServerClient)
     client._codex_home = __import__("pathlib").Path("/tmp/.codex")  # type: ignore[attr-defined]

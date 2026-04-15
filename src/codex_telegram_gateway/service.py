@@ -143,9 +143,9 @@ class GatewayService:
             )
         )
         self._state.delete_outbound_messages(codex_thread_id)
-        latest_assistant_event_id = _latest_assistant_event_id(self._codex.list_events(codex_thread_id))
-        if latest_assistant_event_id is not None:
-            self._state.delete_seen_event(codex_thread_id, latest_assistant_event_id)
+        latest_event_id = _latest_visible_event_id(self._codex.list_events(codex_thread_id))
+        if latest_event_id is not None:
+            self._state.delete_seen_event(codex_thread_id, latest_event_id)
         self._queue_mirror_creation_jobs(
             recreated_binding,
             thread_title=thread.title,
@@ -240,8 +240,8 @@ def _normalize_thread_title(thread_title: str, limit: int = 96) -> str:
     return collapsed[: limit - 1].rstrip() + "…"
 
 
-def _latest_assistant_event_id(events) -> str | None:
+def _latest_visible_event_id(events) -> str | None:
     for event in reversed(list(events)):
-        if event.kind == "assistant_message":
+        if event.kind in {"assistant_message", "tool_batch", "completion_summary"}:
             return event.event_id
     return None

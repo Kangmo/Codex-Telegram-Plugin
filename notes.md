@@ -191,6 +191,7 @@
 - FP-18 Full sessions dashboard
 - FP-19 Interactive prompt bridge
 - FP-20 Dedicated status bubble
+- FP-21 Tool batching, failure probing, and completion summaries
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -385,3 +386,22 @@
   - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
   - `src/codex_telegram_gateway/status_bubble.py`: `0/0 = 100.0%`
   - `TOTAL`: `74/88 = 84.1%`
+
+### FP-21 verification
+- Added `response_builder.py` so Codex App `commandExecution` items are normalized into stable `tool_batch` and `completion_summary` outbound events rather than leaking raw command spam into Telegram.
+- `CodexAppServerClient.list_events()` now delegates to that builder, and the daemon now renders `tool_batch` plus `completion_summary` events with the existing message edit-in-place flow.
+- Recreated topics now replay the latest visible event instead of only the latest assistant event, which covers tool-batch and completion-summary output too.
+- Proofread fixes landed before sign-off:
+  - failure probing now prefers concrete lines such as `AssertionError: boom` over vague `tests failed` summaries
+  - turns with an early assistant note and a final command batch still emit a terminal summary
+  - explicit completion-summary events suppress the old generic terminal failure alert for the same turn
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_response_builder.py tests/unit/test_codex_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `164 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `274 passed`
+- Feature-specific changed-executable coverage:
+  - `src/codex_telegram_gateway/response_builder.py`: `117/138 = 84.8%`
+  - `src/codex_telegram_gateway/codex_api.py` changed executable lines: `2/2 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `14/14 = 100.0%`
+  - `src/codex_telegram_gateway/service.py` changed executable lines: `5/5 = 100.0%`
+  - `TOTAL`: `138/159 = 86.8%`

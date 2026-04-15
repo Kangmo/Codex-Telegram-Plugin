@@ -22,6 +22,7 @@ from codex_telegram_gateway.models import (
     StartedTurn,
     TurnResult,
 )
+from codex_telegram_gateway.response_builder import build_outbound_events
 
 
 class CodexAppServerError(RuntimeError):
@@ -134,24 +135,7 @@ class CodexAppServerClient:
             {"threadId": thread_id, "includeTurns": True},
         )
         thread = response["thread"]
-        events: list[CodexEvent] = []
-        for turn in thread["turns"]:
-            turn_id = str(turn["id"])
-            for item in turn["items"]:
-                if item.get("type") != "agentMessage":
-                    continue
-                if item.get("phase") == "commentary":
-                    continue
-                event_id = f"{thread_id}:{turn_id}:{item['id']}"
-                events.append(
-                    CodexEvent(
-                        event_id=event_id,
-                        thread_id=thread_id,
-                        kind="assistant_message",
-                        text=str(item["text"]),
-                    )
-                )
-        return events
+        return build_outbound_events(thread_id, thread["turns"])
 
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         response = self._request(

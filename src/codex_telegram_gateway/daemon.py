@@ -172,7 +172,7 @@ class GatewayDaemon:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
             thread = self._codex.read_thread(binding.codex_thread_id)
             events = self._codex.list_events(binding.codex_thread_id)
-            latest_summary = _latest_assistant_summary(events)
+            latest_summary = _latest_visible_summary(events)
             active_targets: list[Binding] = []
             for target in targets:
                 if target.binding_status == DELETED_BINDING_STATUS:
@@ -217,6 +217,11 @@ class GatewayDaemon:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
 
             self._sync_interactive_prompt_for_binding(binding)
+            active_turn_has_completion_summary = any(
+                getattr(event, "kind", None) == "completion_summary"
+                and _event_turn_id(event.event_id) == pending_turn.turn_id
+                for event in events
+            )
 
             if turn_result.waiting_for_approval or not _is_terminal_turn_status(turn_result.status):
                 for target in active_targets:
@@ -250,7 +255,11 @@ class GatewayDaemon:
                         TOPIC_STATUS_FAILED,
                     )
                 self._clear_typing_state(target.chat_id, target.message_thread_id)
-                if target.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
+                if (
+                    target.binding_status == ACTIVE_BINDING_STATUS
+                    and turn_result.status != "completed"
+                    and not active_turn_has_completion_summary
+                ):
                     self._send_binding_notification(
                         target,
                         text=_turn_status_text(turn_result.status),
@@ -393,7 +402,7 @@ class GatewayDaemon:
             return
 
     def _sync_outbound_event(self, binding, event, *, active_turn_result: TurnResult | None = None) -> None:
-        if event.kind != "assistant_message":
+        if not _is_renderable_event_kind(event.kind):
             return
         reply_markup = self._assistant_reply_markup(binding, active_turn_result)
 
@@ -3950,17 +3959,27 @@ def _history_entry_label(entry: TopicHistoryEntry, limit: int = 20) -> str:
     return label[: limit - 1].rstrip() + "…"
 
 
-def _latest_assistant_summary(events: list) -> str | None:
+def _latest_visible_summary(events: list) -> str | None:
     for event in reversed(events):
-        if getattr(event, "kind", None) != "assistant_message":
+        kind = getattr(event, "kind", None)
+        if kind not in {"assistant_message", "completion_summary", "tool_batch"}:
             continue
         text = " ".join(str(getattr(event, "text", "")).split()).strip()
         if not text:
             continue
+        if kind == "tool_batch":
+            last_line = str(getattr(event, "text", "")).splitlines()[-1].strip()
+            text = " ".join(last_line.split())
+            if text.startswith("• "):
+                text = text[2:]
         if len(text) <= 120:
             return text
         return text[:119].rstrip() + "…"
     return None
+
+
+def _is_renderable_event_kind(kind: object) -> bool:
+    return kind in {"assistant_message", "tool_batch", "completion_summary"}
 
 
 def _event_turn_id(event_id: str) -> str | None:

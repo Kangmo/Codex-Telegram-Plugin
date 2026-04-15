@@ -6849,3 +6849,118 @@ def test_poll_telegram_once_status_bubble_callback_reuses_response_actions() -> 
             None,
         )
     ]
+
+
+def test_sync_codex_once_edits_same_tool_batch_message_as_commands_accumulate() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:tool-batch:0",
+            thread_id="thread-1",
+            kind="tool_batch",
+            text="⚡ 1 command\n• pwd  ⏳ running",
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    codex.replace_event(
+        "thread-1",
+        "thread-1:turn-1:tool-batch:0",
+        "⚡ 2 commands\n• pwd  ✅ /tmp/project\n• pytest -q  ⏳ running",
+    )
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "⚡ 1 command\n• pwd  ⏳ running", None)
+    ]
+    assert non_bubble_edited_messages(telegram) == [
+        (-100100, 1, "⚡ 2 commands\n• pwd  ✅ /tmp/project\n• pytest -q  ⏳ running", None)
+    ]
+
+
+def test_sync_codex_once_emits_terminal_summary_for_tool_only_turns() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:tool-batch:0",
+            thread_id="thread-1",
+            kind="tool_batch",
+            text="⚡ 1 command\n• pytest -q  ❌ AssertionError: boom",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:completion-summary",
+            thread_id="thread-1",
+            kind="completion_summary",
+            text="⚠ Turn failed — pytest -q: AssertionError: boom",
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="failed")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "⚡ 1 command\n• pytest -q  ❌ AssertionError: boom", None),
+        (-100100, 77, "⚠ Turn failed — pytest -q: AssertionError: boom", None),
+    ]
+    assert telegram.edited_reply_markups[-1] == (
+        -100100,
+        2,
+        {
+            "inline_keyboard": [
+                [{"text": "⚠ Turn Failed", "callback_data": "gw:resp:noop"}],
+            ]
+        },
+    )
