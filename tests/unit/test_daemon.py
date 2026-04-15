@@ -2,6 +2,12 @@ import pytest
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon, _mirror_control_text, _parse_topic_name
 from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
+from codex_telegram_gateway.recovery import (
+    CALLBACK_RESTORE_CANCEL,
+    CALLBACK_RESTORE_CONTINUE,
+    CALLBACK_RESTORE_RECREATE,
+    CALLBACK_RESTORE_RESUME,
+)
 from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_CANCEL,
     CALLBACK_RESUME_PAGE_PREFIX,
@@ -22,6 +28,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     StartedTurn,
     TopicCreationJob,
@@ -1213,6 +1220,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway threads - List loaded Codex App threads\n"
             "/gateway history - Show paginated history for this Codex thread\n"
             "/gateway resume - Resume another Codex thread from this project\n"
+            "/gateway restore - Show recovery options for this topic\n"
             "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
             "/gateway bindings - List Codex thread to Telegram topic bindings\n"
             "/gateway create_thread - Create a new Codex thread in this topic\n"
@@ -1423,6 +1431,636 @@ def test_poll_telegram_once_gateway_unbind_rejects_mirror_topic_controls() -> No
     assert state.get_binding_by_thread("thread-1").message_thread_id == 77
     assert state.get_mirror_binding_by_topic(-100200, 88) is not None
     assert telegram.sent_messages == [(-100200, 88, _mirror_control_text(), None)]
+
+
+def test_poll_telegram_once_gateway_restore_opens_menu_for_closed_binding() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway restore",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Recovery options\n\n"
+            "Topic: `(gateway-project) thread-1`\n"
+            "Thread id: `thread-1`\n\n"
+            "This topic is currently marked closed, so new messages are not being routed to Codex.\n"
+            "Choose how to restore it.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Continue Here", "callback_data": CALLBACK_RESTORE_CONTINUE},
+                        {"text": "Resume Other Thread", "callback_data": CALLBACK_RESTORE_RESUME},
+                    ],
+                    [{"text": "Cancel", "callback_data": CALLBACK_RESTORE_CANCEL}],
+                ]
+            },
+        )
+    ]
+    assert state.get_restore_view(-100100, 77) == RestoreViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+        issue_kind="closed",
+    )
+
+
+def test_poll_telegram_once_closed_binding_message_shows_restore_prompt() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please continue.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.pending_inbound_count() == 0
+    assert telegram.sent_messages[0][2].startswith("Recovery options")
+    assert state.get_restore_view(-100100, 77) is not None
+
+
+def test_poll_telegram_once_restore_continue_reactivates_closed_binding() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-continue",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == ACTIVE_BINDING_STATUS
+    assert state.get_restore_view(-100100, 77) is None
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            15,
+            "Restored this topic in place.\nThread id: `thread-1`",
+            None,
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-restore-continue", "Restored.")]
+
+
+def test_poll_telegram_once_restore_recreate_recovers_deleted_binding() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=DELETED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="deleted",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-recreate",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_RECREATE,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_thread("thread-1")
+    assert rebound.binding_status == ACTIVE_BINDING_STATUS
+    assert rebound.message_thread_id == 1
+    assert state.get_restore_view(-100100, 77) is None
+    assert telegram.created_topics == [(-100100, "(gateway-project) thread-1")]
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            15,
+            "Recreated the Telegram topic for this Codex thread.\n"
+            "New topic id: `1`\n"
+            "Thread id: `thread-1`",
+            None,
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-restore-recreate", "Recreated.")]
+
+
+def test_poll_telegram_once_restore_resume_reuses_resume_picker() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-resume",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_RESUME,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "older thread")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_restore_view(-100100, 77) is None
+    assert state.get_resume_view(-100100, 77) == ResumeViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        page_index=0,
+    )
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            15,
+            "⏪ Resume Codex Thread\n\n"
+            "Project: `gateway-project`\n"
+            "Available threads: `1`\n\n"
+            "Choose an existing thread to bind to this topic.",
+            {
+                "inline_keyboard": [
+                    [{"text": "🟢 older thread", "callback_data": "gw:resume:pick:thread-2"}],
+                    [{"text": "1/1", "callback_data": "tp:noop"}],
+                    [{"text": "Cancel", "callback_data": "gw:resume:cancel"}],
+                ]
+            },
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-restore-resume", "Choose a thread.")]
+
+
+def test_poll_telegram_once_gateway_restore_reports_unbound_topic() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway restore",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [(-100100, 77, "This topic is not bound to any Codex thread.", None)]
+
+
+def test_poll_telegram_once_gateway_restore_reports_healthy_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=99,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway restore",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_restore_view(-100100, 77) is None
+    assert telegram.sent_messages == [(-100100, 77, "Nothing to restore. This topic is already healthy.", None)]
+
+
+def test_poll_telegram_once_restore_cancel_clears_menu() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-cancel",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CANCEL,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_restore_view(-100100, 77) is None
+    assert telegram.edited_reply_markups == [(-100100, 15, None)]
+    assert telegram.answered_callback_queries == [("cb-restore-cancel", "Cancelled.")]
+
+
+def test_poll_telegram_once_restore_callback_rejects_unbound_or_stale_menu() -> None:
+    state = DummyState()
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-unbound",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    state.delete_binding("thread-1")
+    daemon.poll_telegram_once()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-restore-stale",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=99,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries == [
+        ("cb-restore-unbound", "This topic is no longer eligible for recovery."),
+        ("cb-restore-stale", "This recovery menu is stale."),
+    ]
+
+
+def test_poll_telegram_once_restore_callback_handles_issue_drift_and_unknown_actions() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="deleted",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-refresh",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-restore-unknown",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:restore:unknown",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[0][2].startswith("Recovery options")
+    assert telegram.answered_callback_queries == [
+        ("cb-restore-refresh", "Recovery state changed. Refreshed."),
+        ("cb-restore-unknown", "Unknown recovery action."),
+    ]
+
+
+def test_poll_telegram_once_restore_callback_rejects_wrong_issue_actions_and_healthy_state() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=DELETED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="deleted",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-restore-wrong-continue",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-restore-wrong-recreate",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_RECREATE,
+    )
+    daemon.poll_telegram_once()
+    state.create_binding(make_binding())
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-restore-healthy",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=CALLBACK_RESTORE_CONTINUE,
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries == [
+        ("cb-restore-wrong-continue", "Continue here is not available for this issue."),
+        ("cb-restore-wrong-recreate", "Recreate is not available for this issue."),
+        ("cb-restore-healthy", "Already healthy."),
+    ]
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        15,
+        "Nothing to restore. This topic is already healthy.",
+        None,
+    )
+
+
+def test_poll_telegram_once_closed_binding_reuses_existing_restore_prompt_message() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_restore_view(
+        RestoreViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            issue_kind="closed",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please continue.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == []
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            15,
+            "Recovery options\n\n"
+            "Topic: `(gateway-project) thread-1`\n"
+            "Thread id: `thread-1`\n\n"
+            "This topic is currently marked closed, so new messages are not being routed to Codex.\n"
+            "Choose how to restore it.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Continue Here", "callback_data": CALLBACK_RESTORE_CONTINUE},
+                        {"text": "Resume Other Thread", "callback_data": CALLBACK_RESTORE_RESUME},
+                    ],
+                    [{"text": "Cancel", "callback_data": CALLBACK_RESTORE_CANCEL}],
+                ]
+            },
+        )
+    ]
 
 
 def test_poll_telegram_once_gateway_history_renders_latest_page_and_persists_view() -> None:

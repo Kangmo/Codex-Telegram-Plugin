@@ -162,6 +162,17 @@ class ResumeViewState:
 
 
 @dataclass(frozen=True)
+class RestoreViewState:
+    """Persisted Telegram restore-menu context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+    issue_kind: str
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 

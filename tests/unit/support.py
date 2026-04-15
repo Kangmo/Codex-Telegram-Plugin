@@ -8,6 +8,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     TopicCreationJob,
     StartedTurn,
@@ -38,6 +39,7 @@ class DummyState:
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
+        self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
@@ -285,6 +287,16 @@ class DummyState:
 
     def delete_resume_view(self, chat_id: int, message_thread_id: int) -> None:
         self.resume_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_restore_view(self, restore_view: RestoreViewState) -> RestoreViewState:
+        self.restore_views[(restore_view.chat_id, restore_view.message_thread_id)] = restore_view
+        return restore_view
+
+    def get_restore_view(self, chat_id: int, message_thread_id: int) -> RestoreViewState | None:
+        return self.restore_views.get((chat_id, message_thread_id))
+
+    def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.restore_views.pop((chat_id, message_thread_id), None)
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self.pending_turns[pending_turn.codex_thread_id] = pending_turn
