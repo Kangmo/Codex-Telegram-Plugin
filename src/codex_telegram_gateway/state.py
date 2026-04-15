@@ -17,6 +17,7 @@ from codex_telegram_gateway.models import (
     ResumeViewState,
     SendViewState,
     StatusBubbleViewState,
+    MailboxMessage,
     ToolbarViewState,
     TopicCreationJob,
     TopicLifecycle,
@@ -146,6 +147,19 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 text TEXT NOT NULL,
                 local_image_paths_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS mailbox_messages (
+                message_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT UNIQUE,
+                from_thread_id TEXT NOT NULL,
+                to_thread_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at REAL NOT NULL,
+                reply_to_message_id TEXT,
+                delivered_at REAL,
+                read_at REAL
             );
 
             CREATE TABLE IF NOT EXISTS history_views (
@@ -984,6 +998,145 @@ class SqliteGatewayState:
             (chat_id, message_thread_id),
         )
         self._connection.commit()
+
+    def create_mailbox_message(
+        self,
+        *,
+        from_thread_id: str,
+        to_thread_id: str,
+        body: str,
+        reply_to_message_id: str | None = None,
+    ) -> MailboxMessage:
+        created_at = time.time()
+        cursor = self._connection.execute(
+            """
+            INSERT INTO mailbox_messages (
+                from_thread_id,
+                to_thread_id,
+                body,
+                status,
+                created_at,
+                reply_to_message_id
+            ) VALUES (?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                from_thread_id,
+                to_thread_id,
+                body,
+                created_at,
+                reply_to_message_id,
+            ),
+        )
+        message_id = f"mail-{int(cursor.lastrowid)}"
+        self._connection.execute(
+            """
+            UPDATE mailbox_messages
+            SET message_id = ?
+            WHERE message_seq = ?
+            """,
+            (message_id, cursor.lastrowid),
+        )
+        self._connection.commit()
+        message = self.get_mailbox_message(message_id)
+        if message is None:
+            raise KeyError(message_id)
+        return message
+
+    def get_mailbox_message(self, message_id: str) -> MailboxMessage | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                message_id,
+                from_thread_id,
+                to_thread_id,
+                body,
+                status,
+                created_at,
+                reply_to_message_id,
+                delivered_at,
+                read_at
+            FROM mailbox_messages
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._mailbox_message_from_row(row)
+
+    def list_mailbox_inbox(
+        self,
+        codex_thread_id: str,
+        *,
+        include_read: bool = False,
+        limit: int = 20,
+    ) -> list[MailboxMessage]:
+        query = """
+            SELECT
+                message_id,
+                from_thread_id,
+                to_thread_id,
+                body,
+                status,
+                created_at,
+                reply_to_message_id,
+                delivered_at,
+                read_at
+            FROM mailbox_messages
+            WHERE to_thread_id = ?
+        """
+        params: list[object] = [codex_thread_id]
+        if not include_read:
+            query += " AND status != 'read'"
+        query += " ORDER BY message_seq DESC LIMIT ?"
+        params.append(limit)
+        rows = self._connection.execute(query, tuple(params)).fetchall()
+        return [self._mailbox_message_from_row(row) for row in rows]
+
+    def list_pending_mailbox_messages(self) -> list[MailboxMessage]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                message_id,
+                from_thread_id,
+                to_thread_id,
+                body,
+                status,
+                created_at,
+                reply_to_message_id,
+                delivered_at,
+                read_at
+            FROM mailbox_messages
+            WHERE status = 'pending'
+            ORDER BY message_seq ASC
+            """
+        ).fetchall()
+        return [self._mailbox_message_from_row(row) for row in rows]
+
+    def mark_mailbox_delivered(self, message_id: str) -> None:
+        self._connection.execute(
+            """
+            UPDATE mailbox_messages
+            SET status = 'delivered', delivered_at = ?
+            WHERE message_id = ?
+            """,
+            (time.time(), message_id),
+        )
+        self._connection.commit()
+
+    def mark_mailbox_read(self, message_id: str, *, codex_thread_id: str) -> MailboxMessage | None:
+        cursor = self._connection.execute(
+            """
+            UPDATE mailbox_messages
+            SET status = 'read', read_at = ?
+            WHERE message_id = ? AND to_thread_id = ?
+            """,
+            (time.time(), message_id, codex_thread_id),
+        )
+        self._connection.commit()
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_mailbox_message(message_id)
 
     def remember_passthrough_command(self, command_name: str) -> bool:
         cursor = self._connection.execute(
@@ -1997,6 +2150,20 @@ class SqliteGatewayState:
             last_inbound_at=row["last_inbound_at"],
             last_outbound_at=row["last_outbound_at"],
             completed_at=row["completed_at"],
+        )
+
+    @staticmethod
+    def _mailbox_message_from_row(row: sqlite3.Row) -> MailboxMessage:
+        return MailboxMessage(
+            message_id=row["message_id"],
+            from_thread_id=row["from_thread_id"],
+            to_thread_id=row["to_thread_id"],
+            body=row["body"],
+            status=row["status"],
+            created_at=row["created_at"],
+            reply_to_message_id=row["reply_to_message_id"],
+            delivered_at=row["delivered_at"],
+            read_at=row["read_at"],
         )
 
     def _ensure_bindings_column(self, column_name: str, column_type: str) -> None:

@@ -27,6 +27,15 @@ from codex_telegram_gateway.live_view import (
     parse_live_view_callback,
     render_live_view_caption,
 )
+from codex_telegram_gateway.mailbox_commands import (
+    MailboxPeer,
+    parse_mailbox_command,
+    render_mailbox_delivery_text,
+    render_mailbox_help,
+    render_mailbox_peers,
+    render_mailbox_recipient_notice,
+    render_mailbox_send_ack,
+)
 from codex_telegram_gateway.remote_actions import (
     CALLBACK_REMOTE_ACTION_PREFIX,
     RemoteActionContext,
@@ -473,6 +482,7 @@ class GatewayDaemon:
             )
             self._state.mark_inbound_delivered(inbound_message.telegram_update_id)
             return
+        self._deliver_mailbox_once()
 
     def _sync_outbound_event(self, binding, event, *, active_turn_result: TurnResult | None = None) -> None:
         if _is_artifact_event_kind(event.kind):
@@ -3837,6 +3847,15 @@ class GatewayDaemon:
             self._show_toolbar(chat_id, message_thread_id)
             return
 
+        if command_name == "msg":
+            self._handle_mailbox_command(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                binding=binding,
+                command_args=command_args,
+            )
+            return
+
         if command_name == "create_thread":
             if binding is not None and not self._is_primary_binding(binding):
                 self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
@@ -4399,6 +4418,236 @@ class GatewayDaemon:
             )
         return "\n".join(lines)
 
+    def _handle_mailbox_command(
+        self,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+        binding: Binding | None,
+        command_args: str,
+    ) -> None:
+        if binding is None:
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                "This topic is not bound to any Codex thread.",
+            )
+            return
+
+        command = parse_mailbox_command(command_args)
+        if command.action == "help":
+            self._telegram.send_message(chat_id, message_thread_id, render_mailbox_help())
+            return
+
+        thread = self._codex.read_thread(binding.codex_thread_id)
+
+        if command.action == "peers":
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                render_mailbox_peers(self._mailbox_peers(current_thread_id=thread.thread_id)),
+            )
+            return
+
+        if command.action == "send":
+            recipient_thread_id = command.recipient_thread_id or ""
+            if not recipient_thread_id or not command.body:
+                self._telegram.send_message(chat_id, message_thread_id, "Usage: /gateway msg send <thread-id> <body>")
+                return
+            if recipient_thread_id == thread.thread_id:
+                self._telegram.send_message(chat_id, message_thread_id, "Cannot send a mailbox message to the current thread.")
+                return
+            try:
+                recipient_binding = self._state.get_binding_by_thread(recipient_thread_id)
+            except KeyError:
+                self._telegram.send_message(chat_id, message_thread_id, f"Recipient thread `{recipient_thread_id}` is not bound.")
+                return
+            recipient_thread = self._codex.read_thread(recipient_thread_id)
+            message = self._state.create_mailbox_message(
+                from_thread_id=thread.thread_id,
+                to_thread_id=recipient_thread_id,
+                body=command.body,
+            )
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                render_mailbox_send_ack(message_id=message.message_id, recipient_title=recipient_thread.title),
+            )
+            if recipient_binding.binding_status == ACTIVE_BINDING_STATUS:
+                self._telegram.send_message(
+                    recipient_binding.chat_id,
+                    recipient_binding.message_thread_id,
+                    render_mailbox_recipient_notice(message_id=message.message_id, sender_title=thread.title),
+                )
+            return
+
+        if command.action == "broadcast":
+            if not command.body:
+                self._telegram.send_message(chat_id, message_thread_id, "Usage: /gateway msg broadcast <body>")
+                return
+            peers = [
+                peer
+                for peer in self._mailbox_peers(current_thread_id=thread.thread_id)
+                if not peer.is_current
+            ]
+            if not peers:
+                self._telegram.send_message(chat_id, message_thread_id, "No bound peer threads available for broadcast.")
+                return
+            for peer in peers:
+                message = self._state.create_mailbox_message(
+                    from_thread_id=thread.thread_id,
+                    to_thread_id=peer.thread_id,
+                    body=command.body,
+                )
+                recipient_binding = self._state.get_binding_by_thread(peer.thread_id)
+                if recipient_binding.binding_status == ACTIVE_BINDING_STATUS:
+                    self._telegram.send_message(
+                        recipient_binding.chat_id,
+                        recipient_binding.message_thread_id,
+                        render_mailbox_recipient_notice(message_id=message.message_id, sender_title=thread.title),
+                    )
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                f"Queued {len(peers)} mailbox message(s) for broadcast.",
+            )
+            return
+
+        if command.action == "inbox":
+            inbox = self._state.list_mailbox_inbox(thread.thread_id)
+            if not inbox:
+                self._telegram.send_message(chat_id, message_thread_id, "Mailbox inbox is empty.")
+                return
+            lines = ["Mailbox inbox:"]
+            for message in inbox:
+                sender = self._codex.read_thread(message.from_thread_id)
+                lines.append(f"- `{message.message_id}` from `{sender.title}` · {message.status}")
+            self._telegram.send_message(chat_id, message_thread_id, "\n".join(lines))
+            return
+
+        if command.action == "read":
+            if not command.message_id:
+                self._telegram.send_message(chat_id, message_thread_id, "Usage: /gateway msg read <message-id>")
+                return
+            message = self._state.mark_mailbox_read(command.message_id, codex_thread_id=thread.thread_id)
+            if message is None:
+                self._telegram.send_message(chat_id, message_thread_id, f"Mailbox message `{command.message_id}` was not found.")
+                return
+            sender = self._codex.read_thread(message.from_thread_id)
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                f"Mailbox message `{message.message_id}`\nFrom: `{sender.title}`\nStatus: `{message.status}`\n\n{message.body}",
+            )
+            return
+
+        if command.action == "reply":
+            if not command.message_id or not command.body:
+                self._telegram.send_message(chat_id, message_thread_id, "Usage: /gateway msg reply <message-id> <body>")
+                return
+            original = self._state.get_mailbox_message(command.message_id)
+            if original is None or original.to_thread_id != thread.thread_id:
+                self._telegram.send_message(chat_id, message_thread_id, f"Mailbox message `{command.message_id}` was not found.")
+                return
+            try:
+                recipient_binding = self._state.get_binding_by_thread(original.from_thread_id)
+            except KeyError:
+                self._telegram.send_message(chat_id, message_thread_id, f"Reply target `{original.from_thread_id}` is not bound.")
+                return
+            recipient_thread = self._codex.read_thread(original.from_thread_id)
+            reply = self._state.create_mailbox_message(
+                from_thread_id=thread.thread_id,
+                to_thread_id=original.from_thread_id,
+                body=command.body,
+                reply_to_message_id=original.message_id,
+            )
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                render_mailbox_send_ack(message_id=reply.message_id, recipient_title=recipient_thread.title),
+            )
+            if recipient_binding.binding_status == ACTIVE_BINDING_STATUS:
+                self._telegram.send_message(
+                    recipient_binding.chat_id,
+                    recipient_binding.message_thread_id,
+                    render_mailbox_recipient_notice(message_id=reply.message_id, sender_title=thread.title),
+                )
+            return
+
+        self._telegram.send_message(chat_id, message_thread_id, render_mailbox_help())
+
+    def _mailbox_peers(self, *, current_thread_id: str) -> list[MailboxPeer]:
+        loaded_threads = {
+            thread.thread_id: thread
+            for thread in self._codex.list_loaded_threads()
+        }
+        peers: list[MailboxPeer] = []
+        for binding in self._state.list_bindings():
+            if binding.binding_status != ACTIVE_BINDING_STATUS:
+                continue
+            thread = loaded_threads.get(binding.codex_thread_id)
+            if thread is None:
+                continue
+            project_name = Path(binding.project_id or thread.cwd or "").name or "-"
+            peers.append(
+                MailboxPeer(
+                    thread_id=thread.thread_id,
+                    title=thread.title,
+                    project_name=project_name,
+                    status=thread.status,
+                    is_current=thread.thread_id == current_thread_id,
+                )
+            )
+        peers.sort(
+            key=lambda peer: (
+                not peer.is_current,
+                peer.project_name.lower(),
+                peer.title.lower(),
+                peer.thread_id.lower(),
+            )
+        )
+        return peers
+
+    def _deliver_mailbox_once(self) -> None:
+        for message in self._state.list_pending_mailbox_messages():
+            pending_turn = self._state.get_pending_turn(message.to_thread_id)
+            if pending_turn is not None:
+                continue
+            try:
+                binding = self._state.get_binding_by_thread(message.to_thread_id)
+            except KeyError:
+                continue
+            if binding.binding_status != ACTIVE_BINDING_STATUS:
+                continue
+            recipient_thread = self._codex.read_thread(message.to_thread_id)
+            if recipient_thread.status not in {"idle", "notLoaded"}:
+                continue
+            sender_thread = self._codex.read_thread(message.from_thread_id)
+            sender_project_name = Path(sender_thread.cwd or "").name or "-"
+            self._send_typing_if_due(binding.chat_id, binding.message_thread_id, force=True)
+            turn_result = self._codex.start_turn(
+                StartedTurn(
+                    thread_id=message.to_thread_id,
+                    text=render_mailbox_delivery_text(
+                        message_id=message.message_id,
+                        sender_title=sender_thread.title,
+                        sender_project_name=sender_project_name,
+                        body=message.body,
+                    ),
+                )
+            )
+            self._state.upsert_pending_turn(
+                PendingTurn(
+                    codex_thread_id=message.to_thread_id,
+                    chat_id=binding.chat_id,
+                    message_thread_id=binding.message_thread_id,
+                    turn_id=turn_result.turn_id,
+                    waiting_for_approval=turn_result.waiting_for_approval,
+                )
+            )
+            self._state.mark_mailbox_delivered(message.message_id)
+            return
+
     def _audit_sync_state(self) -> "_SyncAudit":
         loaded_threads = {thread.thread_id: thread for thread in self._codex.list_loaded_threads()}
         bindings = self._state.list_bindings()
@@ -4646,6 +4895,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("screenshot", "Capture the current Codex App window for this thread"),
     _BotCommand("panes", "Show the Codex App thread summary for tmux-style pane compatibility"),
+    _BotCommand("msg", "Use the inter-agent mailbox command family"),
     _BotCommand("live", "Start or refresh a live Codex App window feed"),
     _BotCommand("send", "Browse project files and send one back to Telegram"),
     _BotCommand("verbose", "Change supplemental Telegram notification mode"),

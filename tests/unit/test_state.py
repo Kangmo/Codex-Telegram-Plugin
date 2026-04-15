@@ -16,6 +16,7 @@ from codex_telegram_gateway.models import (
     TopicProject,
     ToolbarViewState,
     VoicePromptViewState,
+    MailboxMessage,
 )
 from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.state import SqliteGatewayState
@@ -216,6 +217,45 @@ def test_sqlite_state_persists_pending_turns(tmp_path) -> None:
     state.delete_pending_turn("thread-1")
 
     assert state.get_pending_turn("thread-1") is None
+
+
+def test_sqlite_state_persists_mailbox_messages_and_status_updates(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+
+    created = state.create_mailbox_message(
+        from_thread_id="thread-1",
+        to_thread_id="thread-2",
+        body="Please review the latest patch.",
+    )
+
+    assert created == MailboxMessage(
+        message_id="mail-1",
+        from_thread_id="thread-1",
+        to_thread_id="thread-2",
+        body="Please review the latest patch.",
+        status="pending",
+        created_at=created.created_at,
+        reply_to_message_id=None,
+        delivered_at=None,
+        read_at=None,
+    )
+    assert state.get_mailbox_message("mail-1") == created
+    assert state.list_pending_mailbox_messages() == [created]
+    assert state.list_mailbox_inbox("thread-2") == [created]
+
+    state.mark_mailbox_delivered("mail-1")
+    delivered = state.get_mailbox_message("mail-1")
+    assert delivered is not None
+    assert delivered.status == "delivered"
+    assert delivered.delivered_at is not None
+
+    read = state.mark_mailbox_read("mail-1", codex_thread_id="thread-2")
+    assert read is not None
+    assert read.status == "read"
+    assert read.read_at is not None
+    assert state.list_mailbox_inbox("thread-2") == []
+    assert state.get_mailbox_message("missing") is None
+    assert state.mark_mailbox_read("mail-1", codex_thread_id="thread-9") is None
 
 
 def test_sqlite_state_persists_status_bubble_view(tmp_path) -> None:

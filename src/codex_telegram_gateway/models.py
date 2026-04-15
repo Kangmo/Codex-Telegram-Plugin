@@ -235,6 +235,21 @@ class SendViewState:
 
 
 @dataclass(frozen=True)
+class MailboxMessage:
+    """One persisted inter-thread mailbox message."""
+
+    message_id: str
+    from_thread_id: str
+    to_thread_id: str
+    body: str
+    status: str
+    created_at: float
+    reply_to_message_id: str | None = None
+    delivered_at: float | None = None
+    read_at: float | None = None
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 

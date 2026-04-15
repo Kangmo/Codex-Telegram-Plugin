@@ -1346,6 +1346,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
                 "/gateway screenshot - Capture the current Codex App window for this thread\n"
                 "/gateway panes - Show the Codex App thread summary for tmux-style pane compatibility\n"
+                "/gateway msg - Use the inter-agent mailbox command family\n"
                 "/gateway live - Start or refresh a live Codex App window feed\n"
                 "/gateway send - Browse project files and send one back to Telegram\n"
                 "/gateway verbose - Change supplemental Telegram notification mode\n"
@@ -4076,6 +4077,420 @@ def test_poll_telegram_once_gateway_panes_reports_project_threads() -> None:
     ]
 
 
+def test_poll_telegram_once_gateway_msg_send_and_deliver_mailbox_message() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg send thread-2 Please review the latest patch.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-2")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 77, "Queued mailbox message `mail-1` to `thread-2`.", None),
+        (-100100, 78, "Mailbox message `mail-1` queued from `thread-1`.", None),
+    ]
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-2",
+            text="[Mailbox `mail-1` from `thread-1` · gateway-project]\nPlease review the latest patch.",
+        )
+    ]
+    delivered = state.get_mailbox_message("mail-1")
+    assert delivered is not None
+    assert delivered.status == "delivered"
+
+
+def test_poll_telegram_once_gateway_msg_inbox_read_reply_and_broadcast() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-3",
+            chat_id=-100100,
+            message_thread_id=79,
+            topic_name="(gateway-project) thread-3",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_mailbox_message(
+        from_thread_id="thread-1",
+        to_thread_id="thread-2",
+        body="Please review the inbox item.",
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=78,
+        from_user_id=111,
+        text="/gateway msg inbox",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=78,
+        from_user_id=111,
+        text="/gateway msg read mail-1",
+    )
+    telegram.push_update(
+        update_id=3,
+        chat_id=-100100,
+        message_thread_id=78,
+        from_user_id=111,
+        text="/gateway msg reply mail-1 Acknowledged.",
+    )
+    telegram.push_update(
+        update_id=4,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg peers",
+    )
+    telegram.push_update(
+        update_id=5,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg broadcast Heads up team.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-2")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-3")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    for _ in range(5):
+        daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 78, "Mailbox inbox:\n- `mail-1` from `thread-1` · pending", None),
+        (
+            -100100,
+            78,
+            "Mailbox message `mail-1`\nFrom: `thread-1`\nStatus: `read`\n\nPlease review the inbox item.",
+            None,
+        ),
+        (-100100, 78, "Queued mailbox message `mail-2` to `thread-1`.", None),
+        (-100100, 77, "Mailbox message `mail-2` queued from `thread-2`.", None),
+        (
+            -100100,
+            77,
+            "Bound peer threads:\n"
+            "- `thread-1` · gateway-project · idle · current topic\n"
+            "- `thread-2` · gateway-project · idle\n"
+            "- `thread-3` · gateway-project · idle",
+            None,
+        ),
+        (-100100, 78, "Mailbox message `mail-3` queued from `thread-1`.", None),
+        (-100100, 79, "Mailbox message `mail-4` queued from `thread-1`.", None),
+        (-100100, 77, "Queued 2 mailbox message(s) for broadcast.", None),
+    ]
+
+
+def test_poll_telegram_once_gateway_msg_help_and_error_paths() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg send",
+    )
+    telegram.push_update(
+        update_id=3,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg send thread-1 hello",
+    )
+    telegram.push_update(
+        update_id=4,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg send thread-9 hello",
+    )
+    telegram.push_update(
+        update_id=5,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg broadcast",
+    )
+    telegram.push_update(
+        update_id=6,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg inbox",
+    )
+    telegram.push_update(
+        update_id=7,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg read",
+    )
+    telegram.push_update(
+        update_id=8,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg read mail-99",
+    )
+    telegram.push_update(
+        update_id=9,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg reply",
+    )
+    telegram.push_update(
+        update_id=10,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg reply mail-99 hello",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    for _ in range(10):
+        daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Inter-agent mailbox commands:\n"
+            "/gateway msg peers - List bound peer threads\n"
+            "/gateway msg send <thread-id> <body> - Queue a mailbox message to another thread\n"
+            "/gateway msg inbox - List mailbox messages for this thread\n"
+            "/gateway msg read <message-id> - Show and mark a mailbox message as read\n"
+            "/gateway msg reply <message-id> <body> - Reply to a mailbox message\n"
+            "/gateway msg broadcast <body> - Broadcast a mailbox message to other peer threads",
+            None,
+        ),
+        (-100100, 77, "Usage: /gateway msg send <thread-id> <body>", None),
+        (-100100, 77, "Cannot send a mailbox message to the current thread.", None),
+        (-100100, 77, "Recipient thread `thread-9` is not bound.", None),
+        (-100100, 77, "Usage: /gateway msg broadcast <body>", None),
+        (-100100, 77, "Mailbox inbox is empty.", None),
+        (-100100, 77, "Usage: /gateway msg read <message-id>", None),
+        (-100100, 77, "Mailbox message `mail-99` was not found.", None),
+        (-100100, 77, "Usage: /gateway msg reply <message-id> <body>", None),
+        (-100100, 77, "Mailbox message `mail-99` was not found.", None),
+    ]
+
+
+def test_poll_telegram_once_gateway_msg_broadcast_without_peers_and_reply_target_not_bound() -> None:
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_mailbox_message(
+        from_thread_id="thread-1",
+        to_thread_id="thread-2",
+        body="Please review the inbox item.",
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=78,
+        from_user_id=111,
+        text="/gateway msg reply mail-1 Acknowledged.",
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=78,
+        from_user_id=111,
+        text="/gateway msg broadcast Heads up team.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-2",
+            title="thread-2",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 78, "Reply target `thread-1` is not bound.", None),
+        (-100100, 78, "No bound peer threads available for broadcast.", None),
+    ]
+
+
+def test_deliver_inbound_once_skips_unavailable_mailbox_recipients_until_idle_bound_peer() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-4",
+            chat_id=-100100,
+            message_thread_id=80,
+            topic_name="(gateway-project) thread-4",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-5",
+            chat_id=-100100,
+            message_thread_id=81,
+            topic_name="(gateway-project) thread-5",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            binding_status=CLOSED_BINDING_STATUS,
+        )
+    )
+    state.create_mailbox_message(from_thread_id="thread-1", to_thread_id="thread-2", body="skip pending turn")
+    state.create_mailbox_message(from_thread_id="thread-1", to_thread_id="thread-3", body="skip missing binding")
+    state.create_mailbox_message(from_thread_id="thread-1", to_thread_id="thread-5", body="skip closed binding")
+    state.create_mailbox_message(from_thread_id="thread-1", to_thread_id="thread-4", body="deliver this")
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            turn_id="turn-pending",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-2")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-3")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-4")
+    codex.set_thread_status("thread-4", "idle")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-5")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-4",
+            text="[Mailbox `mail-4` from `thread-1` · gateway-project]\ndeliver this",
+        )
+    ]
 def test_poll_telegram_once_gateway_live_sends_photo_and_persists_view(tmp_path) -> None:
     screenshot_path = tmp_path / "live.png"
     screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
