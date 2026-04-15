@@ -582,6 +582,82 @@ def test_gateway_flow_gateway_panes_reports_project_threads(tmp_path) -> None:
     ]
 
 
+def test_gateway_flow_gateway_msg_send_delivers_to_idle_peer_thread(tmp_path) -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=78,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex._threads["thread-2"] = CodexThread(
+        thread_id="thread-2",
+        title="thread-2",
+        status="idle",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+    )
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway msg send thread-2 Please review the latest patch.",
+    )
+    daemon.poll_telegram_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "Queued mailbox message `mail-1` to `thread-2`.", None),
+        (-100100, 78, "Mailbox message `mail-1` queued from `thread-1`.", None),
+    ]
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-2",
+            text="[Mailbox `mail-1` from `thread-1` · gateway-project]\nPlease review the latest patch.",
+        )
+    ]
+    assert state.get_pending_turn("thread-2") is not None
+
+
 def test_gateway_flow_live_view_persists_and_edits_same_message(tmp_path) -> None:
     first_capture = tmp_path / "live-1.png"
     second_capture = tmp_path / "live-2.png"

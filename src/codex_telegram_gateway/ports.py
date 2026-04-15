@@ -19,6 +19,7 @@ from codex_telegram_gateway.models import (
     ResumeViewState,
     SendViewState,
     StatusBubbleViewState,
+    MailboxMessage,
     TopicCreationJob,
     StartedTurn,
     ToolbarViewState,
@@ -346,6 +347,37 @@ class GatewayState(Protocol):
         ...
 
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def create_mailbox_message(
+        self,
+        *,
+        from_thread_id: str,
+        to_thread_id: str,
+        body: str,
+        reply_to_message_id: str | None = None,
+    ) -> MailboxMessage:
+        ...
+
+    def get_mailbox_message(self, message_id: str) -> MailboxMessage | None:
+        ...
+
+    def list_mailbox_inbox(
+        self,
+        codex_thread_id: str,
+        *,
+        include_read: bool = False,
+        limit: int = 20,
+    ) -> list[MailboxMessage]:
+        ...
+
+    def list_pending_mailbox_messages(self) -> list[MailboxMessage]:
+        ...
+
+    def mark_mailbox_delivered(self, message_id: str) -> None:
+        ...
+
+    def mark_mailbox_read(self, message_id: str, *, codex_thread_id: str) -> MailboxMessage | None:
         ...
 
     def remember_passthrough_command(self, command_name: str) -> bool:

@@ -15,6 +15,7 @@ from codex_telegram_gateway.models import (
     ResumeViewState,
     SendViewState,
     StatusBubbleViewState,
+    MailboxMessage,
     ToolbarViewState,
     TopicCreationJob,
     StartedTurn,
@@ -44,6 +45,8 @@ class DummyState:
         self.pending_turns: dict[str, PendingTurn] = {}
         self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
+        self.mailbox_messages: dict[str, MailboxMessage] = {}
+        self.mailbox_sequence = 0
         self.passthrough_commands: set[str] = set()
         self.command_menu_hashes: dict[str, str] = {}
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
@@ -282,6 +285,82 @@ class DummyState:
 
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
         self.topic_history.pop((chat_id, message_thread_id), None)
+
+    def create_mailbox_message(
+        self,
+        *,
+        from_thread_id: str,
+        to_thread_id: str,
+        body: str,
+        reply_to_message_id: str | None = None,
+    ) -> MailboxMessage:
+        self.mailbox_sequence += 1
+        message = MailboxMessage(
+            message_id=f"mail-{self.mailbox_sequence}",
+            from_thread_id=from_thread_id,
+            to_thread_id=to_thread_id,
+            body=body,
+            status="pending",
+            created_at=float(self.mailbox_sequence),
+            reply_to_message_id=reply_to_message_id,
+        )
+        self.mailbox_messages[message.message_id] = message
+        return message
+
+    def get_mailbox_message(self, message_id: str) -> MailboxMessage | None:
+        return self.mailbox_messages.get(message_id)
+
+    def list_mailbox_inbox(
+        self,
+        codex_thread_id: str,
+        *,
+        include_read: bool = False,
+        limit: int = 20,
+    ) -> list[MailboxMessage]:
+        messages = [
+            message
+            for message in self.mailbox_messages.values()
+            if message.to_thread_id == codex_thread_id and (include_read or message.status != "read")
+        ]
+        messages.sort(key=lambda message: message.created_at, reverse=True)
+        return messages[:limit]
+
+    def list_pending_mailbox_messages(self) -> list[MailboxMessage]:
+        messages = [message for message in self.mailbox_messages.values() if message.status == "pending"]
+        messages.sort(key=lambda message: message.created_at)
+        return messages
+
+    def mark_mailbox_delivered(self, message_id: str) -> None:
+        message = self.mailbox_messages[message_id]
+        self.mailbox_messages[message_id] = MailboxMessage(
+            message_id=message.message_id,
+            from_thread_id=message.from_thread_id,
+            to_thread_id=message.to_thread_id,
+            body=message.body,
+            status="delivered",
+            created_at=message.created_at,
+            reply_to_message_id=message.reply_to_message_id,
+            delivered_at=message.created_at + 1.0,
+            read_at=message.read_at,
+        )
+
+    def mark_mailbox_read(self, message_id: str, *, codex_thread_id: str) -> MailboxMessage | None:
+        message = self.mailbox_messages.get(message_id)
+        if message is None or message.to_thread_id != codex_thread_id:
+            return None
+        updated = MailboxMessage(
+            message_id=message.message_id,
+            from_thread_id=message.from_thread_id,
+            to_thread_id=message.to_thread_id,
+            body=message.body,
+            status="read",
+            created_at=message.created_at,
+            reply_to_message_id=message.reply_to_message_id,
+            delivered_at=message.delivered_at,
+            read_at=message.created_at + 2.0,
+        )
+        self.mailbox_messages[message_id] = updated
+        return updated
 
     def remember_passthrough_command(self, command_name: str) -> bool:
         if command_name in self.passthrough_commands:
