@@ -43,6 +43,19 @@ from codex_telegram_gateway.remote_actions import (
     build_remote_action_rows,
     parse_remote_action_callback,
 )
+from codex_telegram_gateway.shell_mode import (
+    CALLBACK_SHELL_PREFIX,
+    ShellCommandSuggester,
+    ShellRunner,
+    ShellSuggestionView,
+    build_shell_command_suggester,
+    build_shell_runner,
+    parse_shell_callback,
+    parse_shell_request,
+    render_shell_help,
+    render_shell_result,
+    render_shell_suggestion,
+)
 from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
 from codex_telegram_gateway.voice_ingest import (
     TranscriptionProvider,
@@ -186,6 +199,8 @@ class GatewayDaemon:
         codex: CodexBridge,
         transcriber: TranscriptionProvider | None = None,
         screenshot_provider: ScreenshotProvider | None = None,
+        shell_suggester: ShellCommandSuggester | None = None,
+        shell_runner: ShellRunner | None = None,
     ) -> None:
         self._config = config
         self._state = state
@@ -195,6 +210,10 @@ class GatewayDaemon:
         self._screenshot_provider = (
             screenshot_provider if screenshot_provider is not None else build_screenshot_provider(config)
         )
+        self._shell_suggester = (
+            shell_suggester if shell_suggester is not None else build_shell_command_suggester(config)
+        )
+        self._shell_runner = shell_runner if shell_runner is not None else build_shell_runner()
         self._toolbar_config = load_toolbar_config(config.toolbar_config_path)
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
@@ -1538,6 +1557,7 @@ class GatewayDaemon:
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
         self._state.delete_live_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_voice_prompt_view(binding.chat_id, binding.message_thread_id)
+        self._state.delete_shell_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_toolbar_view(binding.chat_id, binding.message_thread_id)
         self._status_bubble_renders.pop((binding.chat_id, binding.message_thread_id), None)
@@ -1785,6 +1805,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_VOICE_PREFIX):
             self._handle_voice_callback(update)
+            return
+        if data.startswith(CALLBACK_SHELL_PREFIX):
+            self._handle_shell_callback(update)
             return
         if data.startswith(_CALLBACK_TOOLBAR_PREFIX):
             self._handle_toolbar_callback(update)
@@ -3920,6 +3943,25 @@ class GatewayDaemon:
             )
             return
 
+        if command_name == "shell":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            if not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
+            self._handle_shell_command(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                binding=binding,
+                command_args=command_args,
+            )
+            return
+
         if command_name == "live":
             if binding is None:
                 self._telegram.send_message(
@@ -4180,6 +4222,7 @@ class GatewayDaemon:
         self._state.delete_send_view(chat_id, message_thread_id)
         self._state.delete_live_view(chat_id, message_thread_id)
         self._state.delete_voice_prompt_view(chat_id, message_thread_id)
+        self._state.delete_shell_view(chat_id, message_thread_id)
         self._clear_interactive_prompt_topic(
             chat_id,
             message_thread_id,
@@ -4233,6 +4276,7 @@ class GatewayDaemon:
             self._state.delete_send_view(target.chat_id, target.message_thread_id)
             self._state.delete_live_view(target.chat_id, target.message_thread_id)
             self._state.delete_voice_prompt_view(target.chat_id, target.message_thread_id)
+            self._state.delete_shell_view(target.chat_id, target.message_thread_id)
             self._clear_interactive_prompt_topic(
                 target.chat_id,
                 target.message_thread_id,
@@ -4417,6 +4461,199 @@ class GatewayDaemon:
                 f"  status `{thread.status}` • id `{thread.thread_id}`"
             )
         return "\n".join(lines)
+
+    def _handle_shell_command(
+        self,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+        binding: Binding,
+        command_args: str,
+    ) -> None:
+        request = parse_shell_request(command_args)
+        if request.mode == "help":
+            self._clear_shell_view(chat_id, message_thread_id)
+            self._telegram.send_message(chat_id, message_thread_id, render_shell_help())
+            return
+
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        cwd = binding.project_id or thread.cwd or ""
+        if not cwd:
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                "No project directory is available for this topic.",
+            )
+            return
+        project_name = Path(cwd).name or cwd or "-"
+
+        if request.mode == "raw":
+            self._clear_shell_view(chat_id, message_thread_id)
+            self._execute_shell_command(
+                binding=binding,
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                command=request.payload,
+                cwd=cwd,
+                project_name=project_name,
+            )
+            return
+
+        if self._shell_suggester is None:
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                "Shell command suggestions are not configured. Use `/gateway shell !<command>` for raw execution.",
+            )
+            return
+
+        try:
+            suggestion = self._shell_suggester.suggest_command(
+                description=request.payload,
+                cwd=cwd,
+                project_name=project_name,
+                thread_title=thread.title,
+            )
+        except Exception as exc:
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                f"Shell command suggestion failed: {exc}",
+            )
+            return
+        current_view = self._state.get_shell_view(chat_id, message_thread_id)
+        draft_view = ShellSuggestionView(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            message_id=current_view.message_id if current_view is not None else 0,
+            codex_thread_id=binding.codex_thread_id,
+            cwd=cwd,
+            project_name=project_name,
+            thread_title=thread.title,
+            suggestion=suggestion,
+        )
+        text, reply_markup = render_shell_suggestion(draft_view)
+        try:
+            if current_view is not None:
+                message_id = current_view.message_id
+                self._telegram.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            else:
+                message_id = self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                self._state.delete_shell_view(chat_id, message_thread_id)
+                return
+            message_id = self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                text,
+                reply_markup=reply_markup,
+            )
+        self._state.upsert_shell_view(
+            replace(
+                draft_view,
+                message_id=message_id,
+            )
+        )
+
+    def _handle_shell_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        action = parse_shell_callback(str(update["data"]))
+        if action is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown shell action.")
+            return
+        shell_view = self._state.get_shell_view(chat_id, message_thread_id)
+        if shell_view is None or shell_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This shell suggestion is stale.")
+            return
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None:
+            self._state.delete_shell_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
+            return
+        if action == "cancel":
+            self._state.delete_shell_view(chat_id, message_thread_id)
+            try:
+                self._telegram.edit_message_text(
+                    chat_id,
+                    message_id,
+                    "Shell command suggestion cancelled.",
+                    reply_markup=None,
+                )
+            except Exception as exc:
+                if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                    raise
+            self._telegram.answer_callback_query(callback_query_id, "Cancelled.")
+            return
+
+        self._state.delete_shell_view(chat_id, message_thread_id)
+        self._telegram.answer_callback_query(callback_query_id, "Running.")
+        self._execute_shell_command(
+            binding=binding,
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            command=shell_view.suggestion.command,
+            cwd=shell_view.cwd,
+            project_name=shell_view.project_name,
+            existing_message_id=message_id,
+        )
+
+    def _clear_shell_view(self, chat_id: int, message_thread_id: int) -> None:
+        shell_view = self._state.get_shell_view(chat_id, message_thread_id)
+        if shell_view is not None:
+            try:
+                self._telegram.edit_message_reply_markup(chat_id, shell_view.message_id, None)
+            except Exception:
+                pass
+        self._state.delete_shell_view(chat_id, message_thread_id)
+
+    def _execute_shell_command(
+        self,
+        *,
+        binding: Binding,
+        chat_id: int,
+        message_thread_id: int,
+        command: str,
+        cwd: str,
+        project_name: str,
+        existing_message_id: int | None = None,
+    ) -> None:
+        try:
+            result = self._shell_runner.run(
+                command=command,
+                cwd=cwd,
+                timeout_seconds=self._config.shell_command_timeout_seconds,
+            )
+            text = render_shell_result(result, project_name=project_name)
+        except Exception as exc:
+            text = f"Shell command execution failed: {exc}"
+        try:
+            if existing_message_id is not None:
+                self._telegram.edit_message_text(
+                    chat_id,
+                    existing_message_id,
+                    text,
+                    reply_markup=None,
+                )
+            else:
+                self._telegram.send_message(chat_id, message_thread_id, text)
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return
+            self._telegram.send_message(chat_id, message_thread_id, text)
 
     def _handle_mailbox_command(
         self,
@@ -4895,6 +5132,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("screenshot", "Capture the current Codex App window for this thread"),
     _BotCommand("panes", "Show the Codex App thread summary for tmux-style pane compatibility"),
+    _BotCommand("shell", "Suggest or run shell commands in the bound project"),
     _BotCommand("msg", "Use the inter-agent mailbox command family"),
     _BotCommand("live", "Start or refresh a live Codex App window feed"),
     _BotCommand("send", "Browse project files and send one back to Telegram"),

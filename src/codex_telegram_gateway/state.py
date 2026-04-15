@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 from codex_telegram_gateway.live_view import LiveViewState
+from codex_telegram_gateway.shell_mode import ShellCommandSuggestion, ShellSuggestionView
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -207,6 +208,21 @@ class SqliteGatewayState:
                 source_update_id INTEGER NOT NULL,
                 from_user_id INTEGER NOT NULL,
                 transcript_text TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS shell_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                thread_title TEXT NOT NULL,
+                original_text TEXT NOT NULL,
+                command TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                is_dangerous INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1515,6 +1531,85 @@ class SqliteGatewayState:
         )
         self._connection.commit()
 
+    def upsert_shell_view(self, shell_view: ShellSuggestionView) -> ShellSuggestionView:
+        self._connection.execute(
+            """
+            INSERT INTO shell_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                cwd,
+                project_name,
+                thread_title,
+                original_text,
+                command,
+                explanation,
+                is_dangerous
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                cwd = excluded.cwd,
+                project_name = excluded.project_name,
+                thread_title = excluded.thread_title,
+                original_text = excluded.original_text,
+                command = excluded.command,
+                explanation = excluded.explanation,
+                is_dangerous = excluded.is_dangerous
+            """,
+            (
+                shell_view.chat_id,
+                shell_view.message_thread_id,
+                shell_view.message_id,
+                shell_view.codex_thread_id,
+                shell_view.cwd,
+                shell_view.project_name,
+                shell_view.thread_title,
+                shell_view.suggestion.original_text,
+                shell_view.suggestion.command,
+                shell_view.suggestion.explanation,
+                1 if shell_view.suggestion.is_dangerous else 0,
+            ),
+        )
+        self._connection.commit()
+        return shell_view
+
+    def get_shell_view(self, chat_id: int, message_thread_id: int) -> ShellSuggestionView | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                cwd,
+                project_name,
+                thread_title,
+                original_text,
+                command,
+                explanation,
+                is_dangerous
+            FROM shell_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._shell_view_from_row(row)
+
+    def delete_shell_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM shell_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
     def upsert_status_bubble_view(
         self,
         status_bubble_view: StatusBubbleViewState,
@@ -2164,6 +2259,24 @@ class SqliteGatewayState:
             reply_to_message_id=row["reply_to_message_id"],
             delivered_at=row["delivered_at"],
             read_at=row["read_at"],
+        )
+
+    @staticmethod
+    def _shell_view_from_row(row: sqlite3.Row) -> ShellSuggestionView:
+        return ShellSuggestionView(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            cwd=row["cwd"],
+            project_name=row["project_name"],
+            thread_title=row["thread_title"],
+            suggestion=ShellCommandSuggestion(
+                command=row["command"],
+                explanation=row["explanation"],
+                original_text=row["original_text"],
+                is_dangerous=bool(row["is_dangerous"]),
+            ),
         )
 
     def _ensure_bindings_column(self, column_name: str, column_type: str) -> None:

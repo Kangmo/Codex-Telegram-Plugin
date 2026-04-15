@@ -1,5 +1,6 @@
 from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.live_view import LiveViewState
+from codex_telegram_gateway.shell_mode import ShellSuggestionView
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -54,6 +55,7 @@ class DummyState:
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
         self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
         self.voice_prompt_views: dict[tuple[int, int], VoicePromptViewState] = {}
+        self.shell_views: dict[tuple[int, int], ShellSuggestionView] = {}
         self.status_bubble_views: dict[tuple[int, int], StatusBubbleViewState] = {}
         self.toolbar_views: dict[tuple[int, int], ToolbarViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
@@ -435,6 +437,16 @@ class DummyState:
 
     def delete_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
         self.voice_prompt_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_shell_view(self, shell_view: ShellSuggestionView) -> ShellSuggestionView:
+        self.shell_views[(shell_view.chat_id, shell_view.message_thread_id)] = shell_view
+        return shell_view
+
+    def get_shell_view(self, chat_id: int, message_thread_id: int) -> ShellSuggestionView | None:
+        return self.shell_views.get((chat_id, message_thread_id))
+
+    def delete_shell_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.shell_views.pop((chat_id, message_thread_id), None)
 
     def upsert_status_bubble_view(
         self,

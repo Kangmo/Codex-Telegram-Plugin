@@ -11,6 +11,13 @@ from codex_telegram_gateway.recovery import (
     CALLBACK_RESTORE_RECREATE,
     CALLBACK_RESTORE_RESUME,
 )
+from codex_telegram_gateway.shell_mode import (
+    CALLBACK_SHELL_CANCEL,
+    CALLBACK_SHELL_RUN,
+    ShellCommandSuggestion,
+    ShellExecutionResult,
+    ShellSuggestionView,
+)
 from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_CANCEL,
     CALLBACK_RESUME_PAGE_PREFIX,
@@ -102,6 +109,76 @@ class MissingFileScreenshotProvider:
             file_path=self.file_path,
             send_as_document=False,
         )
+
+
+class StaticShellCommandSuggester:
+    def __init__(self, *, command: str, explanation: str, is_dangerous: bool = False) -> None:
+        self.command = command
+        self.explanation = explanation
+        self.is_dangerous = is_dangerous
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def suggest_command(
+        self,
+        *,
+        description: str,
+        cwd: str,
+        project_name: str,
+        thread_title: str,
+    ) -> ShellCommandSuggestion:
+        self.calls.append((description, cwd, project_name, thread_title))
+        return ShellCommandSuggestion(
+            command=self.command,
+            explanation=self.explanation,
+            original_text=description,
+            is_dangerous=self.is_dangerous,
+        )
+
+
+class StaticShellRunner:
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int = 0,
+        timed_out: bool = False,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+        self.calls: list[tuple[str, str, float]] = []
+
+    def run(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        timeout_seconds: float,
+    ) -> ShellExecutionResult:
+        self.calls.append((command, cwd, timeout_seconds))
+        return ShellExecutionResult(
+            command=command,
+            cwd=cwd,
+            exit_code=self.exit_code,
+            stdout=self.stdout,
+            stderr=self.stderr,
+            timed_out=self.timed_out,
+        )
+
+
+class FailingShellCommandSuggester:
+    def suggest_command(
+        self,
+        *,
+        description: str,
+        cwd: str,
+        project_name: str,
+        thread_title: str,
+    ) -> ShellCommandSuggestion:
+        del description, cwd, project_name, thread_title
+        raise RuntimeError("LLM unavailable")
 
 
 def make_binding(*, binding_status: str = ACTIVE_BINDING_STATUS) -> Binding:
@@ -1346,6 +1423,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
                 "/gateway screenshot - Capture the current Codex App window for this thread\n"
                 "/gateway panes - Show the Codex App thread summary for tmux-style pane compatibility\n"
+                "/gateway shell - Suggest or run shell commands in the bound project\n"
                 "/gateway msg - Use the inter-agent mailbox command family\n"
                 "/gateway live - Start or refresh a live Codex App window feed\n"
                 "/gateway send - Browse project files and send one back to Telegram\n"
@@ -4075,6 +4153,525 @@ def test_poll_telegram_once_gateway_panes_reports_project_threads() -> None:
             None,
         )
     ]
+
+
+def test_poll_telegram_once_gateway_shell_help_clears_existing_widget() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_shell_view(
+        ShellSuggestionView(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+            thread_title="thread-1",
+            suggestion=ShellCommandSuggestion(
+                command="pwd",
+                explanation="Show the current directory.",
+                original_text="show current directory",
+            ),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_shell_view(-100100, 77) is None
+    assert telegram.edited_reply_markups == [(-100100, 9, None)]
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command mode\n\n"
+            "/gateway shell !<command> - Run a raw shell command in the bound project directory\n"
+            "/gateway shell <request> - Ask for a suggested shell command and approve it before running\n"
+            "/gateway shell - Show this help",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_shell_executes_raw_command() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell !pwd",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_runner = StaticShellRunner(stdout="/Users/kangmo/sacle/src/gateway-project\n")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_runner=shell_runner,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert shell_runner.calls == [
+        ("pwd", "/Users/kangmo/sacle/src/gateway-project", 30.0),
+    ]
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command result\n\n"
+            "Command: `pwd`\n"
+            "Project: `gateway-project`\n"
+            "Exit code: `0`\n\n"
+            "Stdout:\n"
+            "```text\n"
+            "/Users/kangmo/sacle/src/gateway-project\n"
+            "```",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_shell_reports_unconfigured_suggester() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell list python files",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command suggestions are not configured. Use `/gateway shell !<command>` for raw execution.",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_shell_reports_suggester_error() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell list python files",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_suggester=FailingShellCommandSuggester(),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 77, "Shell command suggestion failed: LLM unavailable", None),
+    ]
+
+
+def test_poll_telegram_once_gateway_shell_suggestion_persists_widget_state() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell list python files",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_suggester = StaticShellCommandSuggester(
+        command="find . -name '*.py'",
+        explanation="List tracked Python files from the current project root.",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_suggester=shell_suggester,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert shell_suggester.calls == [
+        (
+            "list python files",
+            "/Users/kangmo/sacle/src/gateway-project",
+            "gateway-project",
+            "thread-1",
+        )
+    ]
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command suggestion\n\n"
+            "Request: `list python files`\n"
+            "Project: `gateway-project`\n"
+            "Thread: `thread-1`\n\n"
+            "Suggested command:\n"
+            "`find . -name '*.py'`\n\n"
+            "List tracked Python files from the current project root.",
+            {
+                "inline_keyboard": [
+                    [{"text": "Run", "callback_data": "gw:shell:run"}],
+                    [{"text": "Cancel", "callback_data": CALLBACK_SHELL_CANCEL}],
+                ]
+            },
+        )
+    ]
+    assert state.get_shell_view(-100100, 77) == ShellSuggestionView(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+        project_name="gateway-project",
+        thread_title="thread-1",
+        suggestion=ShellCommandSuggestion(
+            command="find . -name '*.py'",
+            explanation="List tracked Python files from the current project root.",
+            original_text="list python files",
+        ),
+    )
+
+
+def test_poll_telegram_once_gateway_shell_recreates_widget_when_previous_message_is_gone() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_shell_view(
+        ShellSuggestionView(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=5,
+            codex_thread_id="thread-1",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+            thread_title="thread-1",
+            suggestion=ShellCommandSuggestion(
+                command="pwd",
+                explanation="Show the current directory.",
+                original_text="show current directory",
+            ),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.delete_message_locally(5)
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell list python files",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_suggester = StaticShellCommandSuggester(
+        command="find . -name '*.py'",
+        explanation="List tracked Python files from the current project root.",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_suggester=shell_suggester,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command suggestion\n\n"
+            "Request: `list python files`\n"
+            "Project: `gateway-project`\n"
+            "Thread: `thread-1`\n\n"
+            "Suggested command:\n"
+            "`find . -name '*.py'`\n\n"
+            "List tracked Python files from the current project root.",
+            {
+                "inline_keyboard": [
+                    [{"text": "Run", "callback_data": CALLBACK_SHELL_RUN}],
+                    [{"text": "Cancel", "callback_data": CALLBACK_SHELL_CANCEL}],
+                ]
+            },
+        )
+    ]
+    assert state.get_shell_view(-100100, 77).message_id == 1
+
+
+def test_poll_telegram_once_gateway_shell_blocks_mirror_topic_controls() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            message_thread_id=88,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100200,
+        message_thread_id=88,
+        from_user_id=111,
+        text="/gateway shell !pwd",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100200, 88, _mirror_control_text(), None),
+    ]
+
+
+def test_handle_shell_cancel_callback_clears_state_and_edits_message() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_shell_view(
+        ShellSuggestionView(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=5,
+            codex_thread_id="thread-1",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+            thread_title="thread-1",
+            suggestion=ShellCommandSuggestion(
+                command="find . -name '*.py'",
+                explanation="List tracked Python files from the current project root.",
+                original_text="list python files",
+            ),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="shell-cancel",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=5,
+        from_user_id=111,
+        data=CALLBACK_SHELL_CANCEL,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_shell_view(-100100, 77) is None
+    assert telegram.edited_messages == [
+        (-100100, 5, "Shell command suggestion cancelled.", None),
+    ]
+    assert telegram.answered_callback_queries == [("shell-cancel", "Cancelled.")]
+
+
+def test_handle_shell_callback_rejects_stale_message() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_shell_view(
+        ShellSuggestionView(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=5,
+            codex_thread_id="thread-1",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+            thread_title="thread-1",
+            suggestion=ShellCommandSuggestion(
+                command="find . -name '*.py'",
+                explanation="List tracked Python files from the current project root.",
+                original_text="list python files",
+            ),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="shell-stale",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=6,
+        from_user_id=111,
+        data=CALLBACK_SHELL_CANCEL,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_shell_view(-100100, 77) is not None
+    assert telegram.edited_messages == []
+    assert telegram.answered_callback_queries == [("shell-stale", "This shell suggestion is stale.")]
+
+
+def test_handle_shell_run_callback_sends_new_message_when_original_widget_is_gone() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_shell_view(
+        ShellSuggestionView(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=5,
+            codex_thread_id="thread-1",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+            project_name="gateway-project",
+            thread_title="thread-1",
+            suggestion=ShellCommandSuggestion(
+                command="pwd",
+                explanation="Show the current directory.",
+                original_text="show current directory",
+            ),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.delete_message_locally(5)
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="shell-run",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=5,
+        from_user_id=111,
+        data=CALLBACK_SHELL_RUN,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_runner = StaticShellRunner(stdout="/Users/kangmo/sacle/src/gateway-project\n")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_runner=shell_runner,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_shell_view(-100100, 77) is None
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Shell command result\n\n"
+            "Command: `pwd`\n"
+            "Project: `gateway-project`\n"
+            "Exit code: `0`\n\n"
+            "Stdout:\n"
+            "```text\n"
+            "/Users/kangmo/sacle/src/gateway-project\n"
+            "```",
+            None,
+        )
+    ]
+    assert telegram.answered_callback_queries == [("shell-run", "Running.")]
 
 
 def test_poll_telegram_once_gateway_msg_send_and_deliver_mailbox_message() -> None:
