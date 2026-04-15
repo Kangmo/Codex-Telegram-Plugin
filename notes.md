@@ -193,6 +193,7 @@
 - FP-20 Dedicated status bubble
 - FP-21 Tool batching, failure probing, and completion summaries
 - FP-24 General file intake and unsupported-content UX
+- FP-25 Outbound media and file delivery
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -431,3 +432,26 @@
   - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `68/68 = 100.0%`
   - `src/codex_telegram_gateway/daemon.py` changed executable lines: `7/7 = 100.0%`
   - `TOTAL`: `100/100 = 100.0%`
+
+### FP-25 verification
+- Reviewed `ccgram`’s outbound upload references in `handlers/send_command.py::_upload_file()` and `handlers/screenshot_callbacks.py` before coding the parity path.
+- Added `artifact_detector.py` so Codex outbound text that explicitly mentions generated files expands into stable `artifact_photo` and `artifact_document` events.
+- `CodexAppServerClient.list_events()` now appends artifact events after the normal assistant/tool/completion event, and the daemon sends those files through the existing Telegram multipart helpers.
+- Implementation decisions locked during FP-25:
+  - outbound file parity is adapted through safe path detection because Codex App `thread/read` does not currently expose first-class generated-file attachment objects
+  - the artifact allowlist is intentionally limited to the bound project root and gateway-local `.ccgram-uploads`
+  - captions remain short and path-based because the adjacent text event already carries the conversational summary
+- Proofread fixes before sign-off:
+  - `.ccgram-uploads/...` token cleanup now preserves the leading dot instead of stripping the path
+  - missing-file artifact events stay retryable because they are not marked seen
+  - missing-topic artifact send failures delete the binding, while unrelated upload errors still surface normally
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_artifact_detector.py tests/unit/test_codex_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `172 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `296 passed`
+- Feature-specific changed-executable coverage:
+  - `src/codex_telegram_gateway/artifact_detector.py`: `96/101 = 95.0%`
+  - `src/codex_telegram_gateway/codex_api.py` changed executable lines: `7/7 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `25/25 = 100.0%`
+  - `src/codex_telegram_gateway/models.py` changed executable lines: `1/1 = 100.0%`
+  - `TOTAL`: `129/134 = 96.3%`

@@ -796,6 +796,7 @@ class DummyCodexBridge:
                 thread_id=event.thread_id,
                 kind=event.kind,
                 text=text if event.event_id == event_id else event.text,
+                file_path=event.file_path,
             )
             for event in self._events[thread_id]
         ]

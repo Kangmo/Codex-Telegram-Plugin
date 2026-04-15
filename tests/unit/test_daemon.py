@@ -15,7 +15,7 @@ from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_PICK_PREFIX,
 )
 from pathlib import Path
-from codex_telegram_gateway.telegram_api import TelegramRetryAfterError
+from codex_telegram_gateway.telegram_api import TelegramApiError, TelegramRetryAfterError
 
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
@@ -7093,3 +7093,186 @@ def test_sync_codex_once_emits_terminal_summary_for_tool_only_turns() -> None:
             ]
         },
     )
+
+
+def test_sync_codex_once_sends_artifacts_once_per_event(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    photo_path = project_root / "artifacts" / "diagram.png"
+    document_path = project_root / "reports" / "summary.txt"
+    photo_path.parent.mkdir(parents=True)
+    document_path.parent.mkdir(parents=True)
+    photo_path.write_bytes(b"png-bytes")
+    document_path.write_text("done\n")
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="I generated two artifacts.",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:photo",
+            thread_id="thread-1",
+            kind="artifact_photo",
+            text="Artifact: artifacts/diagram.png",
+            file_path=str(photo_path),
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:document",
+            thread_id="thread-1",
+            kind="artifact_document",
+            text="Artifact: reports/summary.txt",
+            file_path=str(document_path),
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "I generated two artifacts.", None)
+    ]
+    assert telegram.sent_photos == [
+        (-100100, 77, str(photo_path), "Artifact: artifacts/diagram.png")
+    ]
+    assert telegram.sent_documents == [
+        (-100100, 77, str(document_path), "Artifact: reports/summary.txt")
+    ]
+
+
+def test_sync_codex_once_skips_artifact_when_file_is_missing(tmp_path) -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(tmp_path / "gateway-project"),
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:photo",
+            thread_id="thread-1",
+            kind="artifact_photo",
+            text="Artifact: artifacts/missing.png",
+            file_path=str(tmp_path / "gateway-project" / "artifacts" / "missing.png"),
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_photos == []
+    assert state.has_seen_event("thread-1", "thread-1:turn-1:item-1:artifact:photo") is False
+
+
+def test_sync_codex_once_marks_binding_deleted_when_artifact_send_hits_missing_topic(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    photo_path = project_root / "artifacts" / "diagram.png"
+    photo_path.parent.mkdir(parents=True)
+    photo_path.write_bytes(b"png-bytes")
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:photo",
+            thread_id="thread-1",
+            kind="artifact_photo",
+            text="Artifact: artifacts/diagram.png",
+            file_path=str(photo_path),
+        )
+    )
+    telegram.send_photo_file = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        TelegramApiError("message thread not found")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
+
+
+def test_sync_codex_once_reraises_unexpected_artifact_send_failures(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    document_path = project_root / "reports" / "summary.txt"
+    document_path.parent.mkdir(parents=True)
+    document_path.write_text("done\n")
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:document",
+            thread_id="thread-1",
+            kind="artifact_document",
+            text="Artifact: reports/summary.txt",
+            file_path=str(document_path),
+        )
+    )
+    telegram.send_document_file = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("upload failed")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        daemon.sync_codex_once()

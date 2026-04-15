@@ -305,6 +305,54 @@ def test_list_events_builds_tool_batches_and_terminal_summary_from_thread_read()
     ]
 
 
+def test_list_events_expands_detected_artifact_events_from_thread_read(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    project_root = tmp_path / "project"
+    photo_path = project_root / "artifacts" / "diagram.png"
+    photo_path.parent.mkdir(parents=True)
+    photo_path.write_bytes(b"png-bytes")
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+
+    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "thread/read"
+        assert params == {"threadId": "thread-1", "includeTurns": True}
+        return {
+            "thread": {
+                "cwd": str(project_root),
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {
+                                "id": "item-1",
+                                "type": "agentMessage",
+                                "phase": "final",
+                                "text": "I saved `artifacts/diagram.png` for review.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    events = client.list_events("thread-1")
+
+    assert len(events) == 2
+    assert events[0] == __import__("codex_telegram_gateway.models", fromlist=["CodexEvent"]).CodexEvent(
+        event_id="thread-1:turn-1:item-1",
+        thread_id="thread-1",
+        kind="assistant_message",
+        text="I saved `artifacts/diagram.png` for review.",
+    )
+    assert events[1].kind == "artifact_photo"
+    assert events[1].text == "Artifact: artifacts/diagram.png"
+    assert events[1].file_path == str(photo_path)
+    assert events[1].event_id.startswith("thread-1:turn-1:item-1:artifact:")
+
+
 def test_list_resumable_threads_uses_app_store_threads_and_marks_unloaded() -> None:
     client = CodexAppServerClient.__new__(CodexAppServerClient)
     client._codex_home = __import__("pathlib").Path("/tmp/.codex")  # type: ignore[attr-defined]
