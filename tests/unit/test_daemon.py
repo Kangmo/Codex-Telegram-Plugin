@@ -2689,14 +2689,23 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
         (
             -100100,
             77,
-            "Gateway bindings\n\n"
-            "🟢 (gateway-project) thread-1\n"
-            "topic `77` • thread `thread-1` • status `active`\n\n"
-            "Use `/gateway sync` to audit bindings and recover deleted topics.",
+            "Gateway sessions\n"
+            "Page 1/1 • 1 binding\n\n"
+            "1. 🟢 `(gateway-project) thread-1`\n"
+            "project `gateway-project` • thread `thread-1`\n"
+            "topic `77` • id `thread-1`\n"
+            "status `idle` • notify `assistant_plus_alerts`",
             {
                 "inline_keyboard": [
                     [
-                        {"text": "Refresh", "callback_data": "gw:sessions:refresh"},
+                        {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                        {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                        {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                        {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                        {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                    ],
+                    [
+                        {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
                         {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
                     ]
                 ]
@@ -2712,7 +2721,7 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
         message_thread_id=77,
         message_id=1,
         from_user_id=111,
-        data="gw:sessions:refresh",
+        data="gw:sessions:refresh:0",
     )
 
     daemon.poll_telegram_once()
@@ -2720,20 +2729,645 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
     assert telegram.edited_messages[-1] == (
         -100100,
         1,
-        "Gateway bindings\n\n"
-        "🟢 (gateway-project) renamed thread\n"
-        "topic `77` • thread `thread-1` • status `active`\n\n"
-        "Use `/gateway sync` to audit bindings and recover deleted topics.",
+        "Gateway sessions\n"
+        "Page 1/1 • 1 binding\n\n"
+        "1. 🟢 `(gateway-project) thread-1`\n"
+        "project `gateway-project` • thread `renamed thread`\n"
+        "topic `77` • id `thread-1`\n"
+        "status `idle` • notify `assistant_plus_alerts`",
         {
             "inline_keyboard": [
                 [
-                    {"text": "Refresh", "callback_data": "gw:sessions:refresh"},
+                    {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                    {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                    {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                    {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                    {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                ],
+                [
+                    {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
                     {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
                 ]
             ]
         },
     )
     assert telegram.answered_callback_queries[-1] == ("cb-sessions", "Refreshed.")
+
+
+def test_poll_telegram_once_sessions_dashboard_paginates_results() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(make_binding())
+    for index in range(2, 5):
+        thread = codex.create_thread(
+            "/Users/kangmo/sacle/src/gateway-project",
+            thread_name=f"thread-{index}",
+        )
+        state.create_binding(
+            Binding(
+                codex_thread_id=thread.thread_id,
+                chat_id=-100100,
+                message_thread_id=76 + index,
+                topic_name=f"(gateway-project) thread-{index}",
+                sync_mode="assistant_plus_alerts",
+                project_id="/Users/kangmo/sacle/src/gateway-project",
+                binding_status=ACTIVE_BINDING_STATUS,
+            )
+        )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert "Page 1/2 • 4 bindings" in telegram.sent_messages[-1][2]
+    assert telegram.sent_messages[-1][3]["inline_keyboard"][-2] == [
+        {"text": "Next", "callback_data": "gw:sessions:page:1"},
+    ]
+
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-page-2",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:page:1",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert "Page 2/2 • 4 bindings" in telegram.edited_messages[-1][2]
+    assert "1. 🟢 `(gateway-project) thread-4`" in telegram.edited_messages[-1][2]
+    assert telegram.answered_callback_queries[-1] == ("cb-page-2", "Page 2.")
+
+
+def test_poll_telegram_once_sessions_dashboard_dismisses_markup() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-dismiss",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:dismiss",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_reply_markups[-1] == (-100100, 1, None)
+    assert telegram.answered_callback_queries[-1] == ("cb-dismiss", "Dismissed.")
+
+
+def test_poll_telegram_once_sessions_dashboard_targeted_refresh_updates_live_page() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    codex.set_thread_title("thread-1", "refreshed from row")
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-row-refresh",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:refresh:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert "thread `refreshed from row`" in telegram.edited_messages[-1][2]
+    assert telegram.answered_callback_queries[-1] == ("cb-row-refresh", "Refreshed.")
+
+
+def test_poll_telegram_once_sessions_dashboard_new_thread_rebinds_target_topic() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-new",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:new:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_topic(-100100, 77)
+    assert rebound is not None
+    assert rebound.codex_thread_id == "thread-2"
+    assert codex.created_threads[-1].title == "untitled"
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Started a new Codex thread in gateway-project.\nThread id: `thread-2`",
+        None,
+    )
+    assert "1. 🟢 `(gateway-project) untitled`" in telegram.edited_messages[-1][2]
+    assert "id `thread-2`" in telegram.edited_messages[-1][2]
+    assert telegram.answered_callback_queries[-1] == ("cb-new", "Started a new thread.")
+
+
+def test_poll_telegram_once_sessions_dashboard_unbind_requires_confirmation() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-unbind",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:unbind:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Unbind this Telegram topic from Codex?\n\n"
+        "Topic title: `(gateway-project) thread-1`\n"
+        "Thread id: `thread-1`",
+        {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "Confirm unbind",
+                        "callback_data": "gw:sessions:unbind_confirm:0:-100100:77",
+                    }
+                ],
+                [
+                    {"text": "Back", "callback_data": "gw:sessions:unbind_cancel:0"},
+                ],
+            ]
+        },
+    )
+
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-unbind-cancel",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:unbind_cancel:0",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert "Gateway sessions\nPage 1/1 • 1 binding" in telegram.edited_messages[-1][2]
+    assert telegram.answered_callback_queries[-1] == ("cb-unbind-cancel", "Cancelled.")
+
+    telegram.push_callback_query(
+        update_id=4,
+        callback_query_id="cb-unbind-confirm",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:unbind_confirm:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_topic(-100100, 77) is None
+    assert telegram.answered_callback_queries[-1] == ("cb-unbind-confirm", "Unbound.")
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Gateway sessions\n\n"
+        "No bound topics yet.\n"
+        "Open a Telegram topic and send a message, or use `/gateway create_thread` inside a bound topic.",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
+                    {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
+                ]
+            ]
+        },
+    )
+
+
+def test_poll_telegram_once_sessions_dashboard_restore_recovers_closed_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-restore",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:restore:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    restored = state.get_binding_by_thread("thread-1")
+    assert restored.binding_status == ACTIVE_BINDING_STATUS
+    assert telegram.answered_callback_queries[-1] == ("cb-restore", "Restored.")
+    assert "status `idle` • notify `assistant_plus_alerts`" in telegram.edited_messages[-1][2]
+    assert "warning" not in telegram.edited_messages[-1][2]
+
+
+def test_poll_telegram_once_sessions_dashboard_restore_reports_healthy_binding() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-restore-healthy",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:restore:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-restore-healthy", "Nothing to restore.")
+
+
+def test_poll_telegram_once_sessions_dashboard_rejects_stale_target_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-stale-topic",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:refresh:0:-100100:999",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-stale-topic",
+        "This topic is no longer bound.",
+    )
+
+
+def test_poll_telegram_once_sessions_dashboard_screenshot_reports_unavailable() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sessions",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-shot",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:screenshot:0:-100100:77",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-shot",
+        "Screenshot support is not available yet.",
+    )
+
+
+def test_sessions_dashboard_entry_uses_status_icons_and_warnings_for_binding_state() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="closed-thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    deleted_thread = codex.create_thread(
+        "/Users/kangmo/sacle/src/gateway-project",
+        thread_name="deleted-thread",
+    )
+    approval_thread = codex.create_thread(
+        "/Users/kangmo/sacle/src/gateway-project",
+        thread_name="approval-thread",
+    )
+    running_thread = codex.create_thread(
+        "/Users/kangmo/sacle/src/gateway-project",
+        thread_name="running-thread",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    closed_binding = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=71,
+        topic_name="(gateway-project) closed-thread",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        binding_status=CLOSED_BINDING_STATUS,
+    )
+    deleted_binding = Binding(
+        codex_thread_id=deleted_thread.thread_id,
+        chat_id=-100100,
+        message_thread_id=72,
+        topic_name="(gateway-project) deleted-thread",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        binding_status=DELETED_BINDING_STATUS,
+    )
+    approval_binding = Binding(
+        codex_thread_id=approval_thread.thread_id,
+        chat_id=-100100,
+        message_thread_id=73,
+        topic_name="(gateway-project) approval-thread",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    running_binding = Binding(
+        codex_thread_id=running_thread.thread_id,
+        chat_id=-100100,
+        message_thread_id=74,
+        topic_name="(gateway-project) running-thread",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    unloaded_binding = Binding(
+        codex_thread_id="thread-missing",
+        chat_id=-100100,
+        message_thread_id=75,
+        topic_name="(gateway-project) missing-thread",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id=approval_thread.thread_id,
+            chat_id=-100100,
+            message_thread_id=73,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id=running_thread.thread_id,
+            chat_id=-100100,
+            message_thread_id=74,
+            turn_id="turn-running",
+            waiting_for_approval=False,
+        )
+    )
+
+    closed_entry = daemon._session_dashboard_entry_for_binding(closed_binding)
+    deleted_entry = daemon._session_dashboard_entry_for_binding(deleted_binding)
+    approval_entry = daemon._session_dashboard_entry_for_binding(approval_binding)
+    running_entry = daemon._session_dashboard_entry_for_binding(running_binding)
+    unloaded_entry = daemon._session_dashboard_entry_for_binding(unloaded_binding)
+
+    assert (closed_entry.thread_status, closed_entry.status_icon, closed_entry.warning_text) == (
+        "closed",
+        "⚫",
+        "Topic was closed in Telegram.",
+    )
+    assert (deleted_entry.thread_status, deleted_entry.status_icon, deleted_entry.warning_text) == (
+        "deleted",
+        "🔴",
+        "Telegram topic is missing and can be recreated.",
+    )
+    assert (approval_entry.thread_status, approval_entry.status_icon, approval_entry.warning_text) == (
+        "approval",
+        "🟠",
+        None,
+    )
+    assert (running_entry.thread_status, running_entry.status_icon, running_entry.warning_text) == (
+        "running",
+        "🟢",
+        None,
+    )
+    assert (unloaded_entry.thread_status, unloaded_entry.status_icon, unloaded_entry.warning_text) == (
+        "notLoaded",
+        "⚪",
+        "Codex thread is not loaded in the app.",
+    )
 
 
 def test_poll_telegram_once_aligned_command_names_show_codex_app_summaries() -> None:

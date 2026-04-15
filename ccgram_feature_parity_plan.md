@@ -152,9 +152,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-18: Full Sessions Dashboard
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-19: Generic Interactive Prompt Bridge
 - [ ] Implemented
@@ -1130,6 +1130,46 @@ Reach `ccgram`-style operator visibility over all active bindings.
   - session action buttons dispatch correctly
 - E2E:
   - dashboard reflects live status changes without manual refresh drift
+
+### FP-18 verification
+- Added a dedicated `sessions_dashboard.py` renderer/parser module for:
+  - paginated dashboard text
+  - per-session action rows
+  - callback parsing
+  - unbind-confirm prompt rendering
+- Replaced the old lightweight bindings view with a full sessions dashboard that now shows:
+  - topic title
+  - project
+  - current thread title
+  - thread id and topic id
+  - thread status
+  - notification mode
+  - recovery warnings
+  - mirror details
+  - pending mirror-topic creation jobs
+- Added dashboard actions for:
+  - refresh
+  - new thread
+  - unbind with confirmation
+  - restore
+  - screenshot compatibility messaging
+  - page navigation
+- Design decisions locked during implementation:
+  - dashboard actions always route by persisted `chat_id + message_thread_id`, never by mutable topic titles
+  - restore from the dashboard is a direct app-native repair action instead of reusing the topic-local restore widget, because the dashboard message can live in a different Telegram topic
+  - screenshot is exposed as an explicit compatibility stub until FP-14 lands rather than pretending media capture exists already
+  - mirror-detail lines and pending mirror-job lines were preserved in the new dashboard so the richer view stays a strict superset of the previous operator visibility
+- Proofread fixes landed before sign-off:
+  - removed stale legacy session-dashboard constants/helpers left over from the pre-FP-18 implementation
+  - simplified impossible callback branches that were already prevented by the session callback parser
+  - restored mirror-detail and pending-job text after the first full-suite regression exposed that the richer dashboard had accidentally dropped them
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_sessions_dashboard.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "sessions_dashboard or bindings_shows_dashboard or lists_mirrors_and_pending_jobs or status_icons_and_warnings"` -> `16 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `175 passed`
+- Feature-specific coverage for tracked FP-18 source ranges:
+  - `daemon.py` FP-18 ranges: `133/146 = 91.1%`
+  - `sessions_dashboard.py`: `77/84 = 91.7%`
 
 ## Runtime Interaction Parity
 
