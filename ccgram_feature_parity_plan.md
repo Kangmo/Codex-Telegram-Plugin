@@ -51,7 +51,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-17 | Command discovery and Telegram menu sync | P0 | Adapted | Partial today |
 | FP-18 | Full sessions dashboard | P0 | Native | Partial today |
 | FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Implemented |
-| FP-20 | Dedicated status bubble | P0 | Native | Missing |
+| FP-20 | Dedicated status bubble | P0 | Native | Implemented |
 | FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Missing |
 | FP-22 | Live view | P1 | Adapted | Missing |
 | FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
@@ -162,9 +162,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-20: Dedicated Status Bubble
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-21: Tool Batching, Failure Probing, Completion Summaries
 - [ ] Implemented
@@ -633,6 +633,53 @@ Code review notes:
 - The main design constraint identified during proofread was session lifetime: a Telegram callback cannot safely answer a stale app-server request after restart. The implementation now marks those widgets expired instead of guessing.
 - The proofread pass caught a routing bug where plain Telegram text could accidentally satisfy approval or option-only prompts. Those branches now reject plain text and direct the user to the Telegram buttons.
 - The proofread pass also caught an input-type gap for text-only questions with image attachments. Those replies are now rejected cleanly with explicit guidance instead of being dropped silently.
+
+### FP-20: Dedicated Status Bubble
+
+Branch and merge:
+
+- Feature branch: `feature/fp-20-dedicated-status-bubble`
+- Feature commit: `PENDING`
+- Merge commit on `main`: `PENDING`
+
+Implementation decisions:
+
+- FP-20 adds a dedicated `status_bubble.py` renderer and persistent `StatusBubbleViewState` rows in SQLite so every active topic can keep a single editable status-control message.
+- The bubble is separate from assistant reply blocks and renders a normalized topic snapshot with:
+  - project name
+  - thread title
+  - high-level state
+  - queued inbound count
+  - latest assistant-summary line
+- The bubble reuses the existing `gw:resp:*` callbacks instead of inventing a second callback namespace. This keeps `New`, `Project`, `Status`, `Sync`, and recall behavior aligned with the existing reply-widget controls.
+- Unlike the reply widget, the bubble keeps its main control row visible during active and approval states so the operator surface does not disappear while Codex is busy.
+- Bubble rendering is cached per topic in-memory and persisted by `(chat_id, message_thread_id)` in SQLite. When Telegram says the tracked bubble message is gone, the daemon sends a new bubble and updates the persisted message id.
+- Protocol-only changes in `ports.py` were kept as interface declarations only; the actual behavioral work lives in `daemon.py`, `state.py`, and `status_bubble.py`.
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - status-bubble rendering
+  - SQLite persistence of bubble view state
+  - daemon create/update behavior
+  - callback reuse from the bubble surface
+  - end-to-end bubble recreation after local Telegram deletion
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_status_bubble.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `266 passed`
+- Feature-specific changed-statement coverage for tracked executable source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `56/70 = 80.0%`
+  - `src/codex_telegram_gateway/models.py`: `6/6 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `src/codex_telegram_gateway/status_bubble.py`: `0/0 = 100.0%`
+  - `TOTAL`: `74/88 = 84.1%`
+
+Code review notes:
+
+- The proofread pass found a stale-target bug in `sync_codex_once()`: a topic rename failure could mark a binding deleted but still leave the pre-rename binding object in `active_targets`, which then allowed bubble sync to run on a dead topic. `active_targets` is now populated only after rename reconciliation.
+- The proofread pass also found a cleanup gap where `_unbind_topic()` left status-bubble view state behind. The unbind flow now drops bubble persistence and render cache along with the other topic-scoped UI state.
+- A final robustness pass tightened the recreate path so a fallback `send_message()` failure after an edit failure still reuses the missing-topic detection path instead of silently leaving stale bubble state behind.
 
 ## Shared Architecture Changes
 
@@ -1506,6 +1553,41 @@ Provide a single per-topic status message that updates in place instead of scatt
   - bubble created once and then edited in place
 - E2E:
   - delete the status message in Telegram and verify it is recreated on next transition
+
+### FP-20 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-20-dedicated-status-bubble`
+  - feature commit `PENDING`
+  - merge commit on `main` `PENDING`
+- Added a dedicated `status_bubble.py` renderer with a normalized `StatusBubbleSnapshot` model and a persistent `StatusBubbleViewState` SQLite row per topic.
+- The new status bubble is a separate Telegram control message from assistant reply blocks and shows:
+  - project name
+  - current thread title
+  - normalized topic state (`ready`, `running`, `approval`, `failed`, `closed`)
+  - queued inbound count for the bound Codex thread
+  - latest assistant-summary line when one exists
+- The bubble reuses the existing `gw:resp:*` callbacks instead of introducing a second control protocol, and its control row stays visible during running and approval states rather than disappearing until idle.
+- Implementation decisions locked during FP-20:
+  - bubble state is persisted by `(chat_id, message_thread_id)` and edited in place whenever the rendered snapshot changes
+  - assistant reply widgets remain on assistant messages, but the dedicated bubble becomes the stable topic-level operator surface
+  - bubble rendering is skipped for deleted bindings and recreated automatically if Telegram reports that the tracked bubble message was removed
+- Proofread fixes landed before sign-off:
+  - fixed a stale-target bug where a topic rename failure that marked a binding deleted could still flow into the bubble sync pass using the pre-rename active binding object
+  - unbind now clears persisted bubble view state and render cache so detached topics do not keep an active bubble binding internally
+  - the recreate-on-edit-failure path now rechecks missing-topic errors on the fallback send path instead of assuming only the first edit can fail
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_status_bubble.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `266 passed`
+- Feature-specific changed-statement coverage for tracked executable source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `56/70 = 80.0%`
+  - `src/codex_telegram_gateway/models.py`: `6/6 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `src/codex_telegram_gateway/status_bubble.py`: `0/0 = 100.0%`
+  - `TOTAL`: `74/88 = 84.1%`
+- Coverage note:
+  - `ports.py` changed only in `Protocol` interface declarations for the new status-bubble view methods, so those non-behavioral signatures were excluded from the executable changed-line denominator for FP-20 coverage accounting
 
 ### FP-21: Tool Batching, Failure Probing, Completion Summaries
 

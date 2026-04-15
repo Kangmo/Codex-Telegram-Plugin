@@ -17,6 +17,7 @@ from codex_telegram_gateway.models import (
     RestoreViewState,
     ResumeViewState,
     SendViewState,
+    StatusBubbleViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -364,6 +365,18 @@ class GatewayState(Protocol):
         ...
 
     def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_status_bubble_view(
+        self,
+        status_bubble_view: StatusBubbleViewState,
+    ) -> StatusBubbleViewState:
+        ...
+
+    def get_status_bubble_view(self, chat_id: int, message_thread_id: int) -> StatusBubbleViewState | None:
+        ...
+
+    def delete_status_bubble_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:

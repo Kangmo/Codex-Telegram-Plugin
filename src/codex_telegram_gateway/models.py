@@ -185,6 +185,16 @@ class InteractivePromptViewState:
 
 
 @dataclass(frozen=True)
+class StatusBubbleViewState:
+    """Persisted Telegram status-bubble message context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+
+
+@dataclass(frozen=True)
 class SendViewState:
     """Persisted Telegram send-browser context for one topic."""
 

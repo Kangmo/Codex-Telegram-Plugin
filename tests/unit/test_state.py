@@ -4,6 +4,7 @@ from codex_telegram_gateway.models import (
     CodexProject,
     HistoryViewState,
     InboundMessage,
+    StatusBubbleViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -212,6 +213,24 @@ def test_sqlite_state_persists_pending_turns(tmp_path) -> None:
     state.delete_pending_turn("thread-1")
 
     assert state.get_pending_turn("thread-1") is None
+
+
+def test_sqlite_state_persists_status_bubble_view(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    bubble_view = StatusBubbleViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        codex_thread_id="thread-1",
+    )
+
+    state.upsert_status_bubble_view(bubble_view)
+
+    assert state.get_status_bubble_view(-100100, 77) == bubble_view
+
+    state.delete_status_bubble_view(-100100, 77)
+
+    assert state.get_status_bubble_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_outbound_message_blocks(tmp_path) -> None:

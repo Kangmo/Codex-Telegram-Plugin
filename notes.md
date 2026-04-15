@@ -190,6 +190,7 @@
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 - FP-19 Interactive prompt bridge
+- FP-20 Dedicated status bubble
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -365,3 +366,22 @@
   - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
   - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
   - `TOTAL`: `146/178 = 82.0%`
+
+### FP-20 verification
+- Added a dedicated `status_bubble.py` renderer plus persistent `StatusBubbleViewState` rows so each active topic can keep one editable operator bubble.
+- The status bubble is separate from assistant reply blocks and shows project, thread title, normalized topic state, queued inbound count, and the latest assistant-summary line.
+- The bubble reuses the existing `gw:resp:*` callbacks, and its control row stays visible during running and approval states instead of disappearing until idle.
+- Proofread fixes landed before sign-off:
+  - fixed stale active-target handling after missing-topic rename failures
+  - unbind now clears bubble view state and render cache
+  - fallback bubble recreation now rechecks missing-topic send failures instead of assuming only the edit can fail
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_status_bubble.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `266 passed`
+- Feature-specific changed-statement coverage for tracked executable source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `56/70 = 80.0%`
+  - `src/codex_telegram_gateway/models.py`: `6/6 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `src/codex_telegram_gateway/status_bubble.py`: `0/0 = 100.0%`
+  - `TOTAL`: `74/88 = 84.1%`

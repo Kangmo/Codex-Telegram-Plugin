@@ -32,6 +32,7 @@ from codex_telegram_gateway.models import (
     RestoreViewState,
     ResumeViewState,
     SendViewState,
+    StatusBubbleViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -65,6 +66,24 @@ def make_config(**overrides) -> GatewayConfig:
     )
 
 
+def non_bubble_sent_messages(telegram: DummyTelegramClient) -> list[tuple[int, int, str, dict[str, object] | None]]:
+    return [
+        message
+        for message in telegram.sent_messages
+        if not message[2].startswith("Topic status\n\n")
+    ]
+
+
+def non_bubble_edited_messages(
+    telegram: DummyTelegramClient,
+) -> list[tuple[int, int, str, dict[str, object] | None]]:
+    return [
+        message
+        for message in telegram.edited_messages
+        if not message[2].startswith("Topic status\n\n")
+    ]
+
+
 def test_sync_codex_once_emits_only_unseen_events() -> None:
     state = DummyState()
     binding = make_binding()
@@ -96,7 +115,7 @@ def test_sync_codex_once_emits_only_unseen_events() -> None:
     daemon.sync_codex_once()
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [(-100100, 77, "Completed the refactor.", None)]
+    assert non_bubble_sent_messages(telegram) == [(-100100, 77, "Completed the refactor.", None)]
     assert state.list_projects() == [
         __import__("codex_telegram_gateway.models", fromlist=["CodexProject"]).CodexProject(
             project_id="/Users/kangmo/sacle/src/gateway-project",
@@ -137,8 +156,8 @@ def test_sync_codex_once_edits_existing_message_when_same_event_grows() -> None:
     codex.replace_event("thread-1", "thread-1:turn-1:item-1", "I found the first issue.\nAnd the second one.")
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [(-100100, 77, "I found the first issue.", None)]
-    assert telegram.edited_messages == [
+    assert non_bubble_sent_messages(telegram) == [(-100100, 77, "I found the first issue.", None)]
+    assert non_bubble_edited_messages(telegram) == [
         (-100100, 1, "I found the first issue.\nAnd the second one.", None),
     ]
 
@@ -826,7 +845,7 @@ def test_sync_codex_once_skips_outbound_for_closed_binding_and_clears_terminal_p
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == []
+    assert non_bubble_sent_messages(telegram) == []
     assert state.get_pending_turn("thread-1") is None
     assert state.has_seen_event("thread-1", "thread-1:turn-10:item-1") is False
 
@@ -5188,7 +5207,7 @@ def test_sync_codex_once_reports_interrupted_turn_to_telegram() -> None:
     daemon.deliver_inbound_once()
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (
             -100100,
             77,
@@ -5359,7 +5378,7 @@ def test_sync_codex_once_reports_failed_turn_even_when_notification_mode_is_mute
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (
             -100100,
             77,
@@ -5413,7 +5432,7 @@ def test_sync_codex_once_clears_pending_turn_after_matching_reply() -> None:
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (-100100, 77, "The query needs approval first.", None),
     ]
     assert state.get_pending_turn("thread-1") is None
@@ -6055,7 +6074,7 @@ def test_sync_codex_once_mirrors_assistant_output_to_secondary_chat() -> None:
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (-100100, 77, "Completed the refactor.", None),
         (-100200, 88, "Completed the refactor.", None),
     ]
@@ -6224,8 +6243,8 @@ def test_sync_codex_once_shows_interactive_prompt_widget_for_pending_approval() 
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages[-1][2].startswith("Command Approval")
-    assert telegram.sent_messages[-1][3] == {
+    assert non_bubble_sent_messages(telegram)[-1][2].startswith("Command Approval")
+    assert non_bubble_sent_messages(telegram)[-1][3] == {
         "inline_keyboard": [
             [{"text": "Approve Once", "callback_data": "gw:prompt:choose:prompt-approval:accept"}],
             [{"text": "Approve Session", "callback_data": "gw:prompt:choose:prompt-approval:acceptForSession"}],
@@ -6557,7 +6576,7 @@ def test_sync_codex_once_does_not_resend_identical_interactive_prompt() -> None:
     daemon.sync_codex_once()
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (
             -100100,
             77,
@@ -6688,3 +6707,145 @@ def test_poll_telegram_once_interactive_text_reply_rejects_image_payload() -> No
 
     assert telegram.sent_messages[-1] == (-100100, 77, "This prompt expects a text reply.", None)
     assert codex.interactive_responses == []
+
+
+def test_sync_codex_once_creates_and_updates_status_bubble_in_place() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.get_status_bubble_view(-100100, 77) == StatusBubbleViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+    )
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Topic status\n\n"
+            "Project: `gateway-project`\n"
+            "Thread: `thread-1`\n"
+            "State: `ready`\n"
+            "Queued: `0`\n"
+            "Latest: No assistant reply yet.",
+            {
+                "inline_keyboard": [
+                    [{"text": "✓ Ready", "callback_data": "gw:resp:noop"}],
+                    [
+                        {"text": "↺ New", "callback_data": "gw:resp:new"},
+                        {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                        {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                        {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                    ],
+                ]
+            },
+        )
+    ]
+
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+
+    daemon.sync_codex_once()
+
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Topic status\n\n"
+        "Project: `gateway-project`\n"
+        "Thread: `thread-1`\n"
+        "State: `running`\n"
+        "Queued: `0`\n"
+        "Latest: No assistant reply yet.",
+        {
+            "inline_keyboard": [
+                [{"text": "⏳ Working", "callback_data": "gw:resp:noop"}],
+                [
+                    {"text": "↺ New", "callback_data": "gw:resp:new"},
+                    {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                    {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                    {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                ],
+            ]
+        },
+    )
+
+
+def test_poll_telegram_once_status_bubble_callback_reuses_response_actions() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_status_bubble_view(
+        StatusBubbleViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=7,
+            codex_thread_id="thread-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-status-bubble",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:resp:status",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Topic status\n\n"
+            "Project: `gateway-project`\n"
+            "Thread title: `thread-1`\n"
+            "Thread id: `thread-1`\n"
+            "Topic id: `77`\n"
+            "Notification mode: `all`\n"
+            "Codex status: `idle`",
+            None,
+        )
+    ]
