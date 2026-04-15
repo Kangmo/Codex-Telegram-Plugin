@@ -491,6 +491,8 @@
 ### FP-27 verification
 - Branch and merge:
   - feature branch `feature/fp-27-inline-query-support`
+  - feature commit `bd51493`
+  - merge commit on `main` `b9f368f`
 - Reviewed `ccgram` inline-query handling in `bot.py::inline_query_handler()` and `handlers/command_history.py` before implementation.
 - Added `inline_query.py` for safe result building, and extended the Telegram transport with inline-query normalization plus `answerInlineQuery`.
 - `GatewayDaemon` now answers authorized inline queries with personal, zero-cache results built from:

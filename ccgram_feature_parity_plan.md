@@ -2026,6 +2026,8 @@ Support Telegram inline-query insertion as a fast way to send prepared text back
 
 - Branch and merge:
   - feature branch `feature/fp-27-inline-query-support`
+  - feature commit `bd51493`
+  - merge commit on `main` `b9f368f`
 - Reviewed `ccgram` inline-query references before implementation:
   - `src/ccgram/bot.py::inline_query_handler()`
   - `src/ccgram/handlers/command_history.py`
