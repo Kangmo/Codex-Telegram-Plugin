@@ -1,3 +1,4 @@
+import json
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.commands_catalog import register_bot_commands_if_changed
 from codex_telegram_gateway.daemon import GatewayDaemon
@@ -912,6 +913,95 @@ def test_gateway_flow_end_to_end_with_document_prompt(tmp_path) -> None:
         )
     ]
     assert state.get_pending_turn("thread-1") is not None
+
+
+def test_gateway_flow_upgrade_command_reports_version_and_marketplace_source(tmp_path, monkeypatch) -> None:
+    fake_home = tmp_path / "home"
+    marketplace_path = fake_home / ".agents" / "plugins" / "marketplace.json"
+    marketplace_path.parent.mkdir(parents=True)
+    marketplace_path.write_text(
+        json.dumps(
+            {
+                "name": "test-local",
+                "plugins": [
+                    {
+                        "name": "codex-telegram-gateway",
+                        "source": {
+                            "source": "local",
+                            "path": "../plugin-source/codex-telegram-gateway",
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Upgrade diagnostics",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Upgrade diagnostics",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway upgrade",
+    )
+    daemon.poll_telegram_once()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    expected_text = (
+        "Gateway upgrade\n\n"
+        "Installed version: `0.1.0`\n"
+        f"Plugin root: `{repo_root}`\n"
+        f"Plugin manifest: `{repo_root / '.codex-plugin' / 'plugin.json'}`\n"
+        f"MCP manifest: `{repo_root / '.mcp.json'}`\n\n"
+        "Marketplace installs:\n"
+        "1. scope `user`\n"
+        f"manifest `{marketplace_path}`\n"
+        "source `local`\n"
+        "raw path `../plugin-source/codex-telegram-gateway`\n"
+        f"resolved path `{(marketplace_path.parent / '../plugin-source/codex-telegram-gateway').resolve()}`\n\n"
+        "Recommended local upgrade steps:\n"
+        "1. Update the plugin source checkout shown above.\n"
+        "2. Restart Codex App so the plugin reloads.\n"
+        "3. Run `/gateway upgrade` again to confirm version and install path."
+    )
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        expected_text,
+        None,
+    )
 
 
 def test_gateway_unbind_flow_returns_topic_to_project_picker(tmp_path) -> None:

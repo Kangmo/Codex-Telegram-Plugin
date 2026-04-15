@@ -1336,6 +1336,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway doctor - Show Telegram and Codex App gateway status\n"
                 "/gateway projects - List loaded Codex App projects\n"
                 "/gateway threads - List loaded Codex App threads\n"
+                "/gateway upgrade - Show plugin version and upgrade instructions\n"
                 "/gateway recall - Recall recent topic messages\n"
                 "/gateway history - Show paginated history for this Codex thread\n"
                 "/gateway resume - Resume another Codex thread from this project\n"
@@ -1357,6 +1358,95 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "Additional pass-through commands appear here after you use them or configure them.\n\n"
             "Compatibility aliases inside `/gateway`: new, start, sessions, commands\n"
             "All other slash commands are passed through to the bound Codex thread unchanged.",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_upgrade_sends_rendered_diagnostics(monkeypatch) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway upgrade",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    diagnostics = __import__("codex_telegram_gateway.upgrade_diagnostics", fromlist=["UpgradeDiagnostics"]).UpgradeDiagnostics(
+        plugin_name="codex-telegram-gateway",
+        version="0.1.0",
+        plugin_root="/tmp/plugin",
+        plugin_manifest_path="/tmp/plugin/.codex-plugin/plugin.json",
+        mcp_manifest_path="/tmp/plugin/.mcp.json",
+    )
+    monkeypatch.setattr("codex_telegram_gateway.daemon.discover_upgrade_diagnostics", lambda start_path: diagnostics)
+    monkeypatch.setattr("codex_telegram_gateway.daemon.render_upgrade_text", lambda info: f"upgrade:{info.version}")
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "upgrade:0.1.0",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_upgrade_reports_discovery_failure(monkeypatch) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway upgrade",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    monkeypatch.setattr(
+        "codex_telegram_gateway.daemon.discover_upgrade_diagnostics",
+        lambda start_path: (_ for _ in ()).throw(FileNotFoundError("missing manifest")),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Upgrade diagnostics failed: missing manifest",
             None,
         )
     ]

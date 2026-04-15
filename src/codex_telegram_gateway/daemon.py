@@ -149,6 +149,10 @@ from codex_telegram_gateway.toolbar import (
     parse_toolbar_callback,
     render_toolbar_text,
 )
+from codex_telegram_gateway.upgrade_diagnostics import (
+    discover_upgrade_diagnostics,
+    render_upgrade_text,
+)
 
 _UNSET = object()
 
@@ -3695,6 +3699,22 @@ class GatewayDaemon:
             )
             return
 
+        if command_name == "upgrade":
+            try:
+                text = render_upgrade_text(
+                    discover_upgrade_diagnostics(
+                        start_path=Path(__file__).resolve(),
+                    )
+                )
+            except Exception as exc:
+                text = f"Upgrade diagnostics failed: {exc}"
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                text,
+            )
+            return
+
         if command_name == "status":
             self._telegram.send_message(
                 chat_id,
@@ -4587,6 +4607,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("doctor", "Show Telegram and Codex App gateway status"),
     _BotCommand("projects", "List loaded Codex App projects"),
     _BotCommand("threads", "List loaded Codex App threads"),
+    _BotCommand("upgrade", "Show plugin version and upgrade instructions"),
     _BotCommand("recall", "Recall recent topic messages"),
     _BotCommand("history", "Show paginated history for this Codex thread"),
     _BotCommand("resume", "Resume another Codex thread from this project"),
