@@ -60,7 +60,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-26 | Voice transcription flow | P1 | Native | Implemented |
 | FP-27 | Inline query support | P2 | Native | Implemented |
 | FP-28 | Inter-agent messaging/mailbox | P3 | Separate subsystem | Not recommended for near-term parity |
-| FP-29 | Shell/NL-to-command mode | P3 | Separate subsystem | Not recommended for this plugin |
+| FP-29 | Shell/NL-to-command mode | P3 | Adapted | Implemented |
 
 ## Feature Execution Tracker
 
@@ -207,9 +207,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-29: Shell/NL-to-Command Mode
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ## Documentation Discipline
 
@@ -2434,23 +2434,79 @@ Code review notes:
 
 ### FP-29: Shell/NL-to-Command Mode
 
-**Parity target**
+Branch and merge:
 
-`ccgram` supports shell-provider sessions; this gateway currently targets Codex App threads only.
+- feature branch `feature/fp-29-shell-nl-to-command-mode`
+- feature commit `PENDING`
+- merge commit on `main` `PENDING`
 
-**Dev design**
+Re-reviewed `ccgram` shell sources before implementation:
 
-- Keep this out of the main plugin.
-- If needed later, implement as a sibling plugin or an optional adapter mode bound to a project-local shell service.
+- `/tmp/ccgram-review/src/ccgram/providers/shell.py`
+- `/tmp/ccgram-review/src/ccgram/handlers/shell_commands.py`
+- `/tmp/ccgram-review/src/ccgram/handlers/shell_capture.py`
 
-**Implementation plan**
+Implementation decisions:
 
-1. Do not implement in the core parity pass.
-2. Reserve command names and docs so future work does not conflict.
+- Adapt `ccgram` shell mode into an explicit `/gateway shell ...` command family instead of a separate provider mode.
+- Keep raw execution and NL suggestion as two explicit paths:
+  - `/gateway shell !<command>` executes immediately in the bound project directory.
+  - `/gateway shell <request>` generates a suggested command and requires Telegram approval.
+- Persist pending shell suggestions per topic in SQLite so Run/Cancel callbacks survive daemon restarts.
+- Keep shell control primary-topic-only because project control actions stay out of mirror topics.
+- Use an OpenAI-compatible chat-completions provider only when configured; otherwise NL suggestion stays disabled and raw execution remains explicit.
 
-**Test automation plan**
+Implementation notes:
 
-- None in the current roadmap.
+- Added `shell_mode.py` for:
+  - command parsing
+  - approval callback parsing
+  - shell help rendering
+  - shell suggestion rendering
+  - shell result rendering
+  - OpenAI-compatible suggestion provider
+  - local subprocess shell runner
+- Added shell-related config in `GatewayConfig`:
+  - command timeout
+  - suggester provider
+  - suggester API key
+  - suggester base URL
+  - suggester model
+- Added persisted shell suggestion view state in SQLite so the daemon can recover shell approval widgets after restart.
+- `GatewayDaemon` now:
+  - exposes `/gateway shell` in help and command dispatch
+  - blocks shell control from mirror topics
+  - clears stale shell widgets when help/raw execution supersede them
+  - renders NL suggestions with Run/Cancel widgets
+  - executes approved or raw commands inside the bound project directory
+  - recovers by sending a fresh Telegram message if the prior shell widget message was deleted but the topic still exists
+
+Proofread review notes:
+
+- The first proofread pass found a real implementation defect: if the previous shell widget message had been deleted, suggestion updates and result edits could disappear into the outer polling exception path. That was corrected by falling back to a fresh Telegram message for non-topic-missing edit failures.
+- The review also added mirror-topic gating after the first draft so shell control follows the project-control rule already fixed elsewhere in the gateway.
+- The review then added explicit stale-callback, suggester-failure, deleted-widget-recreation, and deleted-result-message-recovery tests instead of leaving those paths best-effort.
+
+Automated test coverage:
+
+- Red-phase sequence:
+  - added end-to-end shell contracts first for raw `!command` execution and NL suggestion approval
+  - added interface-only `shell_mode.py`
+  - added unit tests over the interface surface with dummy suggester/runner doubles
+  - confirmed the expected failures before implementing the real code
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_shell_mode.py tests/unit/test_daemon.py -k 'shell or handles_commands_without_queueing_to_codex' tests/unit/test_state.py -k shell tests/unit/test_config.py -k shell tests/e2e/test_gateway_flow.py -k shell` -> `17 passed`
+  - `.venv/bin/pytest tests/unit/test_daemon.py -k 'gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `9 passed`
+  - `.venv/bin/pytest tests/unit/test_daemon.py -k 'previous_message_is_gone or original_widget_is_gone or gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `11 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `433 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp29.json -q` plus diff-based changed-line audit against `main` -> `234/273 = 85.7%`
+  - by file:
+    - `src/codex_telegram_gateway/config.py` -> `10/10 = 100.0%`
+    - `src/codex_telegram_gateway/daemon.py` -> `89/108 = 82.4%`
+    - `src/codex_telegram_gateway/shell_mode.py` -> `118/138 = 85.5%`
+    - `src/codex_telegram_gateway/state.py` -> `16/16 = 100.0%`
 
 ## Recommended Delivery Order
 
@@ -2498,8 +2554,7 @@ Code review notes:
 
 ### Deferred unless product scope changes
 
-- FP-28 Inter-agent messaging/mailbox
-- FP-29 Shell/NL-to-command mode
+- No deferred items remain from the original 29-feature parity inventory.
 
 ## Global Test Strategy
 

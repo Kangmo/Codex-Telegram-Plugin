@@ -19,6 +19,7 @@ from codex_telegram_gateway.models import (
     MailboxMessage,
 )
 from codex_telegram_gateway.live_view import LiveViewState
+from codex_telegram_gateway.shell_mode import ShellCommandSuggestion, ShellSuggestionView
 from codex_telegram_gateway.state import SqliteGatewayState
 
 
@@ -197,6 +198,32 @@ def test_sqlite_state_persists_loaded_projects_and_topic_project_selection(tmp_p
     assert state.get_project(project.project_id) == project
     assert state.list_projects() == [project]
     assert state.get_topic_project(-100100, 77) == topic_project
+
+
+def test_sqlite_state_persists_shell_view(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    shell_view = ShellSuggestionView(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=12,
+        codex_thread_id="thread-1",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+        project_name="gateway-project",
+        thread_title="thread-1",
+        suggestion=ShellCommandSuggestion(
+            command="find . -name '*.py'",
+            explanation="List tracked Python files from the current project root.",
+            original_text="list python files",
+        ),
+    )
+
+    state.upsert_shell_view(shell_view)
+
+    assert state.get_shell_view(-100100, 77) == shell_view
+
+    state.delete_shell_view(-100100, 77)
+
+    assert state.get_shell_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_pending_turns(tmp_path) -> None:

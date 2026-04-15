@@ -166,3 +166,29 @@ def test_gateway_config_loads_live_view_settings_from_env_file(tmp_path) -> None
 
     assert config.live_view_interval_seconds == 2.5
     assert config.live_view_timeout_seconds == 180.0
+
+
+def test_gateway_config_loads_shell_settings_from_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_BOT_TOKEN=test-token",
+                "TELEGRAM_ALLOWED_USER_IDS=111",
+                "TELEGRAM_DEFAULT_CHAT_ID=-100100",
+                "CODEX_TELEGRAM_SHELL_COMMAND_TIMEOUT_SECONDS=45.0",
+                "CODEX_TELEGRAM_SHELL_SUGGESTER_PROVIDER=openai",
+                "CODEX_TELEGRAM_SHELL_SUGGESTER_API_KEY=test-shell-key",
+                "CODEX_TELEGRAM_SHELL_SUGGESTER_BASE_URL=https://api.openai.com/v1",
+                "CODEX_TELEGRAM_SHELL_SUGGESTER_MODEL=gpt-test",
+            ]
+        )
+    )
+
+    config = GatewayConfig.from_env(env_file)
+
+    assert config.shell_command_timeout_seconds == 45.0
+    assert config.shell_suggester_provider == "openai"
+    assert config.shell_suggester_api_key == "test-shell-key"
+    assert config.shell_suggester_base_url == "https://api.openai.com/v1"
+    assert config.shell_suggester_model == "gpt-test"

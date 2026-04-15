@@ -4,6 +4,7 @@ from typing import Protocol
 
 from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.interactive_bridge import InteractivePrompt
+from codex_telegram_gateway.shell_mode import ShellSuggestionView
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -442,6 +443,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_shell_view(self, shell_view: ShellSuggestionView) -> ShellSuggestionView:
+        ...
+
+    def get_shell_view(self, chat_id: int, message_thread_id: int) -> ShellSuggestionView | None:
+        ...
+
+    def delete_shell_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_status_bubble_view(

@@ -20,9 +20,14 @@ class GatewayConfig:
     lifecycle_prune_interval_seconds: float = 300.0
     live_view_interval_seconds: float = 5.0
     live_view_timeout_seconds: float = 300.0
+    shell_command_timeout_seconds: float = 30.0
     state_database_path: Path = Path(".codex-telegram/gateway.db")
     toolbar_config_path: Path = Path(".codex-telegram/toolbar.toml")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
+    shell_suggester_provider: str = ""
+    shell_suggester_api_key: str = ""
+    shell_suggester_base_url: str = ""
+    shell_suggester_model: str = ""
     voice_transcription_provider: str = ""
     voice_transcription_api_key: str = ""
     voice_transcription_base_url: str = ""
@@ -94,6 +99,15 @@ class GatewayConfig:
             "CODEX_TELEGRAM_LIVE_VIEW_TIMEOUT_SECONDS",
             default=300.0,
         )
+        shell_command_timeout_seconds = _env_float(
+            env,
+            "CODEX_TELEGRAM_SHELL_COMMAND_TIMEOUT_SECONDS",
+            default=30.0,
+        )
+        shell_suggester_provider = env.get("CODEX_TELEGRAM_SHELL_SUGGESTER_PROVIDER", "").strip()
+        shell_suggester_api_key = env.get("CODEX_TELEGRAM_SHELL_SUGGESTER_API_KEY", "").strip()
+        shell_suggester_base_url = env.get("CODEX_TELEGRAM_SHELL_SUGGESTER_BASE_URL", "").strip()
+        shell_suggester_model = env.get("CODEX_TELEGRAM_SHELL_SUGGESTER_MODEL", "").strip()
         voice_transcription_provider = env.get("CODEX_TELEGRAM_WHISPER_PROVIDER", "").strip()
         voice_transcription_api_key = env.get("CODEX_TELEGRAM_WHISPER_API_KEY", "").strip()
         voice_transcription_base_url = env.get("CODEX_TELEGRAM_WHISPER_BASE_URL", "").strip()
@@ -117,8 +131,13 @@ class GatewayConfig:
             lifecycle_prune_interval_seconds=lifecycle_prune_interval_seconds,
             live_view_interval_seconds=live_view_interval_seconds,
             live_view_timeout_seconds=live_view_timeout_seconds,
+            shell_command_timeout_seconds=shell_command_timeout_seconds,
             state_database_path=state_database_path,
             toolbar_config_path=toolbar_config_path,
+            shell_suggester_provider=shell_suggester_provider,
+            shell_suggester_api_key=shell_suggester_api_key,
+            shell_suggester_base_url=shell_suggester_base_url,
+            shell_suggester_model=shell_suggester_model,
             voice_transcription_provider=voice_transcription_provider,
             voice_transcription_api_key=voice_transcription_api_key,
             voice_transcription_base_url=voice_transcription_base_url,

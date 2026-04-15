@@ -776,3 +776,43 @@
   - `.venv/bin/pytest -q` -> `411 passed`
 - Feature-specific changed-executable coverage:
   - diff-based changed-line audit for FP-28 source work -> `220/227 = 96.9%`
+
+### FP-29 verification
+- Branch plan:
+  - feature branch `feature/fp-29-shell-nl-to-command-mode`
+- Re-reviewed `ccgram` shell sources before implementation:
+  - `/tmp/ccgram-review/src/ccgram/providers/shell.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/shell_commands.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/shell_capture.py`
+- Red-phase sequence:
+  - added end-to-end shell contracts first for raw `!command` execution and NL suggestion approval
+  - added interface-only `shell_mode.py` with protocols, dataclasses, parse/render surface, and runner/suggester builders
+  - added unit tests over the interface surface with dummy suggester/runner doubles
+  - confirmed the expected failures:
+    - shell helper tests failed with `NotImplementedError`
+    - gateway e2e tests failed because `GatewayDaemon` did not yet accept `shell_runner` or `shell_suggester`
+- Implementation decisions locked during FP-29:
+  - adapt `ccgram` shell mode into an explicit `/gateway shell ...` command family instead of a separate provider mode
+  - keep raw execution and NL suggestion as two explicit paths:
+    - `/gateway shell !<command>` executes immediately in the bound project directory
+    - `/gateway shell <request>` generates a suggested command and requires Telegram approval
+  - persist pending shell suggestions per topic in SQLite so Run/Cancel callbacks survive daemon restarts
+  - scope shell control to primary bindings only because project control actions stay out of mirror topics
+  - use an OpenAI-compatible chat-completions provider only when configured; otherwise NL suggestion is disabled and raw execution remains explicit
+- Proofread fixes before sign-off:
+  - added mirror-topic gating after the first implementation draft so shell control follows the project-control rule
+  - found and fixed a real recovery bug where deleted suggestion messages could cause shell updates to disappear into the polling exception path
+  - added tests for stale callbacks, suggester failure, deleted-widget recovery, and deleted-result-message recovery instead of leaving those paths soft-fail
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_shell_mode.py tests/unit/test_daemon.py -k 'shell or handles_commands_without_queueing_to_codex' tests/unit/test_state.py -k shell tests/unit/test_config.py -k shell tests/e2e/test_gateway_flow.py -k shell` -> `17 passed`
+  - `.venv/bin/pytest tests/unit/test_daemon.py -k 'gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `9 passed`
+  - `.venv/bin/pytest tests/unit/test_daemon.py -k 'previous_message_is_gone or original_widget_is_gone or gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `11 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `433 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp29.json -q` plus diff-based changed-line audit against `main` -> `234/273 = 85.7%`
+  - changed executable lines by file:
+    - `src/codex_telegram_gateway/config.py` -> `10/10 = 100.0%`
+    - `src/codex_telegram_gateway/daemon.py` -> `89/108 = 82.4%`
+    - `src/codex_telegram_gateway/shell_mode.py` -> `118/138 = 85.5%`
+    - `src/codex_telegram_gateway/state.py` -> `16/16 = 100.0%`

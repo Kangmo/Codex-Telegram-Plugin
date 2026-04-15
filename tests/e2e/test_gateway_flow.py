@@ -61,6 +61,63 @@ class SequencedScreenshotProvider:
         )
 
 
+class StaticShellCommandSuggester:
+    def __init__(self, *, command: str, explanation: str, is_dangerous: bool = False) -> None:
+        self.command = command
+        self.explanation = explanation
+        self.is_dangerous = is_dangerous
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def suggest_command(
+        self,
+        *,
+        description: str,
+        cwd: str,
+        project_name: str,
+        thread_title: str,
+    ):
+        self.calls.append((description, cwd, project_name, thread_title))
+        return __import__("codex_telegram_gateway.shell_mode", fromlist=["ShellCommandSuggestion"]).ShellCommandSuggestion(
+            command=self.command,
+            explanation=self.explanation,
+            original_text=description,
+            is_dangerous=self.is_dangerous,
+        )
+
+
+class StaticShellRunner:
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int = 0,
+        timed_out: bool = False,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+        self.calls: list[tuple[str, str, float]] = []
+
+    def run(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        timeout_seconds: float,
+    ):
+        self.calls.append((command, cwd, timeout_seconds))
+        return __import__("codex_telegram_gateway.shell_mode", fromlist=["ShellExecutionResult"]).ShellExecutionResult(
+            command=command,
+            cwd=cwd,
+            exit_code=self.exit_code,
+            stdout=self.stdout,
+            stderr=self.stderr,
+            timed_out=self.timed_out,
+        )
+
+
 class FakeTelegramClient:
     """In-memory Telegram bot stub used by the end-to-end contract."""
 
@@ -580,6 +637,167 @@ def test_gateway_flow_gateway_panes_reports_project_threads(tmp_path) -> None:
             None,
         )
     ]
+
+
+def test_gateway_flow_gateway_shell_executes_raw_command(tmp_path) -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_runner = StaticShellRunner(stdout="/Users/kangmo/sacle/src/gateway-project\n")
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_runner=shell_runner,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell !pwd",
+    )
+    daemon.poll_telegram_once()
+
+    assert shell_runner.calls == [
+        ("pwd", "/Users/kangmo/sacle/src/gateway-project", 30.0),
+    ]
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Shell command result\n\nCommand: `pwd`\nProject: `gateway-project`\nExit code: `0`\n\nStdout:\n```text\n/Users/kangmo/sacle/src/gateway-project\n```",
+            None,
+        )
+    ]
+
+
+def test_gateway_flow_gateway_shell_suggestion_survives_restart_and_runs(tmp_path) -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    shell_suggester = StaticShellCommandSuggester(
+        command="find . -name '*.py'",
+        explanation="List tracked Python files from the current project root.",
+    )
+    first_daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        shell_suggester=shell_suggester,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway shell list python files",
+    )
+    first_daemon.poll_telegram_once()
+
+    assert shell_suggester.calls == [
+        (
+            "list python files",
+            "/Users/kangmo/sacle/src/gateway-project",
+            "gateway-project",
+            "thread-1",
+        )
+    ]
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Shell command suggestion\n\nRequest: `list python files`\nProject: `gateway-project`\nThread: `thread-1`\n\nSuggested command:\n`find . -name '*.py'`\n\nList tracked Python files from the current project root.",
+            {
+                "inline_keyboard": [
+                    [{"text": "Run", "callback_data": "gw:shell:run"}],
+                    [{"text": "Cancel", "callback_data": "gw:shell:cancel"}],
+                ]
+            },
+        )
+    ]
+
+    restarted_state = SqliteGatewayState(config.state_database_path)
+    shell_runner = StaticShellRunner(stdout="./src/codex_telegram_gateway/daemon.py\n")
+    restarted_daemon = GatewayDaemon(
+        config=config,
+        state=restarted_state,
+        telegram=telegram,
+        codex=codex,
+        shell_runner=shell_runner,
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="shell-run",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:shell:run",
+    )
+    restarted_daemon.poll_telegram_once()
+
+    assert shell_runner.calls == [
+        ("find . -name '*.py'", "/Users/kangmo/sacle/src/gateway-project", 30.0),
+    ]
+    assert non_bubble_edited_messages(telegram)[-1] == (
+        -100100,
+        1,
+        "Shell command result\n\nCommand: `find . -name '*.py'`\nProject: `gateway-project`\nExit code: `0`\n\nStdout:\n```text\n./src/codex_telegram_gateway/daemon.py\n```",
+        None,
+    )
 
 
 def test_gateway_flow_gateway_msg_send_delivers_to_idle_peer_thread(tmp_path) -> None:
