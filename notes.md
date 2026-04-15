@@ -186,6 +186,7 @@
 - FP-08 `/unbind`
 - FP-09 `/restore`
 - FP-11 `/send`
+- FP-13 `/verbose`
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 
@@ -291,6 +292,21 @@
 - Full suite verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `216 passed`
 - Feature-specific changed-statement coverage for tracked source diff is `197/223 = 88.3%`.
+
+### FP-13 verification
+- Added a dedicated `notification_modes.py` helper for normalization, callback parsing, picker rendering, and mode gating.
+- Added `/gateway verbose` plus inline mode switching for `all`, `important`, `errors_only`, and `muted`.
+- Routed supplemental topic notifications through one gate so typing and failure/interruption notices follow the configured per-topic mode.
+- Kept assistant reply delivery outside the mute gate because Telegram is the primary conversation surface in this gateway.
+- Proofread decisions:
+  - normalize legacy `assistant_plus_alerts` to `all`
+  - normalize legacy `assistant_only` to `important`
+  - allow mirror topics to change their own notification mode because it is topic-local state
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_notification_modes.py tests/unit/test_daemon.py tests/unit/test_sessions_dashboard.py tests/e2e/test_gateway_flow.py` -> `154 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `244 passed`
+- Feature-specific changed-statement coverage for tracked source diff is `40/48 = 83.3%`.
 
 ### FP-17 verification
 - Added a dedicated `commands_catalog.py` module for Telegram menu generation, sanitization, known-description mapping, and hash-based registration.

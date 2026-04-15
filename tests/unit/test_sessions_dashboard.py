@@ -16,7 +16,7 @@ def test_build_sessions_dashboard_renders_session_rows_and_footer() -> None:
                 thread_title="thread-1",
                 codex_thread_id="thread-1",
                 thread_status="idle",
-                notification_mode="assistant_plus_alerts",
+                notification_mode="all",
                 mirror_count=1,
                 status_icon="🟢",
                 warning_text=None,
@@ -31,7 +31,7 @@ def test_build_sessions_dashboard_renders_session_rows_and_footer() -> None:
         "1. 🟢 `(gateway-project) thread-1`\n"
         "project `gateway-project` • thread `thread-1`\n"
         "topic `77` • id `thread-1`\n"
-        "status `idle` • notify `assistant_plus_alerts`\n"
+        "status `idle` • notify `all`\n"
         "mirrors `1`"
     )
     assert markup == {
@@ -61,7 +61,7 @@ def test_build_sessions_dashboard_paginates_entries() -> None:
             thread_title=f"thread-{index + 1}",
             codex_thread_id=f"thread-{index + 1}",
             thread_status="idle",
-            notification_mode="assistant_plus_alerts",
+            notification_mode="all",
             mirror_count=0,
             status_icon="🟢",
             warning_text="Topic needs recovery." if index == 3 else None,
