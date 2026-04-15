@@ -409,6 +409,9 @@ class GatewayDaemon:
             return
 
     def _sync_outbound_event(self, binding, event, *, active_turn_result: TurnResult | None = None) -> None:
+        if _is_artifact_event_kind(event.kind):
+            self._sync_artifact_event(binding, event)
+            return
         if not _is_renderable_event_kind(event.kind):
             return
         reply_markup = self._assistant_reply_markup(binding, active_turn_result)
@@ -467,6 +470,50 @@ class GatewayDaemon:
                 reply_markup=reply_markup,
             )
         )
+        if self._is_primary_binding(binding):
+            self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
+
+    def _sync_artifact_event(self, binding, event) -> None:
+        outbound_message = self._get_outbound_message_for_target(binding, event.event_id)
+        if outbound_message is not None or self._has_seen_event_for_target(binding, event.event_id):
+            return
+
+        file_path = Path(str(getattr(event, "file_path", "") or "")).expanduser()
+        if not file_path.is_file():
+            return
+
+        caption = str(getattr(event, "text", "")).strip() or None
+        try:
+            if event.kind == "artifact_photo":
+                message_id = self._telegram.send_photo_file(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    file_path,
+                    caption=caption,
+                )
+            else:
+                message_id = self._telegram.send_document_file(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    file_path,
+                    caption=caption,
+                )
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return
+            raise
+
+        self._upsert_outbound_message_for_target(
+            binding,
+            OutboundMessage(
+                codex_thread_id=binding.codex_thread_id,
+                event_id=event.event_id,
+                telegram_message_ids=(message_id,),
+                text=caption or "",
+                reply_markup=None,
+            ),
+        )
+        self._mark_event_seen_for_target(binding, event.event_id)
         if self._is_primary_binding(binding):
             self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
 
@@ -3987,6 +4034,10 @@ def _latest_visible_summary(events: list) -> str | None:
 
 def _is_renderable_event_kind(kind: object) -> bool:
     return kind in {"assistant_message", "tool_batch", "completion_summary"}
+
+
+def _is_artifact_event_kind(kind: object) -> bool:
+    return kind in {"artifact_photo", "artifact_document"}
 
 
 def _event_turn_id(event_id: str) -> str | None:

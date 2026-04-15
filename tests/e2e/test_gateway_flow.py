@@ -295,6 +295,7 @@ class FakeCodexBridge:
                 thread_id=event.thread_id,
                 kind=event.kind,
                 text=text if event.event_id == event_id else event.text,
+                file_path=event.file_path,
             )
             for event in self._events[thread_id]
         ]
@@ -1194,3 +1195,56 @@ def test_gateway_flow_batches_tool_progress_and_sends_one_terminal_summary(tmp_p
         "⚡ 2 commands\n• pwd  ✅ /tmp/project\n• pytest -q  ⏳ running",
         None,
     )
+
+
+def test_gateway_flow_sends_artifact_events_back_to_telegram(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    project_root = tmp_path / "gateway-project"
+    artifact_path = project_root / "artifacts" / "diagram.png"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"png-bytes")
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Artifact flow",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    service = GatewayService(config=config, state=state, telegram=telegram, codex=codex)
+    binding = service.link_current_thread()
+    daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="I exported the updated diagram.",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1:artifact:photo",
+            thread_id="thread-1",
+            kind="artifact_photo",
+            text="Artifact: artifacts/diagram.png",
+            file_path=str(artifact_path),
+        )
+    )
+
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, binding.message_thread_id, "I exported the updated diagram.", None)
+    ]
+    assert telegram.sent_photos == [
+        (-100100, binding.message_thread_id, str(artifact_path), "Artifact: artifacts/diagram.png")
+    ]

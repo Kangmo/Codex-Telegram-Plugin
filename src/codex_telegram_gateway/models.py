@@ -63,6 +63,7 @@ class CodexEvent:
     thread_id: str
     kind: str
     text: str
+    file_path: str = ""
 
 
 @dataclass(frozen=True)

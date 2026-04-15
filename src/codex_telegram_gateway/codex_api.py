@@ -12,6 +12,7 @@ from codex_telegram_gateway.app_store import (
     list_project_threads,
     thread_rollout_path,
 )
+from codex_telegram_gateway.artifact_detector import build_artifact_events
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.interactive_bridge import InteractivePrompt, normalize_interactive_request
 from codex_telegram_gateway.models import (
@@ -135,7 +136,12 @@ class CodexAppServerClient:
             {"threadId": thread_id, "includeTurns": True},
         )
         thread = response["thread"]
-        return build_outbound_events(thread_id, thread["turns"])
+        project_root = str(thread.get("cwd") or "")
+        events: list[CodexEvent] = []
+        for event in build_outbound_events(thread_id, thread["turns"]):
+            events.append(event)
+            events.extend(build_artifact_events(thread_id, project_root, event))
+        return events
 
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         response = self._request(
