@@ -6171,3 +6171,520 @@ def test_poll_telegram_once_gateway_bindings_dashboard_lists_mirrors_and_pending
 
     assert "mirror chat `-100200` topic `88`" in telegram.sent_messages[0][2]
     assert "Pending mirror topic creation" in telegram.sent_messages[0][2]
+
+
+def test_sync_codex_once_shows_interactive_prompt_widget_for_pending_approval() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": "/tmp/project",
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages[-1][2].startswith("Command Approval")
+    assert telegram.sent_messages[-1][3] == {
+        "inline_keyboard": [
+            [{"text": "Approve Once", "callback_data": "gw:prompt:choose:prompt-approval:accept"}],
+            [{"text": "Approve Session", "callback_data": "gw:prompt:choose:prompt-approval:acceptForSession"}],
+            [{"text": "Decline", "callback_data": "gw:prompt:choose:prompt-approval:decline"}],
+            [{"text": "Cancel Turn", "callback_data": "gw:prompt:choose:prompt-approval:cancel"}],
+        ]
+    }
+    prompt_view = state.get_interactive_prompt_view(-100100, 77)
+    assert prompt_view is not None
+    assert prompt_view.prompt_id == "prompt-approval"
+
+
+def test_poll_telegram_once_interactive_prompt_callback_submits_decision() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/fileChange/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-2",
+                "reason": "Update generated files.",
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon.sync_codex_once()
+
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-prompt",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:prompt:choose:prompt-approval:accept",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.interactive_responses == [("prompt-approval", {"decision": "accept"})]
+    assert telegram.answered_callback_queries[-1] == ("cb-prompt", "Sent.")
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Sent your answer to Codex.\n\nFile Change Approval",
+        None,
+    )
+
+
+def test_poll_telegram_once_text_during_approval_prompt_asks_user_to_use_buttons() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={"threadId": "thread-1", "turnId": "turn-approval", "itemId": "item-1", "command": "pytest -q"},
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+    daemon.sync_codex_once()
+
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="approve it",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Please use the prompt buttons above for this question.",
+        None,
+    )
+    assert codex.interactive_responses == []
+
+
+def test_poll_telegram_once_text_answer_submits_interactive_question_instead_of_queueing_turn() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-question",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-question")] = TurnResult(
+        turn_id="turn-question",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-question",
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-question",
+                "itemId": "item-3",
+                "questions": [
+                    {
+                        "header": "Reason",
+                        "id": "reason",
+                        "question": "Why do you need this?",
+                    }
+                ],
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon.sync_codex_once()
+
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Need the production-safe path.",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.interactive_responses == [
+        (
+            "prompt-question",
+            {"answers": {"reason": {"answers": ["Need the production-safe path."]}}},
+        )
+    ]
+    assert state.pending_inbound_count() == 0
+    assert codex.started_turns == []
+
+
+def test_poll_telegram_once_option_prompt_rejects_free_text_reply() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-question",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-question")] = TurnResult(
+        turn_id="turn-question",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-question",
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-question",
+                "itemId": "item-3",
+                "questions": [
+                    {
+                        "header": "Mode",
+                        "id": "mode",
+                        "question": "Choose a mode",
+                        "options": [
+                            {"label": "Fast", "description": "Optimize for speed"},
+                            {"label": "Safe", "description": "Optimize for caution"},
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+    daemon.sync_codex_once()
+
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Fast",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Please use the prompt buttons above for this question.",
+        None,
+    )
+    assert codex.interactive_responses == []
+    assert codex.started_turns == []
+
+
+def test_sync_codex_once_does_not_resend_identical_interactive_prompt() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={"threadId": "thread-1", "turnId": "turn-approval", "itemId": "item-1", "command": "pytest -q"},
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.sync_codex_once()
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Command Approval\n\nCommand: `pytest -q`",
+            {
+                "inline_keyboard": [
+                    [{"text": "Approve Once", "callback_data": "gw:prompt:choose:prompt-approval:accept"}],
+                    [{"text": "Approve Session", "callback_data": "gw:prompt:choose:prompt-approval:acceptForSession"}],
+                    [{"text": "Decline", "callback_data": "gw:prompt:choose:prompt-approval:decline"}],
+                    [{"text": "Cancel Turn", "callback_data": "gw:prompt:choose:prompt-approval:cancel"}],
+                ]
+            },
+        )
+    ]
+
+
+def test_poll_telegram_once_interactive_prompt_callback_rejects_invalid_choice() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/fileChange/requestApproval",
+            params={"threadId": "thread-1", "turnId": "turn-approval", "itemId": "item-1", "reason": "Update files"},
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+    daemon.sync_codex_once()
+
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-invalid-choice",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:prompt:choose:prompt-approval:not-a-real-choice",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-invalid-choice",
+        "That prompt choice is no longer available.",
+    )
+
+
+def test_poll_telegram_once_interactive_text_reply_rejects_image_payload() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-question",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-question")] = TurnResult(
+        turn_id="turn-question",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-question",
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-question",
+                "itemId": "item-2",
+                "questions": [{"header": "Reason", "id": "reason", "question": "Why?"}],
+            },
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+    daemon.sync_codex_once()
+
+    telegram.push_photo_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="see attached",
+        local_image_path="/tmp/example.png",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (-100100, 77, "This prompt expects a text reply.", None)
+    assert codex.interactive_responses == []

@@ -1,3 +1,4 @@
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -6,6 +7,7 @@ from codex_telegram_gateway.models import (
     CodexThread,
     HistoryViewState,
     InboundMessage,
+    InteractivePromptViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -43,6 +45,7 @@ class DummyState:
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
+        self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
@@ -317,6 +320,25 @@ class DummyState:
     def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
         self.restore_views.pop((chat_id, message_thread_id), None)
 
+    def upsert_interactive_prompt_view(
+        self,
+        interactive_prompt_view: InteractivePromptViewState,
+    ) -> InteractivePromptViewState:
+        self.interactive_prompt_views[
+            (interactive_prompt_view.chat_id, interactive_prompt_view.message_thread_id)
+        ] = interactive_prompt_view
+        return interactive_prompt_view
+
+    def get_interactive_prompt_view(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> InteractivePromptViewState | None:
+        return self.interactive_prompt_views.get((chat_id, message_thread_id))
+
+    def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.interactive_prompt_views.pop((chat_id, message_thread_id), None)
+
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
         self.send_views[(send_view.chat_id, send_view.message_thread_id)] = send_view
         return send_view
@@ -519,6 +541,28 @@ class DummyTelegramClient:
             }
         )
 
+    def push_photo_update(
+        self,
+        *,
+        update_id: int,
+        chat_id: int,
+        message_thread_id: int,
+        from_user_id: int,
+        text: str,
+        local_image_path: str,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "message",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+                "from_user_id": from_user_id,
+                "text": text,
+                "local_image_paths": (local_image_path,),
+            }
+        )
+
     def push_callback_query(
         self,
         *,
@@ -629,8 +673,10 @@ class DummyCodexBridge:
         self._threads = {thread.thread_id: thread}
         self._events: dict[str, list[CodexEvent]] = {thread.thread_id: []}
         self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
+        self._interactive_prompts: dict[str, InteractivePrompt] = {}
         self.started_turns: list[StartedTurn] = []
         self.steered_turns: list[tuple[str, StartedTurn]] = []
+        self.interactive_responses: list[tuple[str, dict[str, object]]] = []
         self.created_threads: list[CodexThread] = []
         self.ensured_projects: list[str] = []
         self.renamed_threads: list[tuple[str, str]] = []
@@ -671,6 +717,12 @@ class DummyCodexBridge:
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         return list(self._history_entries[thread_id])
 
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        prompts = list(self._interactive_prompts.values())
+        if thread_id is None:
+            return prompts
+        return [prompt for prompt in prompts if prompt.thread_id == thread_id]
+
     def list_resumable_threads(
         self,
         project_id: str,
@@ -687,6 +739,22 @@ class DummyCodexBridge:
 
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)
+
+    def queue_interactive_prompt(self, prompt: InteractivePrompt | None) -> None:
+        if prompt is None:
+            return
+        self._interactive_prompts[prompt.prompt_id] = prompt
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        self.interactive_responses.append((prompt_id, payload))
+        self._interactive_prompts.pop(prompt_id, None)
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
+        self._interactive_prompts = {
+            prompt_id: prompt
+            for prompt_id, prompt in self._interactive_prompts.items()
+            if prompt.thread_id != thread_id
+        }
 
     def set_history_entries(self, thread_id: str, entries: list[CodexHistoryEntry]) -> None:
         self._history_entries[thread_id] = list(entries)

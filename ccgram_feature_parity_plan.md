@@ -50,7 +50,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-16 | `/recall` top-level recall flow | P1 | Native | Partial via reply widget only |
 | FP-17 | Command discovery and Telegram menu sync | P0 | Adapted | Partial today |
 | FP-18 | Full sessions dashboard | P0 | Native | Partial today |
-| FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Missing |
+| FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Implemented |
 | FP-20 | Dedicated status bubble | P0 | Native | Missing |
 | FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Missing |
 | FP-22 | Live view | P1 | Adapted | Missing |
@@ -157,9 +157,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-19: Generic Interactive Prompt Bridge
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-20: Dedicated Status Bubble
 - [ ] Implemented
@@ -587,6 +587,52 @@ Branch and merge:
 - Feature branch: `feature/fp-18-full-sessions-dashboard`
 - Feature commit: `10f8f79`
 - Merge commit on `main`: `9909e0c`
+
+### FP-19: Generic Interactive Prompt Bridge
+
+Branch and merge:
+
+- Feature branch: `feature/fp-19-generic-interactive-prompt-bridge`
+- Feature commit: `PENDING`
+- Merge commit on `main`: `PENDING`
+
+Implementation decisions:
+
+- Interactive prompt parity is adapted to Codex App server-request semantics, not tmux session prompts. The supported prompt families are:
+  - command approval
+  - file-change approval
+  - tool `requestUserInput`
+- A dedicated `interactive_bridge.py` module owns prompt normalization, Telegram rendering, callback parsing, and multi-question answer assembly so daemon logic stays bounded.
+- Pending prompt discovery is pulled from the live app-server stdio stream. `codex_api.py` captures supported JSON-RPC server requests, keeps them in-memory, and writes response payloads back on the same session when Telegram answers.
+- Prompt view metadata is persisted in SQLite as `InteractivePromptViewState`, keyed by `chat_id + message_thread_id`, so the gateway can edit or clear the visible Telegram prompt message safely across normal polling and cleanup flows.
+- Because app-server prompt requests are tied to the current live stdio session, restart persistence is intentionally limited to visible widget cleanup and stale-callback rejection. After a daemon restart, the old prompt is surfaced as expired with explicit guidance to continue from Codex App instead of trying to answer an already-broken server request.
+- Text answers are accepted only for tool questions that actually request free text. Approval prompts and option-only tool questions require button clicks.
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - prompt normalization for supported app-server methods
+  - callback parsing for choice and `Other` flows
+  - JSON-RPC prompt capture and response submission in `codex_api.py`
+  - daemon rendering of approval widgets, in-place prompt progression, cleanup, stale-callback rejection, and free-text answer routing
+  - end-to-end restart expiry behavior for a pending prompt widget
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_interactive_bridge.py tests/unit/test_codex_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "interactive or prompt"` -> `17 passed, 139 deselected`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `261 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/codex_api.py`: `34/36 = 94.4%`
+  - `src/codex_telegram_gateway/daemon.py`: `92/122 = 75.4%`
+  - `src/codex_telegram_gateway/models.py`: `8/8 = 100.0%`
+  - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `TOTAL`: `146/178 = 82.0%`
+
+Code review notes:
+
+- The main design constraint identified during proofread was session lifetime: a Telegram callback cannot safely answer a stale app-server request after restart. The implementation now marks those widgets expired instead of guessing.
+- The proofread pass caught a routing bug where plain Telegram text could accidentally satisfy approval or option-only prompts. Those branches now reject plain text and direct the user to the Telegram buttons.
+- The proofread pass also caught an input-type gap for text-only questions with image attachments. Those replies are now rejected cleanly with explicit guidance instead of being dropped silently.
 
 ## Shared Architecture Changes
 
@@ -1385,6 +1431,48 @@ Support Telegram-side response widgets for Codex prompts that need user choice o
   - fake approval prompt can be accepted/denied from Telegram
 - E2E:
   - blocked turn shows prompt keyboard; callback resolves turn and clears typing
+
+### FP-19 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-19-generic-interactive-prompt-bridge`
+  - feature commit `PENDING`
+  - merge commit on `main` `PENDING`
+- Added a dedicated `interactive_bridge.py` module for:
+  - app-server prompt normalization
+  - Telegram prompt rendering
+  - callback parsing
+  - multi-question answer collection
+- Added Codex bridge support for three prompt families only:
+  - `item/commandExecution/requestApproval`
+  - `item/fileChange/requestApproval`
+  - `item/tool/requestUserInput`
+- Added persisted `InteractivePromptViewState` rows in SQLite and wired them through the gateway state/port interfaces so one active prompt widget per topic can be tracked and cleaned up safely.
+- The daemon now:
+  - discovers pending app-server prompts during normal sync
+  - renders inline approval and multiple-choice keyboards in Telegram
+  - accepts free-text answers for text questions
+  - submits the normalized JSON-RPC response back to Codex App
+  - clears stale prompt widgets on terminal-turn, rebind, new-thread, unbind, and restart-expired paths
+- Implementation decisions locked during FP-19:
+  - prompt routing is keyed by persisted topic identity and prompt id, never by mutable topic title text
+  - app-server interactive prompts are tied to the live stdio session, so after a gateway restart the Telegram widget is marked expired instead of pretending the old server request can still be answered safely
+  - unsupported prompt families such as permission approvals and MCP elicitation are intentionally left unsupported until the bridge can model them correctly
+- Proofread fixes landed before sign-off:
+  - free-text Telegram replies no longer accidentally answer approval prompts or option-only prompt steps; those now instruct the user to use the prompt buttons
+  - text-only tool questions now reject image replies cleanly instead of silently consuming them
+  - prompt reply markup is cleared during cleanup so stale approval buttons do not linger after the turn becomes healthy again
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_interactive_bridge.py tests/unit/test_codex_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "interactive or prompt"` -> `17 passed, 139 deselected`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `261 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/codex_api.py`: `34/36 = 94.4%`
+  - `src/codex_telegram_gateway/daemon.py`: `92/122 = 75.4%`
+  - `src/codex_telegram_gateway/models.py`: `8/8 = 100.0%`
+  - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `TOTAL`: `146/178 = 82.0%`
 
 ### FP-20: Dedicated Status Bubble
 

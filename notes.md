@@ -189,6 +189,7 @@
 - FP-13 `/verbose`
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
+- FP-19 Interactive prompt bridge
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -342,3 +343,25 @@
 - Feature-specific coverage for tracked FP-18 source ranges:
   - `daemon.py` FP-18 ranges: `133/146 = 91.1%`
   - `sessions_dashboard.py`: `77/84 = 91.7%`
+
+### FP-19 verification
+- Added a dedicated `interactive_bridge.py` module that normalizes supported Codex App server-request prompts, renders Telegram widgets, parses callbacks, and assembles multi-question answer payloads.
+- Supported prompt families are currently:
+  - `item/commandExecution/requestApproval`
+  - `item/fileChange/requestApproval`
+  - `item/tool/requestUserInput`
+- Added persisted `InteractivePromptViewState` rows in SQLite so pending prompt widgets can be edited, cleared, and rejected safely by topic after normal sync and cleanup flows.
+- The gateway now surfaces interactive prompt widgets in Telegram, routes valid button and text answers back to the live app-server session, and expires old prompt widgets after restart instead of pretending stale server requests remain answerable.
+- Proofread fixes landed before sign-off:
+  - plain Telegram text can no longer accidentally answer approval prompts or option-only questions
+  - text-only tool questions now reject image replies explicitly
+  - prompt cleanup now clears stale reply markup when the prompt or topic state is torn down
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `261 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/codex_api.py`: `34/36 = 94.4%`
+  - `src/codex_telegram_gateway/daemon.py`: `92/122 = 75.4%`
+  - `src/codex_telegram_gateway/models.py`: `8/8 = 100.0%`
+  - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `TOTAL`: `146/178 = 82.0%`

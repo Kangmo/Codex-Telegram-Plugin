@@ -2,6 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -10,6 +11,7 @@ from codex_telegram_gateway.models import (
     CodexThread,
     HistoryViewState,
     InboundMessage,
+    InteractivePromptViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -169,6 +171,15 @@ class CodexBridge(Protocol):
         ...
 
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
+        ...
+
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        ...
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        ...
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
         ...
 
 
@@ -337,6 +348,22 @@ class GatewayState(Protocol):
         ...
 
     def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_interactive_prompt_view(
+        self,
+        interactive_prompt_view: InteractivePromptViewState,
+    ) -> InteractivePromptViewState:
+        ...
+
+    def get_interactive_prompt_view(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> InteractivePromptViewState | None:
+        ...
+
+    def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:

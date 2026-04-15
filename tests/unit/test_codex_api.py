@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from itertools import count
 from unittest.mock import patch
 
 from codex_telegram_gateway.codex_api import CodexAppServerClient, _build_turn_input, _turn_waits_for_approval
@@ -312,3 +313,145 @@ def test_list_resumable_threads_uses_app_store_threads_and_marks_unloaded() -> N
             exclude_thread_id="thread-1",
             limit=12,
         )
+
+
+def test_request_captures_interactive_prompt_request_before_matching_response() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._request_ids = count(1)  # type: ignore[attr-defined]
+    client._pending_interactive_prompts = {}  # type: ignore[attr-defined]
+    client._interactive_request_ids = {}  # type: ignore[attr-defined]
+    written_messages: list[dict[str, object]] = []
+    incoming_messages = iter(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": "server-approval-1",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "item-1",
+                    "command": "pytest -q",
+                    "cwd": "/tmp/project",
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"thread": {"id": "thread-1"}},
+            },
+        ]
+    )
+    client._write_message = lambda message: written_messages.append(message)  # type: ignore[attr-defined]
+    client._read_message = lambda: next(incoming_messages)  # type: ignore[attr-defined]
+
+    result = client._request("thread/read", {"threadId": "thread-1", "includeTurns": True})
+
+    assert result == {"thread": {"id": "thread-1"}}
+    prompts = client.list_pending_prompts("thread-1")
+    assert len(prompts) == 1
+    assert prompts[0].prompt_id == "server-approval-1"
+    assert prompts[0].kind == "command_approval"
+    assert written_messages == [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "thread/read",
+            "params": {"threadId": "thread-1", "includeTurns": True},
+        }
+    ]
+
+
+def test_respond_interactive_prompt_writes_jsonrpc_response_and_clears_prompt() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._pending_interactive_prompts = {}  # type: ignore[attr-defined]
+    client._interactive_request_ids = {}  # type: ignore[attr-defined]
+    written_messages: list[dict[str, object]] = []
+    client._write_message = lambda message: written_messages.append(message)  # type: ignore[attr-defined]
+
+    prompt = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"]).normalize_interactive_request(
+        prompt_id="server-approval-2",
+        method="item/fileChange/requestApproval",
+        params={
+            "threadId": "thread-1",
+            "turnId": "turn-2",
+            "itemId": "item-2",
+            "reason": "Update generated files.",
+        },
+    )
+    assert prompt is not None
+    client._pending_interactive_prompts[prompt.prompt_id] = prompt  # type: ignore[attr-defined]
+    client._interactive_request_ids[prompt.prompt_id] = "server-approval-2"  # type: ignore[attr-defined]
+
+    client.respond_interactive_prompt(
+        "server-approval-2",
+        {"decision": "accept"},
+    )
+
+    assert client.list_pending_prompts("thread-1") == []
+    assert written_messages == [
+        {
+            "jsonrpc": "2.0",
+            "id": "server-approval-2",
+            "result": {"decision": "accept"},
+        }
+    ]
+
+
+def test_list_pending_prompts_without_filter_and_clear_pending_prompts() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    prompt_one = interactive.normalize_interactive_request(
+        prompt_id="prompt-1",
+        method="item/commandExecution/requestApproval",
+        params={"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "command": "pytest -q"},
+    )
+    prompt_two = interactive.normalize_interactive_request(
+        prompt_id="prompt-2",
+        method="item/fileChange/requestApproval",
+        params={"threadId": "thread-2", "turnId": "turn-2", "itemId": "item-2", "reason": "Update files"},
+    )
+    assert prompt_one is not None and prompt_two is not None
+    client._pending_interactive_prompts = {prompt_one.prompt_id: prompt_one, prompt_two.prompt_id: prompt_two}  # type: ignore[attr-defined]
+    client._interactive_request_ids = {prompt_one.prompt_id: "r1", prompt_two.prompt_id: "r2"}  # type: ignore[attr-defined]
+
+    assert {prompt.prompt_id for prompt in client.list_pending_prompts()} == {"prompt-1", "prompt-2"}
+
+    client.clear_pending_prompts("thread-1")
+
+    assert [prompt.prompt_id for prompt in client.list_pending_prompts()] == ["prompt-2"]
+
+
+def test_request_ignores_non_numeric_unmatched_message_ids() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._request_ids = count(1)  # type: ignore[attr-defined]
+    client._pending_interactive_prompts = {}  # type: ignore[attr-defined]
+    client._interactive_request_ids = {}  # type: ignore[attr-defined]
+    written_messages: list[dict[str, object]] = []
+    incoming_messages = iter(
+        [
+            {"jsonrpc": "2.0", "id": "not-an-int", "result": {"ignored": True}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}},
+        ]
+    )
+    client._write_message = lambda message: written_messages.append(message)  # type: ignore[attr-defined]
+    client._read_message = lambda: next(incoming_messages)  # type: ignore[attr-defined]
+
+    assert client._request("thread/read", {"threadId": "thread-1", "includeTurns": True}) == {"ok": True}
+    assert written_messages[0]["method"] == "thread/read"
+
+
+def test_capture_server_request_ignores_invalid_and_unsupported_messages() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._pending_interactive_prompts = {}  # type: ignore[attr-defined]
+    client._interactive_request_ids = {}  # type: ignore[attr-defined]
+
+    client._capture_server_request(  # type: ignore[attr-defined]
+        {"id": "broken-1", "method": "item/tool/requestUserInput", "params": "not-a-dict"}
+    )
+    client._capture_server_request(  # type: ignore[attr-defined]
+        {"id": "broken-2", "method": "item/permissions/requestApproval", "params": {"threadId": "thread-1"}}
+    )
+
+    assert client.list_pending_prompts() == []
