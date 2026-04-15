@@ -11,6 +11,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     TopicCreationJob,
     StartedTurn,
@@ -286,6 +287,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_resume_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_restore_view(self, restore_view: RestoreViewState) -> RestoreViewState:
+        ...
+
+    def get_restore_view(self, chat_id: int, message_thread_id: int) -> RestoreViewState | None:
+        ...
+
+    def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:

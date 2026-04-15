@@ -6,6 +6,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     TopicCreationJob,
     TopicLifecycle,
@@ -284,6 +285,25 @@ def test_sqlite_state_persists_resume_view_state(tmp_path) -> None:
     state.delete_resume_view(-100100, 77)
 
     assert state.get_resume_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_restore_view_state(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    restore_view = RestoreViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=44,
+        codex_thread_id="thread-1",
+        issue_kind="closed",
+    )
+
+    state.upsert_restore_view(restore_view)
+
+    assert state.get_restore_view(-100100, 77) == restore_view
+
+    state.delete_restore_view(-100100, 77)
+
+    assert state.get_restore_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_topic_lifecycle_and_project_activity(tmp_path) -> None:

@@ -20,6 +20,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     StartedTurn,
     TopicCreationJob,
@@ -41,6 +42,15 @@ from codex_telegram_gateway.resume_command import (
     parse_resume_page_callback,
     parse_resume_pick_callback,
     render_resume_picker,
+)
+from codex_telegram_gateway.recovery import (
+    CALLBACK_RESTORE_CANCEL,
+    CALLBACK_RESTORE_CONTINUE,
+    CALLBACK_RESTORE_RECREATE,
+    CALLBACK_RESTORE_RESUME,
+    RESTORE_ISSUE_CLOSED,
+    RESTORE_ISSUE_DELETED,
+    render_restore_prompt,
 )
 from codex_telegram_gateway.telegram_api import (
     is_missing_topic_error,
@@ -228,6 +238,8 @@ class GatewayDaemon:
                     continue
                 binding = self._binding_by_topic(chat_id, message_thread_id)
                 if binding is not None and binding.binding_status != ACTIVE_BINDING_STATUS:
+                    if self._is_primary_binding(binding):
+                        self._offer_restore_prompt(binding)
                     continue
                 command = _parse_command(text)
                 if command is not None:
@@ -1020,6 +1032,9 @@ class GatewayDaemon:
         if data.startswith(CALLBACK_HISTORY_PREFIX):
             self._handle_history_callback(update)
             return
+        if data.startswith("gw:restore:"):
+            self._handle_restore_callback(update)
+            return
         if data.startswith(CALLBACK_RESUME_PAGE_PREFIX) or data.startswith(CALLBACK_RESUME_PICK_PREFIX) or data == CALLBACK_RESUME_CANCEL:
             self._handle_resume_callback(update)
             return
@@ -1316,6 +1331,111 @@ class GatewayDaemon:
         self._show_history_message(binding, page_index=page_index, message_id=message_id)
         self._telegram.answer_callback_query(callback_query_id, "Page updated.")
 
+    def _handle_restore_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        data = str(update["data"])
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        restore_view = self._state.get_restore_view(chat_id, message_thread_id)
+
+        if data == CALLBACK_RESTORE_CANCEL:
+            if restore_view is not None and restore_view.message_id == message_id:
+                self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+                self._state.delete_restore_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "Cancelled.")
+            return
+
+        if binding is None or not self._is_primary_binding(binding):
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer eligible for recovery.")
+            return
+        if restore_view is None or restore_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This recovery menu is stale.")
+            return
+        if restore_view.codex_thread_id != binding.codex_thread_id:
+            self._telegram.answer_callback_query(callback_query_id, "This recovery menu no longer matches the topic.")
+            return
+
+        issue_kind = self._restore_issue_for_binding(binding)
+        if issue_kind is None:
+            self._state.delete_restore_view(chat_id, message_thread_id)
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                "Nothing to restore. This topic is already healthy.",
+                reply_markup=None,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Already healthy.")
+            return
+        if issue_kind != restore_view.issue_kind:
+            self._offer_restore_prompt(binding, message_id=message_id)
+            self._telegram.answer_callback_query(callback_query_id, "Recovery state changed. Refreshed.")
+            return
+
+        if data == CALLBACK_RESTORE_CONTINUE:
+            if issue_kind != RESTORE_ISSUE_CLOSED:
+                self._telegram.answer_callback_query(callback_query_id, "Continue here is not available for this issue.")
+                return
+            thread = self._codex.read_thread(binding.codex_thread_id)
+            topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
+            try:
+                self._telegram.edit_forum_topic(chat_id, message_thread_id, topic_name)
+            except Exception as exc:
+                if not is_topic_edit_permission_error(exc):
+                    if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                        self._telegram.answer_callback_query(callback_query_id, "This topic is no longer reachable.")
+                        return
+                    raise
+            restored_binding = self._save_binding(
+                replace(
+                    binding,
+                    topic_name=topic_name,
+                    binding_status=ACTIVE_BINDING_STATUS,
+                )
+            )
+            self._touch_topic_lifecycle(restored_binding.codex_thread_id, completed_at=None)
+            self._clear_topic_status_override(chat_id, message_thread_id)
+            self._state.delete_restore_view(chat_id, message_thread_id)
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                (
+                    "Restored this topic in place.\n"
+                    f"Thread id: `{restored_binding.codex_thread_id}`"
+                ),
+                reply_markup=None,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Restored.")
+            return
+
+        if data == CALLBACK_RESTORE_RECREATE:
+            if issue_kind != RESTORE_ISSUE_DELETED:
+                self._telegram.answer_callback_query(callback_query_id, "Recreate is not available for this issue.")
+                return
+            recreated = self._service.recreate_topic(binding.codex_thread_id)
+            self._state.delete_restore_view(chat_id, message_thread_id)
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                (
+                    "Recreated the Telegram topic for this Codex thread.\n"
+                    f"New topic id: `{recreated.message_thread_id}`\n"
+                    f"Thread id: `{recreated.codex_thread_id}`"
+                ),
+                reply_markup=None,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Recreated.")
+            return
+
+        if data == CALLBACK_RESTORE_RESUME:
+            self._state.delete_restore_view(chat_id, message_thread_id)
+            self._open_resume_picker(binding, message_id=message_id)
+            self._telegram.answer_callback_query(callback_query_id, "Choose a thread.")
+            return
+
+        self._telegram.answer_callback_query(callback_query_id, "Unknown recovery action.")
+
     def _handle_resume_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
         chat_id = int(update["chat_id"])
@@ -1377,6 +1497,7 @@ class GatewayDaemon:
         self._state.delete_topic_lifecycle(previous_thread_id)
         self._state.delete_history_view(chat_id, message_thread_id)
         self._state.delete_resume_view(chat_id, message_thread_id)
+        self._state.delete_restore_view(chat_id, message_thread_id)
         self._clear_typing_state(chat_id, message_thread_id)
         self._clear_topic_status_override(chat_id, message_thread_id)
         self._telegram.edit_message_text(
@@ -1590,6 +1711,7 @@ class GatewayDaemon:
         if existing_binding is not None:
             self._state.delete_pending_turn(existing_binding.codex_thread_id)
             self._clear_typing_state(existing_binding.chat_id, existing_binding.message_thread_id)
+        self._state.delete_restore_view(topic_project.chat_id, topic_project.message_thread_id)
         if topic_project.picker_message_id is not None:
             self._telegram.edit_message_reply_markup(
                 topic_project.chat_id,
@@ -1741,6 +1863,25 @@ class GatewayDaemon:
                 self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
                 return
             self._open_resume_picker(binding)
+            return
+
+        if command_name == "restore":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            if not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
+            if not self._offer_restore_prompt(binding):
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "Nothing to restore. This topic is already healthy.",
+                )
             return
 
         if command_name == "unbind":
@@ -1914,6 +2055,57 @@ class GatewayDaemon:
             )
         )
 
+    def _offer_restore_prompt(
+        self,
+        binding: Binding,
+        *,
+        message_id: int | None = None,
+    ) -> bool:
+        issue_kind = self._restore_issue_for_binding(binding)
+        if issue_kind is None:
+            self._state.delete_restore_view(binding.chat_id, binding.message_thread_id)
+            return False
+        prompt = render_restore_prompt(
+            issue_kind=issue_kind,
+            topic_name=strip_topic_status_prefix(binding.topic_name or "") or binding.codex_thread_id,
+            thread_id=binding.codex_thread_id,
+        )
+        existing_restore_view = self._state.get_restore_view(binding.chat_id, binding.message_thread_id)
+        if message_id is None and existing_restore_view is not None:
+            message_id = existing_restore_view.message_id
+        if message_id is None:
+            message_id = self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                prompt.text,
+                reply_markup=prompt.reply_markup,
+            )
+        else:
+            self._telegram.edit_message_text(
+                binding.chat_id,
+                message_id,
+                prompt.text,
+                reply_markup=prompt.reply_markup,
+            )
+        self._state.upsert_restore_view(
+            RestoreViewState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                message_id=message_id,
+                codex_thread_id=binding.codex_thread_id,
+                issue_kind=issue_kind,
+            )
+        )
+        return True
+
+    @staticmethod
+    def _restore_issue_for_binding(binding: Binding) -> str | None:
+        if binding.binding_status == CLOSED_BINDING_STATUS:
+            return RESTORE_ISSUE_CLOSED
+        if binding.binding_status == DELETED_BINDING_STATUS:
+            return RESTORE_ISSUE_DELETED
+        return None
+
     def _start_new_thread(
         self,
         chat_id: int,
@@ -1940,6 +2132,7 @@ class GatewayDaemon:
             thread_title=thread_title,
         )
         self._state.delete_pending_turn(previous_thread_id)
+        self._state.delete_restore_view(chat_id, message_thread_id)
         self._clear_typing_state(chat_id, message_thread_id)
         self._telegram.send_message(
             chat_id,
@@ -1984,6 +2177,7 @@ class GatewayDaemon:
             )
             self._state.delete_history_view(target.chat_id, target.message_thread_id)
             self._state.delete_resume_view(target.chat_id, target.message_thread_id)
+            self._state.delete_restore_view(target.chat_id, target.message_thread_id)
             self._state.delete_topic_history(target.chat_id, target.message_thread_id)
             self._clear_typing_state(target.chat_id, target.message_thread_id)
             self._clear_topic_status_override(target.chat_id, target.message_thread_id)
@@ -2287,6 +2481,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("threads", "List loaded Codex App threads"),
     _BotCommand("history", "Show paginated history for this Codex thread"),
     _BotCommand("resume", "Resume another Codex thread from this project"),
+    _BotCommand("restore", "Show recovery options for this topic"),
     _BotCommand("unbind", "Detach this Telegram topic from its Codex thread"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),

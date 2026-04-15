@@ -244,3 +244,22 @@
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_state.py -q` -> `14 passed`
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `139 passed`
 - Feature-specific changed-statement coverage for source diff is 58/67 = 86.6%.
+
+### FP-09 verification
+- Added an adapted recovery layer for Codex App bindings instead of tmux sessions:
+  - `/gateway restore`
+  - auto-prompt on inbound messages to closed primary topics
+  - `Continue Here`
+  - `Recreate Topic`
+  - `Resume Other Thread`
+  - `Cancel`
+- Added persisted `RestoreViewState` rows in SQLite so restore menus survive restart and stale callbacks are rejected safely.
+- Recovery cleanup is now tied into bind, rebind, unbind, and new-thread flows so old recovery widgets are removed when the topic becomes healthy.
+- Two proofread fixes landed during implementation:
+  - `Continue Here` now restores the canonical Telegram topic title immediately instead of waiting for a later sync
+  - repeated messages on a closed topic reuse the existing restore message instead of sending duplicate menus
+- One red-phase test bug was fixed before sign-off: batched callback updates were being processed in a single poll under the wrong state, so those tests were rewritten to isolate each callback branch under the intended binding state.
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_recovery.py tests/unit/test_daemon.py tests/unit/test_state.py tests/e2e/test_gateway_flow.py -q` -> `103 passed`
+- Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `155 passed`
+- Feature-specific changed-statement coverage for tracked source diff is 119/129 = 92.2%.

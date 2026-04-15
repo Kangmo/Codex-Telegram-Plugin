@@ -10,6 +10,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    RestoreViewState,
     ResumeViewState,
     TopicCreationJob,
     TopicLifecycle,
@@ -155,6 +156,15 @@ class SqliteGatewayState:
                 message_id INTEGER NOT NULL,
                 project_id TEXT NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS restore_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                issue_kind TEXT NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1011,6 +1021,67 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM resume_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_restore_view(self, restore_view: RestoreViewState) -> RestoreViewState:
+        self._connection.execute(
+            """
+            INSERT INTO restore_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                issue_kind
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                issue_kind = excluded.issue_kind
+            """,
+            (
+                restore_view.chat_id,
+                restore_view.message_thread_id,
+                restore_view.message_id,
+                restore_view.codex_thread_id,
+                restore_view.issue_kind,
+            ),
+        )
+        self._connection.commit()
+        return restore_view
+
+    def get_restore_view(self, chat_id: int, message_thread_id: int) -> RestoreViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                issue_kind
+            FROM restore_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return RestoreViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            issue_kind=row["issue_kind"],
+        )
+
+    def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM restore_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

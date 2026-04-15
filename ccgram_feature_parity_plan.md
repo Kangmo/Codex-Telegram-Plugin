@@ -107,9 +107,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-09: `/restore` and Rich Recovery Flows
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-10: `/upgrade`
 - [ ] Implemented
@@ -366,6 +366,53 @@ Code review notes:
 
 - The main design risk identified during review was that removing only the primary binding would stop `sync_codex_once()` from servicing mirror topics, because the current outbound loop iterates primary bindings first. That is why FP-08 detaches mirrors together with the primary topic.
 - The proofread pass also confirmed that seen-event state should stay intact during unbind so rebinding the same Codex thread later does not replay old assistant history into a fresh topic unexpectedly.
+
+### FP-09: `/restore` and Rich Recovery Flows
+
+Branch and status:
+
+- Feature branch: `feature/fp-09-restore-and-richer-recovery-flows`
+
+Implementation decisions:
+
+- Recovery is adapted to Codex App bindings rather than tmux sessions. The supported recovery states are:
+  - `closed` topic bound to the same Codex thread
+  - `deleted` or unreachable Telegram topic for the same Codex thread
+- Recovery UI is driven by a dedicated `recovery.py` module plus persisted `RestoreViewState` rows in SQLite, so restore menus survive daemon restarts and reject stale callbacks safely.
+- `/gateway restore` is the explicit operator entry point, and the daemon also auto-offers the restore menu when a user sends a message into a closed primary topic.
+- `Continue Here` restores the existing topic in place for closed bindings, immediately normalizes the Telegram topic title back to the canonical `(<project>) <thread>` form, and clears the closed-status override without waiting for a later sync pass.
+- `Recreate Topic` is reserved for deleted bindings and reuses the existing `GatewayService.recreate_topic()` path so the same Codex thread is preserved and only the Telegram topic identity changes.
+- `Resume Other Thread` deliberately reuses the FP-07 `/resume` picker instead of creating a parallel thread-selection flow.
+- Repeated inbound messages on a closed topic reuse the existing restore prompt message by editing it in place instead of spamming multiple recovery menus.
+- Deleted topics still cannot click `/gateway restore` themselves because Telegram no longer has a reachable topic surface there; that recovery case remains accessible through the existing `/gateway sync` repair flow. FP-09 adds richer guided recovery where Telegram still has a callable topic context.
+- Cleanup paths for bind, rebind, unbind, and new-thread creation all clear persisted restore-view state so recovery widgets cannot survive after the topic is healthy again.
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - explicit `/gateway restore` on closed and healthy topics
+  - automatic restore prompt on inbound messages to closed topics
+  - callback flows for continue, recreate, resume, cancel, stale menus, issue drift, wrong-action rejection, and healthy-after-click behavior
+  - SQLite persistence of restore-view state across restart
+  - end-to-end restart survival for restore-continue followed by normal routing
+  - direct `recovery.py` rendering coverage for both closed and deleted prompts
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_recovery.py tests/unit/test_daemon.py tests/unit/test_state.py tests/e2e/test_gateway_flow.py -q` -> `103 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `155 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `100/110 = 90.9%`
+  - `src/codex_telegram_gateway/models.py`: `7/7 = 100.0%`
+  - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `src/codex_telegram_gateway/recovery.py` statement coverage: `20/20 = 100.0%`
+  - `TOTAL`: `119/129 = 92.2%`
+
+Code review notes:
+
+- The first version of the new tests was wrong in two places: it queued multiple callback updates before changing state, which meant one `poll_telegram_once()` processed the whole batch under the old state. Those tests were fixed before sign-off so each callback branch is asserted under the intended binding state.
+- The proofread pass identified a UX issue where `Continue Here` would restore routing but leave the topic name drifted until a later sync. That was fixed by renaming the topic immediately inside the restore callback.
+- The proofread pass also identified menu spam risk on repeated messages to a closed topic. `_offer_restore_prompt()` now reuses the existing restore-menu message id when present.
 
 ## Shared Architecture Changes
 
