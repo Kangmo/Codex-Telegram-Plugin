@@ -14,6 +14,7 @@ from codex_telegram_gateway.app_store import (
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.models import (
     CodexEvent,
+    CodexHistoryEntry,
     CodexProject,
     CodexThread,
     StartedTurn,
@@ -147,6 +148,30 @@ class CodexAppServerClient:
                     )
                 )
         return events
+
+    def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
+        response = self._request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": True},
+        )
+        thread = response["thread"]
+        entries: list[CodexHistoryEntry] = []
+        for turn in thread["turns"]:
+            turn_id = str(turn["id"])
+            started_at = _string_or_none(turn.get("startedAt"))
+            completed_at = _string_or_none(turn.get("completedAt")) or started_at
+            for item in turn["items"]:
+                history_entry = _history_entry_from_item(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item=item,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+                if history_entry is None:
+                    continue
+                entries.append(history_entry)
+        return entries
 
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
         self.ensure_project_visible(project_id)
@@ -368,11 +393,144 @@ def _build_turn_input(started_turn: StartedTurn) -> list[dict[str, str]]:
     return items
 
 
+def _history_entry_from_item(
+    *,
+    thread_id: str,
+    turn_id: str,
+    item: dict[str, object],
+    started_at: str | None,
+    completed_at: str | None,
+) -> CodexHistoryEntry | None:
+    item_type = str(item.get("type") or "")
+    item_id = str(item.get("id") or item_type or "item")
+    if item_type == "userMessage":
+        text = _summarize_user_message(item.get("content"))
+        if not text:
+            return None
+        return CodexHistoryEntry(
+            entry_id=f"{thread_id}:{turn_id}:{item_id}",
+            kind="user",
+            text=text,
+            timestamp=started_at,
+        )
+    if item_type == "agentMessage":
+        if item.get("phase") == "commentary":
+            return None
+        text = _normalize_history_text(str(item.get("text") or ""), limit=900)
+        if not text:
+            return None
+        return CodexHistoryEntry(
+            entry_id=f"{thread_id}:{turn_id}:{item_id}",
+            kind="assistant",
+            text=text,
+            timestamp=completed_at,
+        )
+    if item_type == "commandExecution":
+        text = _summarize_command_execution(item)
+        if not text:
+            return None
+        return CodexHistoryEntry(
+            entry_id=f"{thread_id}:{turn_id}:{item_id}",
+            kind="tool",
+            text=text,
+            timestamp=completed_at,
+        )
+    return None
+
+
 def _normalize_topic_name(text: str, limit: int = 96) -> str:
     collapsed = " ".join(text.split())
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _normalize_history_text(text: str, *, limit: int) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    collapsed = "\n".join(line.rstrip() for line in stripped.splitlines()).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _summarize_user_message(raw_content: object) -> str:
+    if not isinstance(raw_content, list):
+        return ""
+    text_parts: list[str] = []
+    image_count = 0
+    attachment_count = 0
+    for item in raw_content:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type == "text":
+            text_parts.append(str(item.get("text") or ""))
+            continue
+        if item_type in {"localImage", "image"}:
+            image_count += 1
+            continue
+        attachment_count += 1
+
+    parts: list[str] = []
+    normalized_text = _normalize_history_text("\n".join(part for part in text_parts if part), limit=900)
+    if normalized_text:
+        parts.append(normalized_text)
+    if image_count:
+        suffix = "image attached" if image_count == 1 else "images attached"
+        parts.append(f"[{image_count} {suffix}]")
+    if attachment_count:
+        suffix = "attachment" if attachment_count == 1 else "attachments"
+        parts.append(f"[{attachment_count} {suffix}]")
+    return "\n".join(parts)
+
+
+def _summarize_command_execution(item: dict[str, object]) -> str:
+    command = _normalize_history_text(str(item.get("command") or ""), limit=140)
+    status_parts: list[str] = []
+    exit_code = item.get("exitCode")
+    if exit_code is not None:
+        status_parts.append(f"exit {exit_code}")
+    duration_ms = item.get("durationMs")
+    if isinstance(duration_ms, int) and duration_ms > 0:
+        status_parts.append(f"{duration_ms}ms")
+    header_parts = [part for part in [command, " • ".join(status_parts)] if part]
+    header = " | ".join(header_parts)
+    output = _command_output_summary(item.get("aggregatedOutput"))
+    if header and output:
+        return f"{header}\n{output}"
+    return header or output
+
+
+def _command_output_summary(raw_output: object) -> str:
+    if not isinstance(raw_output, str):
+        return ""
+    non_empty_lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
+    if not non_empty_lines:
+        return ""
+    interesting = next(
+        (
+            line
+            for line in non_empty_lines
+            if any(token in line.lower() for token in ("assertionerror", "traceback", "error", "warning"))
+        ),
+        next(
+            (
+                line
+                for line in non_empty_lines
+                if "failed" in line.lower()
+            ),
+            non_empty_lines[0],
+        ),
+    )
+    return _normalize_history_text(interesting, limit=220)
+
+
+def _string_or_none(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _matching_turn_status(response: dict[str, object], turn_id: str) -> str:

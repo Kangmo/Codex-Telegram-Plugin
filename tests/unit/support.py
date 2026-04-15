@@ -1,8 +1,10 @@
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
+    CodexHistoryEntry,
     CodexProject,
     CodexThread,
+    HistoryViewState,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -33,6 +35,7 @@ class DummyState:
         self.pending_turns: dict[str, PendingTurn] = {}
         self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
+        self.history_views: dict[tuple[int, int], HistoryViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
@@ -238,6 +241,16 @@ class DummyState:
         limit: int = 20,
     ) -> list[TopicHistoryEntry]:
         return list(self.topic_history.get((chat_id, message_thread_id), [])[:limit])
+
+    def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
+        self.history_views[(history_view.chat_id, history_view.message_thread_id)] = history_view
+        return history_view
+
+    def get_history_view(self, chat_id: int, message_thread_id: int) -> HistoryViewState | None:
+        return self.history_views.get((chat_id, message_thread_id))
+
+    def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.history_views.pop((chat_id, message_thread_id), None)
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self.pending_turns[pending_turn.codex_thread_id] = pending_turn
@@ -504,6 +517,7 @@ class DummyCodexBridge:
         self.current_thread_id = thread.thread_id
         self._threads = {thread.thread_id: thread}
         self._events: dict[str, list[CodexEvent]] = {thread.thread_id: []}
+        self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
         self.started_turns: list[StartedTurn] = []
         self.steered_turns: list[tuple[str, StartedTurn]] = []
         self.created_threads: list[CodexThread] = []
@@ -543,8 +557,14 @@ class DummyCodexBridge:
     def list_events(self, thread_id: str) -> list[CodexEvent]:
         return list(self._events[thread_id])
 
+    def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
+        return list(self._history_entries[thread_id])
+
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)
+
+    def set_history_entries(self, thread_id: str, entries: list[CodexHistoryEntry]) -> None:
+        self._history_entries[thread_id] = list(entries)
 
     def replace_event(self, thread_id: str, event_id: str, text: str) -> None:
         self._events[thread_id] = [
@@ -568,6 +588,7 @@ class DummyCodexBridge:
         )
         self._threads[thread_id] = created_thread
         self._events[thread_id] = []
+        self._history_entries[thread_id] = []
         self.created_threads.append(created_thread)
         return created_thread
 

@@ -2,7 +2,7 @@ import json
 import sqlite3
 
 from codex_telegram_gateway.codex_api import CodexAppServerClient, _build_turn_input, _turn_waits_for_approval
-from codex_telegram_gateway.models import CodexThread
+from codex_telegram_gateway.models import CodexHistoryEntry, CodexThread
 from codex_telegram_gateway.models import StartedTurn
 
 
@@ -184,4 +184,76 @@ def test_rename_thread_uses_thread_name_set_rpc() -> None:
                 "name": "renamed thread",
             },
         )
+    ]
+
+
+def test_list_history_entries_normalizes_user_assistant_and_command_items() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+
+    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "thread/read"
+        assert params == {"threadId": "thread-1", "includeTurns": True}
+        return {
+            "thread": {
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "startedAt": "2026-04-15T10:00:00Z",
+                        "completedAt": "2026-04-15T10:01:00Z",
+                        "items": [
+                            {
+                                "id": "item-1",
+                                "type": "userMessage",
+                                "content": [
+                                    {"type": "text", "text": "Please review this screenshot."},
+                                    {"type": "localImage", "path": "/tmp/example.png"},
+                                ],
+                            },
+                            {
+                                "id": "item-2",
+                                "type": "agentMessage",
+                                "phase": "commentary",
+                                "text": "I am still thinking.",
+                            },
+                            {
+                                "id": "item-3",
+                                "type": "commandExecution",
+                                "command": "pytest -q",
+                                "exitCode": 1,
+                                "durationMs": 45,
+                                "aggregatedOutput": "tests failed\nAssertionError: boom",
+                            },
+                            {
+                                "id": "item-4",
+                                "type": "agentMessage",
+                                "phase": "final",
+                                "text": "The failing test comes from the assertion mismatch.",
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    assert client.list_history_entries("thread-1") == [
+        CodexHistoryEntry(
+            entry_id="thread-1:turn-1:item-1",
+            kind="user",
+            text="Please review this screenshot.\n[1 image attached]",
+            timestamp="2026-04-15T10:00:00Z",
+        ),
+        CodexHistoryEntry(
+            entry_id="thread-1:turn-1:item-3",
+            kind="tool",
+            text="pytest -q | exit 1 • 45ms\nAssertionError: boom",
+            timestamp="2026-04-15T10:01:00Z",
+        ),
+        CodexHistoryEntry(
+            entry_id="thread-1:turn-1:item-4",
+            kind="assistant",
+            text="The failing test comes from the assertion mismatch.",
+            timestamp="2026-04-15T10:01:00Z",
+        ),
     ]

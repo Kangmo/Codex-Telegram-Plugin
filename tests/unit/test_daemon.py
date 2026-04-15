@@ -1,5 +1,6 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon, _parse_topic_name
+from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
 from pathlib import Path
 from codex_telegram_gateway.telegram_api import TelegramRetryAfterError
 
@@ -8,8 +9,10 @@ from codex_telegram_gateway.models import (
     Binding,
     CLOSED_BINDING_STATUS,
     CodexEvent,
+    CodexHistoryEntry,
     CodexThread,
     DELETED_BINDING_STATUS,
+    HistoryViewState,
     InboundMessage,
     PendingTurn,
     StartedTurn,
@@ -1199,6 +1202,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway doctor - Show Telegram and Codex App gateway status\n"
             "/gateway projects - List loaded Codex App projects\n"
             "/gateway threads - List loaded Codex App threads\n"
+            "/gateway history - Show paginated history for this Codex thread\n"
             "/gateway bindings - List Codex thread to Telegram topic bindings\n"
             "/gateway create_thread - Create a new Codex thread in this topic\n"
             "/gateway project - Choose or switch the Codex project for this topic\n"
@@ -1210,6 +1214,188 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             None,
         )
     ]
+
+
+def test_poll_telegram_once_gateway_history_renders_latest_page_and_persists_view() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway history",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_history_entries(
+        "thread-1",
+        [
+            CodexHistoryEntry(
+                entry_id=f"entry-{index}",
+                kind="user" if index % 2 == 0 else "assistant",
+                text=f"history entry {index} " + ("x" * 500),
+                timestamp="2026-04-15T10:00:00Z",
+            )
+            for index in range(10)
+        ],
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    sent_text = telegram.sent_messages[0][2]
+    sent_markup = telegram.sent_messages[0][3]
+    assert sent_text.startswith("📋 [(gateway-project) thread-1] Messages (10 total)")
+    assert sent_markup == {
+        "inline_keyboard": [
+            [
+                {"text": "◀ Older", "callback_data": f"{CALLBACK_HISTORY_PREFIX}0:thread-1"},
+                {"text": "2/2", "callback_data": "tp:noop"},
+            ]
+        ]
+    }
+    assert state.get_history_view(-100100, 77) == HistoryViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+        page_index=1,
+    )
+
+
+def test_poll_telegram_once_history_callback_pages_existing_view() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_history_view(
+        HistoryViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=42,
+            codex_thread_id="thread-1",
+            page_index=1,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-history",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        from_user_id=111,
+        data=f"{CALLBACK_HISTORY_PREFIX}0:thread-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_history_entries(
+        "thread-1",
+        [
+            CodexHistoryEntry(
+                entry_id=f"entry-{index}",
+                kind="assistant",
+                text=f"history entry {index} " + ("x" * 500),
+                timestamp="2026-04-15T10:00:00Z",
+            )
+            for index in range(10)
+        ],
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            42,
+            telegram.edited_messages[0][2],
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "1/2", "callback_data": "tp:noop"},
+                        {"text": "Newer ▶", "callback_data": f"{CALLBACK_HISTORY_PREFIX}1:thread-1"},
+                    ]
+                ]
+            },
+        )
+    ]
+    assert state.get_history_view(-100100, 77) == HistoryViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        codex_thread_id="thread-1",
+        page_index=0,
+    )
+    assert telegram.answered_callback_queries == [("cb-history", "Page updated.")]
+
+
+def test_poll_telegram_once_history_callback_rejects_stale_message() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_history_view(
+        HistoryViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=41,
+            codex_thread_id="thread-1",
+            page_index=0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-history-stale",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        from_user_id=111,
+        data=f"{CALLBACK_HISTORY_PREFIX}0:thread-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages == []
+    assert telegram.answered_callback_queries == [("cb-history-stale", "This history view is stale.")]
 
 
 def test_poll_telegram_once_requeues_recent_message_from_response_widget() -> None:

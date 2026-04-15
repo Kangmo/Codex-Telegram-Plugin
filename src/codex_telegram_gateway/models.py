@@ -66,6 +66,16 @@ class CodexEvent:
 
 
 @dataclass(frozen=True)
+class CodexHistoryEntry:
+    """One normalized thread-history row rendered into Telegram."""
+
+    entry_id: str
+    kind: str
+    text: str
+    timestamp: str | None = None
+
+
+@dataclass(frozen=True)
 class OutboundMessage:
     """Persisted Telegram message ids for one Codex assistant message block."""
 
@@ -127,6 +137,17 @@ class TopicCreationJob:
     topic_name: str
     project_id: str | None = None
     retry_after_at: float | None = None
+
+
+@dataclass(frozen=True)
+class HistoryViewState:
+    """Persisted Telegram history-view context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+    page_index: int = 0
 
 
 @dataclass(frozen=True)

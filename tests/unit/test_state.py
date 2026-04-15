@@ -2,6 +2,7 @@ from codex_telegram_gateway.models import (
     CLOSED_BINDING_STATUS,
     Binding,
     CodexProject,
+    HistoryViewState,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -175,6 +176,25 @@ def test_sqlite_state_persists_recent_topic_history_with_dedup(tmp_path) -> None
         ),
         TopicHistoryEntry(text="First request"),
     ]
+
+
+def test_sqlite_state_persists_history_view_state(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    history_view = HistoryViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        codex_thread_id="thread-1",
+        page_index=3,
+    )
+
+    state.upsert_history_view(history_view)
+
+    assert state.get_history_view(-100100, 77) == history_view
+
+    state.delete_history_view(-100100, 77)
+
+    assert state.get_history_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_topic_lifecycle_and_project_activity(tmp_path) -> None:

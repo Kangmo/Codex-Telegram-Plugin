@@ -4,6 +4,11 @@ from pathlib import Path
 import re
 
 from codex_telegram_gateway.config import GatewayConfig
+from codex_telegram_gateway.history_command import (
+    CALLBACK_HISTORY_PREFIX,
+    parse_history_callback,
+    render_history_page,
+)
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -11,6 +16,7 @@ from codex_telegram_gateway.models import (
     CodexProject,
     CodexThread,
     DELETED_BINDING_STATUS,
+    HistoryViewState,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -1002,6 +1008,9 @@ class GatewayDaemon:
         if data == _CALLBACK_NOOP:
             self._telegram.answer_callback_query(callback_query_id)
             return
+        if data.startswith(CALLBACK_HISTORY_PREFIX):
+            self._handle_history_callback(update)
+            return
         if data.startswith(_CALLBACK_SYNC_PREFIX):
             self._handle_sync_callback(update)
             return
@@ -1267,6 +1276,33 @@ class GatewayDaemon:
             reply_markup=_sessions_dashboard_markup(),
         )
         self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+
+    def _handle_history_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        parsed_callback = parse_history_callback(str(update["data"]))
+        if parsed_callback is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown history action.")
+            return
+
+        page_index, thread_id = parsed_callback
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None or binding.codex_thread_id != thread_id:
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
+            return
+
+        history_view = self._state.get_history_view(chat_id, message_thread_id)
+        if history_view is None or history_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This history view is stale.")
+            return
+        if history_view.codex_thread_id != thread_id:
+            self._telegram.answer_callback_query(callback_query_id, "This history view no longer matches the topic.")
+            return
+
+        self._show_history_message(binding, page_index=page_index, message_id=message_id)
+        self._telegram.answer_callback_query(callback_query_id, "Page updated.")
 
     def _handle_queue_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -1596,6 +1632,17 @@ class GatewayDaemon:
             )
             return
 
+        if command_name == "history":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "No Codex thread is bound to this topic yet.",
+                )
+                return
+            self._show_history_message(binding)
+            return
+
         if command_name == "bindings":
             self._telegram.send_message(
                 chat_id,
@@ -1642,6 +1689,48 @@ class GatewayDaemon:
                 topic_name=self._topic_name_for_command(chat_id, message_thread_id),
             )
             return
+
+    def _show_history_message(
+        self,
+        binding: Binding,
+        *,
+        page_index: int = -1,
+        message_id: int | None = None,
+    ) -> None:
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        rendered_page = render_history_page(
+            display_name=binding.topic_name or self._history_display_name(binding, thread),
+            thread_id=binding.codex_thread_id,
+            entries=self._codex.list_history_entries(binding.codex_thread_id),
+            page_index=page_index,
+        )
+        if message_id is None:
+            message_id = self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                rendered_page.text,
+                reply_markup=rendered_page.reply_markup,
+            )
+        else:
+            self._telegram.edit_message_text(
+                binding.chat_id,
+                message_id,
+                rendered_page.text,
+                reply_markup=rendered_page.reply_markup,
+            )
+        self._state.upsert_history_view(
+            HistoryViewState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                message_id=message_id,
+                codex_thread_id=binding.codex_thread_id,
+                page_index=rendered_page.page_index,
+            )
+        )
+
+    @staticmethod
+    def _history_display_name(binding: Binding, thread: CodexThread) -> str:
+        return binding.topic_name or format_topic_name(binding.project_id or thread.cwd, thread.title)
 
     def _start_new_thread(
         self,
@@ -1946,6 +2035,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("doctor", "Show Telegram and Codex App gateway status"),
     _BotCommand("projects", "List loaded Codex App projects"),
     _BotCommand("threads", "List loaded Codex App threads"),
+    _BotCommand("history", "Show paginated history for this Codex thread"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),

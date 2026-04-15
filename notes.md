@@ -181,6 +181,7 @@
 - FP-03 Topic emoji/status state
 - FP-04 Lifecycle sweeps, topic probing, autoclose, unbound TTL, pruning
 - FP-05 Multi-chat fanout and Telegram flood-control backoff
+- FP-06 `/history`
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -211,3 +212,13 @@
 - Added mirror-aware outbound sync and inbound routing so mirrored topics can feed the same Codex thread.
 - Hardened the design during proof review by blocking project/thread rebinding controls inside mirror topics; mirror topics remain conversation surfaces only.
 - Feature-specific changed-statement coverage versus `main` is 225/261 = 86.2%.
+
+### FP-06 verification
+- Added a dedicated `history_command.py` renderer with older/newer pagination and restart-stable callback parsing.
+- Added `CodexBridge.list_history_entries()` plus Codex App normalization for `userMessage`, final `agentMessage`, and `commandExecution` thread items.
+- Added persisted `HistoryViewState` in SQLite so `/gateway history` callbacks reject stale messages and continue to work after daemon restart.
+- Fixed two issues during red-phase review:
+  - command-result summaries now prefer concrete error lines over vague `failed` lines
+  - every paginated history page now repeats the thread header instead of losing context after page 1
+- Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `123 passed`
+- Feature-specific changed-statement coverage versus `main` is 142/166 = 85.5%.
