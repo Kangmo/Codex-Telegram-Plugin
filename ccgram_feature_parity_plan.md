@@ -1629,8 +1629,8 @@ Make Telegram output concise and informative during long Codex runs.
 
 - Branch and merge:
   - feature branch `feature/fp-21-tool-batching-failure-probing-completion-summaries`
-  - feature commit `TBD after feature commit`
-  - merge commit on `main` `TBD after merge`
+  - feature commit `20d8a36`
+  - merge commit on `main` `4772ea0`
 - Added a dedicated `response_builder.py` normalization layer for Codex App `thread/read` turns so Telegram can render more than raw assistant text:
   - contiguous `commandExecution` items now collapse into stable `tool_batch` events
   - terminal turns without a final assistant reply now emit a dedicated `completion_summary` event
