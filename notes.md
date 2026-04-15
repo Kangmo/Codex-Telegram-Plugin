@@ -408,6 +408,10 @@
   - `TOTAL`: `138/159 = 86.8%`
 
 ### FP-24 verification
+- Branch and merge:
+  - feature branch `feature/fp-24-general-file-intake-and-unsupported-content-ux`
+  - feature commit `9bf226f`
+  - merge commit on `main` `e69c4c8`
 - Added `media_ingest.py` so inbound documents, PDFs, audio, and video files share one prompt/unsupported-notice normalization layer.
 - `TelegramBotClient.get_updates()` now keeps direct image delivery unchanged while downloading non-image files into `.ccgram-uploads` and converting them into explicit saved-path prompts for Codex App threads.
 - Unsupported Telegram payloads now normalize into explicit `unsupported_message` updates and the daemon replies in-topic instead of silently discarding them.
@@ -420,6 +424,8 @@
   - blocked unauthorized unsupported-media notices from being echoed back into Telegram
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_media_ingest.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `176 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `288 passed`
 - Feature-specific changed-executable coverage:
   - `src/codex_telegram_gateway/media_ingest.py`: `25/25 = 100.0%`
   - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `68/68 = 100.0%`

@@ -1767,6 +1767,10 @@ Handle more than text and images on inbound Telegram messages.
 
 ### FP-24 verification
 
+- Branch and merge:
+  - feature branch `feature/fp-24-general-file-intake-and-unsupported-content-ux`
+  - feature commit `9bf226f`
+  - merge commit on `main` `e69c4c8`
 - Added `media_ingest.py` so inbound non-image attachments have one normalization layer for:
   - saved-attachment prompt text
   - supported media wording differences between PDF, text, audio, video, and generic documents
@@ -1786,6 +1790,8 @@ Handle more than text and images on inbound Telegram messages.
   - rejected unauthorized unsupported-media updates before sending notices back to Telegram so the new UX does not widen the existing trust boundary
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_media_ingest.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `176 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `288 passed`
 - Feature-specific changed-executable coverage for FP-24 source work:
   - `src/codex_telegram_gateway/media_ingest.py`: `25/25 = 100.0%`
   - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `68/68 = 100.0%`
