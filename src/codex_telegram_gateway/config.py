@@ -11,6 +11,7 @@ class GatewayConfig:
     telegram_allowed_user_ids: set[int]
     telegram_default_chat_id: int
     sync_mode: str
+    telegram_topic_status_emoji_enabled: bool = True
     state_database_path: Path = Path(".codex-telegram/gateway.db")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
 
@@ -32,11 +33,17 @@ class GatewayConfig:
             env.get("CODEX_TELEGRAM_STATE_DB", ".codex-telegram/gateway.db")
         )
         sync_mode = env.get("TELEGRAM_SYNC_MODE", "assistant_plus_alerts")
+        topic_status_emoji_enabled = _env_bool(
+            env,
+            "TELEGRAM_TOPIC_STATUS_EMOJI_ENABLED",
+            default=True,
+        )
         return cls(
             telegram_bot_token=bot_token,
             telegram_allowed_user_ids=allowed_user_ids,
             telegram_default_chat_id=chat_id,
             sync_mode=sync_mode,
+            telegram_topic_status_emoji_enabled=topic_status_emoji_enabled,
             state_database_path=state_database_path,
         )
 
@@ -66,3 +73,15 @@ def _read_env_file(env_path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def _env_bool(env: dict[str, str], name: str, *, default: bool) -> bool:
+    value = env.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean configuration for {name}: {value}")

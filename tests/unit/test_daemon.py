@@ -523,6 +523,233 @@ def test_parse_topic_name_accepts_valid_names_and_rejects_invalid_or_empty_value
     assert _parse_topic_name("(project)   ") is None
 
 
+def test_sync_codex_once_prefixes_running_topic_status() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.edited_topics == [(-100100, 77, "🟢 (gateway-project) thread-1")]
+    assert state.get_binding_by_thread("thread-1").topic_name == "🟢 (gateway-project) thread-1"
+
+
+def test_sync_codex_once_prefixes_waiting_approval_topic_status() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(
+        turn_id="turn-1",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.edited_topics == [(-100100, 77, "🟠 (gateway-project) thread-1")]
+
+
+def test_sync_codex_once_prefixes_failed_topic_status_and_keeps_it_after_pending_turn_clears() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="failed")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    telegram.edited_topics.clear()
+    daemon.sync_codex_once()
+
+    assert state.get_pending_turn("thread-1") is None
+    assert state.get_binding_by_thread("thread-1").topic_name == "💥 (gateway-project) thread-1"
+    assert telegram.edited_topics == []
+
+
+def test_sync_codex_once_prefixes_closed_binding_topic_status() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.edited_topics == [(-100100, 77, "⚫ (gateway-project) thread-1")]
+
+
+def test_sync_codex_once_disables_topic_status_prefixes_after_permission_error() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    edit_attempts = 0
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        nonlocal edit_attempts
+        del chat_id, message_thread_id, name
+        edit_attempts += 1
+        raise RuntimeError("Not enough rights to manage topics")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+
+    daemon.sync_codex_once()
+    daemon.sync_codex_once()
+
+    assert edit_attempts == 1
+    assert state.get_binding_by_thread("thread-1").topic_name == "(gateway-project) thread-1"
+
+
+def test_poll_telegram_once_topic_rename_strips_status_prefix_before_updating_codex() -> None:
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="🟢 (gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="🟢 (gateway-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == [("thread-1", "renamed from telegram")]
+    assert state.get_binding_by_thread("thread-1").topic_name == "🟢 (gateway-project) renamed from telegram"
+
+
 def test_sync_codex_once_skips_outbound_for_closed_binding_and_clears_terminal_pending_turn() -> None:
     state = DummyState()
     state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
