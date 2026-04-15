@@ -22,4 +22,4 @@ Produce a feature-by-feature parity plan for the missing `ccgram` Telegram gatew
 ## Errors Encountered
 
 ## Status
-**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-09, FP-11, FP-17, and FP-18 are complete and merged to `main`. The next highest-priority unfinished feature is FP-13 `/verbose` and notification modes.
+**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-09, FP-11, FP-13, FP-17, and FP-18 are complete and merged to `main`. The next highest-priority unfinished feature is FP-19 generic interactive prompt bridge.

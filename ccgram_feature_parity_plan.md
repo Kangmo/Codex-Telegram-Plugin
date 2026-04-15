@@ -479,6 +479,53 @@ Code review notes:
 - The proofread pass found a second crafted-callback bug: preview callbacks could target directories and crash preview generation. The daemon now rejects directory-preview callbacks cleanly.
 - The proofread pass also found stale-state leakage around rebinding/unbind flows. Send-browser state is now cleared when a topic is rebound to a new thread or unbound from its thread.
 
+### FP-13: `/verbose` and Notification Modes
+
+Branch and merge:
+
+- Feature branch: `feature/fp-13-verbose-and-notification-modes`
+- Feature commit: `e793d11`
+- Merge commit on `main`: `d0479a8`
+
+Implementation decisions:
+
+- FP-13 uses a dedicated `notification_modes.py` module so normalization, callback parsing, picker rendering, and gating rules stay out of the already-large daemon command handler.
+- Notification modes are persisted per topic and normalized on read, so older rows storing `assistant_plus_alerts` or `assistant_only` transparently map to the new canonical values:
+  - `all`
+  - `important`
+  - `errors_only`
+  - `muted`
+- This port intentionally gates only supplemental Telegram chatter:
+  - typing indicators
+  - failure/interruption notices
+  - dashboard/status labels
+- Assistant replies are never muted. Unlike `ccgram`, Telegram is the primary conversation surface in this gateway, so suppressing actual assistant output would make the topic unusable.
+- Mirror topics can change their own notification mode because the setting is topic-local and does not alter project or thread ownership.
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - mode normalization and legacy alias handling
+  - verbose picker rendering and callback parsing
+  - `/gateway verbose` command flow for bound and unbound topics
+  - callback-driven mode updates and dismiss behavior
+  - typing suppression and error-notification retention under muted/error-only modes
+  - restart-stable persistence of mode changes in end-to-end flow
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_notification_modes.py tests/unit/test_daemon.py tests/unit/test_sessions_dashboard.py tests/e2e/test_gateway_flow.py` -> `154 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `244 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `40/48 = 83.3%`
+  - `src/codex_telegram_gateway/notification_modes.py`: `0/0 = 100.0%`
+  - `TOTAL`: `40/48 = 83.3%`
+
+Code review notes:
+
+- The proofread pass confirmed the key adaptation from `ccgram`: notification modes mute supplemental chatter only, never assistant reply content.
+- The review also caught the need to normalize legacy persisted names up front so dashboards, status output, and callback updates do not keep surfacing stale labels.
+- Remaining uncovered branches are low-signal stale/error paths in callback and send-failure handling; the changed-line coverage threshold still cleared 80%.
+
 ### FP-17: Command Discovery and Telegram Menu Sync
 
 Branch and merge:

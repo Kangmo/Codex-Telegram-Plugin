@@ -294,6 +294,10 @@
 - Feature-specific changed-statement coverage for tracked source diff is `197/223 = 88.3%`.
 
 ### FP-13 verification
+- Branch and merge:
+  - feature branch `feature/fp-13-verbose-and-notification-modes`
+  - feature commit `e793d11`
+  - merge commit on `main` `d0479a8`
 - Added a dedicated `notification_modes.py` helper for normalization, callback parsing, picker rendering, and mode gating.
 - Added `/gateway verbose` plus inline mode switching for `all`, `important`, `errors_only`, and `muted`.
 - Routed supplemental topic notifications through one gate so typing and failure/interruption notices follow the configured per-topic mode.
