@@ -65,6 +65,12 @@ class DummyState:
     def list_bindings(self) -> list[Binding]:
         return list(self.bindings_by_thread.values())
 
+    def delete_binding(self, codex_thread_id: str) -> None:
+        binding = self.bindings_by_thread.pop(codex_thread_id, None)
+        if binding is None:
+            return
+        self.bindings_by_topic.pop((binding.chat_id, binding.message_thread_id), None)
+
     def upsert_mirror_binding(self, binding: Binding) -> Binding:
         existing = self.mirror_bindings_by_thread_chat.get((binding.codex_thread_id, binding.chat_id))
         if existing is not None:
@@ -88,6 +94,12 @@ class DummyState:
 
     def get_mirror_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
         return self.mirror_bindings_by_topic.get((chat_id, message_thread_id))
+
+    def delete_mirror_binding(self, codex_thread_id: str, *, chat_id: int) -> None:
+        binding = self.mirror_bindings_by_thread_chat.pop((codex_thread_id, chat_id), None)
+        if binding is None:
+            return
+        self.mirror_bindings_by_topic.pop((binding.chat_id, binding.message_thread_id), None)
 
     def upsert_project(self, project: CodexProject) -> CodexProject:
         self.projects[project.project_id] = project
@@ -159,6 +171,13 @@ class DummyState:
             message
             for message in self.inbound_messages
             if message.telegram_update_id != telegram_update_id
+        ]
+
+    def delete_pending_inbound_for_thread(self, codex_thread_id: str) -> None:
+        self.inbound_messages = [
+            message
+            for message in self.inbound_messages
+            if message.codex_thread_id != codex_thread_id
         ]
 
     def set_telegram_cursor(self, update_id: int) -> None:
@@ -243,6 +262,9 @@ class DummyState:
         limit: int = 20,
     ) -> list[TopicHistoryEntry]:
         return list(self.topic_history.get((chat_id, message_thread_id), [])[:limit])
+
+    def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
+        self.topic_history.pop((chat_id, message_thread_id), None)
 
     def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
         self.history_views[(history_view.chat_id, history_view.message_thread_id)] = history_view

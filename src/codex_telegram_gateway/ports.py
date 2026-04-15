@@ -157,6 +157,9 @@ class GatewayState(Protocol):
     def get_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
         ...
 
+    def delete_binding(self, codex_thread_id: str) -> None:
+        ...
+
     def upsert_mirror_binding(self, binding: Binding) -> Binding:
         ...
 
@@ -167,6 +170,9 @@ class GatewayState(Protocol):
         ...
 
     def get_mirror_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        ...
+
+    def delete_mirror_binding(self, codex_thread_id: str, *, chat_id: int) -> None:
         ...
 
     def upsert_project(self, project: CodexProject) -> CodexProject:
@@ -203,6 +209,9 @@ class GatewayState(Protocol):
         ...
 
     def mark_inbound_delivered(self, telegram_update_id: int) -> None:
+        ...
+
+    def delete_pending_inbound_for_thread(self, codex_thread_id: str) -> None:
         ...
 
     def set_telegram_cursor(self, update_id: int) -> None:
@@ -256,6 +265,9 @@ class GatewayState(Protocol):
         *,
         limit: int = 20,
     ) -> list[TopicHistoryEntry]:
+        ...
+
+    def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:

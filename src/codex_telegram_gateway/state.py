@@ -270,6 +270,16 @@ class SqliteGatewayState:
             return None
         return self._binding_from_row(row)
 
+    def delete_binding(self, codex_thread_id: str) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM bindings
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        )
+        self._connection.commit()
+
     def upsert_mirror_binding(self, binding: Binding) -> Binding:
         self._connection.execute(
             """
@@ -337,6 +347,16 @@ class SqliteGatewayState:
         if row is None:
             return None
         return self._binding_from_row(row)
+
+    def delete_mirror_binding(self, codex_thread_id: str, *, chat_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM mirror_bindings
+            WHERE codex_thread_id = ? AND chat_id = ?
+            """,
+            (codex_thread_id, chat_id),
+        )
+        self._connection.commit()
 
     def upsert_project(self, project: CodexProject) -> CodexProject:
         self._connection.execute(
@@ -615,6 +635,16 @@ class SqliteGatewayState:
         )
         self._connection.commit()
 
+    def delete_pending_inbound_for_thread(self, codex_thread_id: str) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM inbound_queue
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        )
+        self._connection.commit()
+
     def set_telegram_cursor(self, update_id: int) -> None:
         self._connection.execute(
             """
@@ -854,6 +884,16 @@ class SqliteGatewayState:
             )
             for row in rows
         ]
+
+    def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM topic_history
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
 
     def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
         self._connection.execute(
