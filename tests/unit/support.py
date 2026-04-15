@@ -1,4 +1,5 @@
 from codex_telegram_gateway.interactive_bridge import InteractivePrompt
+from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -53,6 +54,7 @@ class DummyState:
         self.status_bubble_views: dict[tuple[int, int], StatusBubbleViewState] = {}
         self.toolbar_views: dict[tuple[int, int], ToolbarViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
+        self.live_views: dict[tuple[int, int], LiveViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
@@ -390,6 +392,19 @@ class DummyState:
     def delete_send_view(self, chat_id: int, message_thread_id: int) -> None:
         self.send_views.pop((chat_id, message_thread_id), None)
 
+    def upsert_live_view(self, live_view: LiveViewState) -> LiveViewState:
+        self.live_views[(live_view.chat_id, live_view.message_thread_id)] = live_view
+        return live_view
+
+    def get_live_view(self, chat_id: int, message_thread_id: int) -> LiveViewState | None:
+        return self.live_views.get((chat_id, message_thread_id))
+
+    def list_live_views(self) -> list[LiveViewState]:
+        return list(self.live_views.values())
+
+    def delete_live_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.live_views.pop((chat_id, message_thread_id), None)
+
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self.pending_turns[pending_turn.codex_thread_id] = pending_turn
         return pending_turn
@@ -471,6 +486,8 @@ class DummyTelegramClient:
         self.answered_inline_queries: list[tuple[str, list[dict[str, object]], int, bool]] = []
         self.edited_reply_markups: list[tuple[int, int, dict[str, object] | None]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
+        self.edited_photo_messages: list[tuple[int, int, str, str | None, dict[str, object] | None]] = []
+        self.edited_captions: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.edited_topics: list[tuple[int, int, str]] = []
         self.closed_topics: list[tuple[int, int]] = []
         self.registered_command_sets: list[tuple[tuple[tuple[str, str], ...], dict[str, object] | None]] = []
@@ -726,6 +743,30 @@ class DummyTelegramClient:
         if message_id in self._deleted_message_ids:
             raise RuntimeError("message to edit not found")
         self.edited_messages.append((chat_id, message_id, text, reply_markup))
+
+    def edit_message_photo_file(
+        self,
+        chat_id: int,
+        message_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
+        self.edited_photo_messages.append((chat_id, message_id, str(file_path), caption, reply_markup))
+
+    def edit_message_caption(
+        self,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
+        self.edited_captions.append((chat_id, message_id, caption, reply_markup))
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         self.edited_topics.append((chat_id, message_thread_id, name))

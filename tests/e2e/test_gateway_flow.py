@@ -45,6 +45,20 @@ class StaticScreenshotProvider:
         )
 
 
+class SequencedScreenshotProvider:
+    def __init__(self, captures: list[Path]) -> None:
+        self._captures = list(captures)
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def capture_thread(self, *, thread_id: str, thread_title: str, project_id: str | None):
+        self.calls.append((thread_id, thread_title, project_id))
+        capture_path = self._captures[min(len(self.calls) - 1, len(self._captures) - 1)]
+        return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
+            file_path=capture_path,
+            send_as_document=False,
+        )
+
+
 class FakeTelegramClient:
     """In-memory Telegram bot stub used by the end-to-end contract."""
 
@@ -58,6 +72,8 @@ class FakeTelegramClient:
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.sent_documents: list[tuple[int, int, str, str | None]] = []
         self.sent_photos: list[tuple[int, int, str, str | None]] = []
+        self.edited_photo_messages: list[tuple[int, int, str, str | None, dict[str, object] | None]] = []
+        self.edited_captions: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.answered_inline_queries: list[tuple[str, list[dict[str, object]], int, bool]] = []
@@ -240,6 +256,30 @@ class FakeTelegramClient:
         if message_id in self._deleted_message_ids:
             raise RuntimeError("message to edit not found")
         self.edited_messages.append((chat_id, message_id, text, reply_markup))
+
+    def edit_message_photo_file(
+        self,
+        chat_id: int,
+        message_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
+        self.edited_photo_messages.append((chat_id, message_id, str(file_path), caption, reply_markup))
+
+    def edit_message_caption(
+        self,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
+        self.edited_captions.append((chat_id, message_id, caption, reply_markup))
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         del chat_id, message_thread_id, name
@@ -457,6 +497,98 @@ def test_gateway_flow_gateway_screenshot_sends_photo(tmp_path) -> None:
             77,
             str(screenshot_path),
             "Screenshot · gateway-project / thread-1",
+        )
+    ]
+
+
+def test_gateway_flow_live_view_persists_and_edits_same_message(tmp_path) -> None:
+    first_capture = tmp_path / "live-1.png"
+    second_capture = tmp_path / "live-2.png"
+    first_capture.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+    second_capture.write_bytes(b"\x89PNG\r\n\x1a\nsecond")
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+        live_view_interval_seconds=0.0,
+        live_view_timeout_seconds=300.0,
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    screenshot_provider = SequencedScreenshotProvider([first_capture, second_capture])
+    first_daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway live",
+    )
+    first_daemon.poll_telegram_once()
+
+    assert telegram.sent_photos == [
+        (
+            -100100,
+            77,
+            str(first_capture),
+            "Live view · gateway-project / thread-1",
+        )
+    ]
+
+    second_daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+    second_daemon.poll_telegram_once()
+
+    assert screenshot_provider.calls == [
+        ("thread-1", "thread-1", "/Users/kangmo/sacle/src/gateway-project"),
+        ("thread-1", "thread-1", "/Users/kangmo/sacle/src/gateway-project"),
+    ]
+    assert telegram.edited_photo_messages == [
+        (
+            -100100,
+            1,
+            str(second_capture),
+            "Live view · gateway-project / thread-1",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Refresh", "callback_data": "gw:live:refresh"},
+                        {"text": "Stop", "callback_data": "gw:live:stop"},
+                    ]
+                ]
+            },
         )
     ]
 
@@ -1082,14 +1214,15 @@ def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> No
         "topic `77` • id `thread-1`\n"
         "status `idle` • notify `all`",
         {
-            "inline_keyboard": [
-                [
-                    {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
-                    {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
-                    {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
-                    {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
-                    {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
-                ],
+                "inline_keyboard": [
+                    [
+                        {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                        {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                        {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                        {"text": "📺", "callback_data": "gw:sessions:live:0:-100100:77"},
+                        {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                        {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                    ],
                 [
                     {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
                     {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
@@ -1119,15 +1252,16 @@ def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> No
         "project `gateway-project` • thread `Renamed live thread`\n"
         "topic `77` • id `thread-1`\n"
         "status `idle` • notify `all`",
-        {
-            "inline_keyboard": [
-                [
-                    {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
-                    {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
-                    {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
-                    {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
-                    {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
-                ],
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                        {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                        {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                        {"text": "📺", "callback_data": "gw:sessions:live:0:-100100:77"},
+                        {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                        {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                    ],
                 [
                     {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
                     {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},

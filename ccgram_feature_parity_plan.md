@@ -53,7 +53,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Implemented |
 | FP-20 | Dedicated status bubble | P0 | Native | Implemented |
 | FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Implemented |
-| FP-22 | Live view | P1 | Adapted | Missing |
+| FP-22 | Live view | P1 | Adapted | Implemented |
 | FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
 | FP-24 | General file intake and unsupported-content UX | P0 | Native | Implemented |
 | FP-25 | Outbound media/file delivery | P0 | Native | Implemented |
@@ -172,9 +172,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-22: Live View
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-23: Remote Control Actions
 - [ ] Implemented
@@ -1836,6 +1836,58 @@ Offer an auto-refreshing visual stream similar to `ccgram`’s live mode.
   - repeated refresh edits the same Telegram message
 - E2E:
   - manual macOS capture verification plus automated scheduler test
+
+**Implementation notes**
+
+- Branch and merge:
+  - feature branch `feature/fp-22-live-view`
+  - feature commit pending until this feature is committed
+  - merge commit on `main` pending until this feature is merged
+- Re-reviewed `ccgram` live-view sources before implementation:
+  - `/tmp/ccgram/src/ccgram/handlers/live_view.py`
+  - `/tmp/ccgram/tests/ccgram/handlers/test_live_view.py`
+  - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
+- Added `live_view.py` with:
+  - `LiveViewState`
+  - live-view callback parsing
+  - active/inactive inline keyboards
+  - caption rendering and capture hashing
+- Added persisted live-view rows in SQLite so a daemon restart can resume refreshing the same Telegram message.
+- Added `/gateway live`, a `📺` sessions-dashboard action, and inline `Refresh` / `Stop` / `Start live` controls on the live-view message itself.
+- Live view reuses the screenshot provider from FP-14 and edits the existing Telegram photo message with `editMessageMedia` semantics instead of sending a new screenshot every tick.
+
+**Implementation decisions**
+
+- Adapted `ccgram`’s tmux live pane into a whole-window Codex App live screenshot because Codex App has no pane model.
+- Kept ticking in the poll loop, not lifecycle sweeps, because the current daemon architecture runs two loops and the poll loop is the safest single owner for Telegram-side live-view edits.
+- Persisted live-view sessions by topic and message id so restart recovery is deterministic and independent from title changes.
+- Kept stopped and timed-out live views as editable operator surfaces with a `Start live` button instead of deleting the message, which preserves context in the topic.
+
+**Proof reading notes**
+
+- Performed line-by-line review on:
+  - `src/codex_telegram_gateway/live_view.py`
+  - `src/codex_telegram_gateway/daemon.py`
+  - `src/codex_telegram_gateway/state.py`
+  - `src/codex_telegram_gateway/telegram_api.py`
+  - `src/codex_telegram_gateway/sessions_dashboard.py`
+  - `tests/unit/test_live_view.py`
+  - `tests/unit/test_daemon.py`
+  - `tests/unit/test_state.py`
+  - `tests/unit/test_telegram_api.py`
+  - `tests/e2e/test_gateway_flow.py`
+- Defects found and fixed during proof reading:
+  - live-view ticking originally ran at the end of `poll_telegram_once()`, which immediately double-refreshed a just-started session when the interval was `0`; fixed by moving the tick to the start of the poll cycle
+  - the new dashboard button changed the inline keyboard shape, and the first full-suite pass exposed stale assertions; fixed by updating every affected dashboard contract rather than weakening the expectations
+
+**Verification**
+
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_config.py tests/unit/test_sessions_dashboard.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/unit/test_live_view.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py::test_gateway_flow_live_view_persists_and_edits_same_message -q` -> `227 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `367 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp22.json -q` plus diff-based changed-line audit -> `155/168 = 92.3%`
 
 ### FP-23: Remote Control Actions
 

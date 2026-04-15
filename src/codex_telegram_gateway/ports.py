@@ -2,6 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
@@ -99,6 +100,26 @@ class TelegramClient(Protocol):
         chat_id: int,
         message_id: int,
         text: str,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        ...
+
+    def edit_message_photo_file(
+        self,
+        chat_id: int,
+        message_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        ...
+
+    def edit_message_caption(
+        self,
+        chat_id: int,
+        message_id: int,
+        caption: str,
         reply_markup: dict[str, object] | None = None,
     ) -> None:
         ...
@@ -416,6 +437,18 @@ class GatewayState(Protocol):
         ...
 
     def delete_send_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_live_view(self, live_view: LiveViewState) -> LiveViewState:
+        ...
+
+    def get_live_view(self, chat_id: int, message_thread_id: int) -> LiveViewState | None:
+        ...
+
+    def list_live_views(self) -> list[LiveViewState]:
+        ...
+
+    def delete_live_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:

@@ -19,6 +19,14 @@ from codex_telegram_gateway.interactive_bridge import (
     start_interactive_prompt_session,
 )
 from codex_telegram_gateway.inline_query import build_inline_query_results
+from codex_telegram_gateway.live_view import (
+    CALLBACK_LIVE_VIEW_PREFIX,
+    LiveViewState,
+    build_live_view_markup,
+    capture_hash_for_path,
+    parse_live_view_callback,
+    render_live_view_caption,
+)
 from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
 from codex_telegram_gateway.voice_ingest import (
     TranscriptionProvider,
@@ -311,6 +319,7 @@ class GatewayDaemon:
 
     def poll_telegram_once(self) -> None:
         self._sync_projects_once()
+        self._tick_live_views()
         offset = self._state.get_telegram_cursor()
         updates = self._telegram.get_updates(offset=offset)
         highest_seen = offset
@@ -401,7 +410,6 @@ class GatewayDaemon:
                 )
             except Exception:
                 continue
-
         self._state.set_telegram_cursor(highest_seen)
 
     def deliver_inbound_once(self) -> None:
@@ -1454,6 +1462,7 @@ class GatewayDaemon:
             self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+        self._state.delete_live_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_voice_prompt_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_toolbar_view(binding.chat_id, binding.message_thread_id)
@@ -1603,6 +1612,50 @@ class GatewayDaemon:
         )
         self._telegram.answer_callback_query(callback_query_id, "Queued.")
 
+    def _handle_live_view_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        action = parse_live_view_callback(str(update["data"]))
+        if action is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown live view action.")
+            return
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None:
+            self._telegram.answer_callback_query(callback_query_id, "This topic is not bound to any Codex thread.")
+            return
+        if action == "stop":
+            if self._state.get_live_view(chat_id, message_thread_id) is None:
+                self._telegram.answer_callback_query(callback_query_id, "Live view is not active.")
+                return
+            self._stop_live_view(
+                chat_id,
+                message_thread_id,
+                status_suffix="Stopped.",
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Stopped.")
+            return
+        try:
+            if action == "start":
+                self._start_live_view(
+                    binding,
+                    target_chat_id=chat_id,
+                    target_message_thread_id=message_thread_id,
+                    existing_message_id=message_id,
+                )
+                self._telegram.answer_callback_query(callback_query_id, "Live view started.")
+                return
+            live_view = self._state.get_live_view(chat_id, message_thread_id)
+            if live_view is None or live_view.message_id != message_id:
+                self._telegram.answer_callback_query(callback_query_id, "Live view is not active.")
+                return
+            self._refresh_live_view(live_view, force=True)
+        except ScreenshotCaptureError as exc:
+            self._telegram.answer_callback_query(callback_query_id, f"Live view failed: {exc}")
+            return
+        self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+
     def _handle_inline_query(self, update: dict[str, object]) -> None:
         inline_query_id = str(update["inline_query_id"])
         query = str(update.get("query") or "")
@@ -1649,6 +1702,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_SEND_PREFIX):
             self._handle_send_callback(update)
+            return
+        if data.startswith(CALLBACK_LIVE_VIEW_PREFIX):
+            self._handle_live_view_callback(update)
             return
         if data.startswith(_CALLBACK_PROMPT_PREFIX):
             self._handle_interactive_prompt_callback(update)
@@ -1984,6 +2040,19 @@ class GatewayDaemon:
                 return
             self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
             self._telegram.answer_callback_query(callback_query_id, callback_text)
+            return
+
+        if action == "live":
+            try:
+                self._start_live_view(
+                    binding,
+                    target_chat_id=chat_id,
+                    target_message_thread_id=message_thread_id,
+                )
+            except ScreenshotCaptureError as exc:
+                self._telegram.answer_callback_query(callback_query_id, f"Live view failed: {exc}")
+                return
+            self._telegram.answer_callback_query(callback_query_id, "Live view started.")
             return
 
         if action == "screenshot":
@@ -3118,6 +3187,189 @@ class GatewayDaemon:
             caption=caption,
         )
 
+    def _start_live_view(
+        self,
+        binding: Binding,
+        *,
+        target_chat_id: int,
+        target_message_thread_id: int,
+        existing_message_id: int | None = None,
+    ) -> bool:
+        if self._screenshot_provider is None:
+            raise ScreenshotCaptureError("Screenshot capture is not available on this platform.")
+        now = time.monotonic()
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        project_id = binding.project_id or thread.cwd or None
+        capture = self._screenshot_provider.capture_thread(
+            thread_id=binding.codex_thread_id,
+            thread_title=thread.title,
+            project_id=project_id,
+        )
+        if not capture.file_path.is_file():
+            raise ScreenshotCaptureError("Screenshot file is missing.")
+        caption = render_live_view_caption(
+            project_name=Path(project_id or "").name or "-",
+            thread_title=thread.title,
+        )
+        reply_markup = build_live_view_markup()
+        capture_hash = capture_hash_for_path(capture.file_path)
+        current_view = self._state.get_live_view(target_chat_id, target_message_thread_id)
+        if existing_message_id is None and current_view is not None:
+            existing_message_id = current_view.message_id
+        if existing_message_id is None:
+            message_id = self._telegram.send_photo_file(
+                target_chat_id,
+                target_message_thread_id,
+                capture.file_path,
+                caption=caption,
+            )
+            self._telegram.edit_message_reply_markup(
+                target_chat_id,
+                message_id,
+                reply_markup,
+            )
+        else:
+            message_id = existing_message_id
+            self._telegram.edit_message_photo_file(
+                target_chat_id,
+                message_id,
+                capture.file_path,
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+        self._state.upsert_live_view(
+            LiveViewState(
+                chat_id=target_chat_id,
+                message_thread_id=target_message_thread_id,
+                message_id=message_id,
+                codex_thread_id=binding.codex_thread_id,
+                project_id=project_id,
+                started_at=now,
+                next_refresh_at=now + self._config.live_view_interval_seconds,
+                last_capture_hash=capture_hash,
+            )
+        )
+        return existing_message_id is None
+
+    def _stop_live_view(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        status_suffix: str,
+    ) -> None:
+        live_view = self._state.get_live_view(chat_id, message_thread_id)
+        if live_view is None:
+            return
+        thread_title = live_view.codex_thread_id
+        try:
+            thread = self._codex.read_thread(live_view.codex_thread_id)
+        except Exception:
+            thread = None
+        if thread is not None:
+            thread_title = thread.title
+        project_name = Path(live_view.project_id or "").name or "-"
+        caption = f"{render_live_view_caption(project_name=project_name, thread_title=thread_title)}\n{status_suffix}"
+        try:
+            self._telegram.edit_message_caption(
+                chat_id,
+                live_view.message_id,
+                caption,
+                reply_markup=build_live_view_markup(active=False),
+            )
+        except Exception:
+            pass
+        self._state.delete_live_view(chat_id, message_thread_id)
+
+    def _refresh_live_view(
+        self,
+        live_view: LiveViewState,
+        *,
+        force: bool = False,
+    ) -> bool:
+        if self._screenshot_provider is None:
+            raise ScreenshotCaptureError("Screenshot capture is not available on this platform.")
+        binding = self._binding_by_topic(live_view.chat_id, live_view.message_thread_id)
+        if binding is None or binding.codex_thread_id != live_view.codex_thread_id:
+            self._stop_live_view(
+                live_view.chat_id,
+                live_view.message_thread_id,
+                status_suffix="Stopped.",
+            )
+            return False
+        if binding.binding_status != ACTIVE_BINDING_STATUS:
+            self._stop_live_view(
+                live_view.chat_id,
+                live_view.message_thread_id,
+                status_suffix="Topic unavailable.",
+            )
+            return False
+        now = time.monotonic()
+        if not force and now - live_view.started_at >= self._config.live_view_timeout_seconds:
+            self._stop_live_view(
+                live_view.chat_id,
+                live_view.message_thread_id,
+                status_suffix="Timed out.",
+            )
+            return False
+        if not force and now < live_view.next_refresh_at:
+            return False
+        thread = self._codex.read_thread(live_view.codex_thread_id)
+        project_id = binding.project_id or thread.cwd or live_view.project_id
+        capture = self._screenshot_provider.capture_thread(
+            thread_id=live_view.codex_thread_id,
+            thread_title=thread.title,
+            project_id=project_id,
+        )
+        if not capture.file_path.is_file():
+            raise ScreenshotCaptureError("Screenshot file is missing.")
+        capture_hash = capture_hash_for_path(capture.file_path)
+        next_refresh_at = now + self._config.live_view_interval_seconds
+        if not force and capture_hash == live_view.last_capture_hash:
+            self._state.upsert_live_view(
+                LiveViewState(
+                    chat_id=live_view.chat_id,
+                    message_thread_id=live_view.message_thread_id,
+                    message_id=live_view.message_id,
+                    codex_thread_id=live_view.codex_thread_id,
+                    project_id=project_id,
+                    started_at=live_view.started_at,
+                    next_refresh_at=next_refresh_at,
+                    last_capture_hash=live_view.last_capture_hash,
+                )
+            )
+            return False
+        self._telegram.edit_message_photo_file(
+            live_view.chat_id,
+            live_view.message_id,
+            capture.file_path,
+            caption=render_live_view_caption(
+                project_name=Path(project_id or "").name or "-",
+                thread_title=thread.title,
+            ),
+            reply_markup=build_live_view_markup(),
+        )
+        self._state.upsert_live_view(
+            LiveViewState(
+                chat_id=live_view.chat_id,
+                message_thread_id=live_view.message_thread_id,
+                message_id=live_view.message_id,
+                codex_thread_id=live_view.codex_thread_id,
+                project_id=project_id,
+                started_at=live_view.started_at,
+                next_refresh_at=next_refresh_at,
+                last_capture_hash=capture_hash,
+            )
+        )
+        return True
+
+    def _tick_live_views(self) -> None:
+        for live_view in self._state.list_live_views():
+            try:
+                self._refresh_live_view(live_view)
+            except Exception:
+                continue
+
     def _handle_command(
         self,
         update: dict[str, object],
@@ -3318,6 +3570,28 @@ class GatewayDaemon:
                     chat_id,
                     message_thread_id,
                     f"Failed to capture screenshot: {exc}",
+                )
+            return
+
+        if command_name == "live":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            try:
+                self._start_live_view(
+                    binding,
+                    target_chat_id=chat_id,
+                    target_message_thread_id=message_thread_id,
+                )
+            except ScreenshotCaptureError as exc:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    f"Failed to start live view: {exc}",
                 )
             return
 
@@ -3557,6 +3831,7 @@ class GatewayDaemon:
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
         self._state.delete_send_view(chat_id, message_thread_id)
+        self._state.delete_live_view(chat_id, message_thread_id)
         self._state.delete_voice_prompt_view(chat_id, message_thread_id)
         self._clear_interactive_prompt_topic(
             chat_id,
@@ -3609,6 +3884,7 @@ class GatewayDaemon:
             self._state.delete_resume_view(target.chat_id, target.message_thread_id)
             self._state.delete_restore_view(target.chat_id, target.message_thread_id)
             self._state.delete_send_view(target.chat_id, target.message_thread_id)
+            self._state.delete_live_view(target.chat_id, target.message_thread_id)
             self._state.delete_voice_prompt_view(target.chat_id, target.message_thread_id)
             self._clear_interactive_prompt_topic(
                 target.chat_id,
@@ -4033,6 +4309,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("screenshot", "Capture the current Codex App window for this thread"),
+    _BotCommand("live", "Start or refresh a live Codex App window feed"),
     _BotCommand("send", "Browse project files and send one back to Telegram"),
     _BotCommand("verbose", "Change supplemental Telegram notification mode"),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),

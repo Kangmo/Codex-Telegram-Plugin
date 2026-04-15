@@ -40,6 +40,7 @@ def test_build_sessions_dashboard_renders_session_rows_and_footer() -> None:
                 {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
                 {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
                 {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                {"text": "📺", "callback_data": "gw:sessions:live:0:-100100:77"},
                 {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
                 {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
             ],

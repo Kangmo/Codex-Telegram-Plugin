@@ -189,6 +189,7 @@
 - FP-12 `/toolbar`
 - FP-13 `/verbose`
 - FP-14 `/screenshot`
+- FP-22 Live view
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 - FP-19 Interactive prompt bridge
@@ -608,3 +609,37 @@
   - `.venv/bin/pytest` -> `340 passed`
 - Feature-specific module coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway.screenshot_capture --cov-report=term-missing tests/unit/test_screenshot_capture.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_screenshot_sends_photo tests/unit/test_daemon.py::test_poll_telegram_once_sessions_dashboard_screenshot_sends_photo tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_screenshot_sends_photo` -> `src/codex_telegram_gateway/screenshot_capture.py 81%`
+
+### FP-22 verification
+- Branch and merge:
+  - feature branch `feature/fp-22-live-view`
+  - feature commit pending until this feature is committed
+  - merge commit on `main` pending until this feature is merged
+- Re-reviewed `ccgram` live-view sources before implementation:
+  - `/tmp/ccgram/src/ccgram/handlers/live_view.py`
+  - `/tmp/ccgram/tests/ccgram/handlers/test_live_view.py`
+  - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
+- Added `live_view.py` with:
+  - persisted `LiveViewState`
+  - inline callback parsing
+  - active/inactive live-view keyboards
+  - stable caption rendering and capture hashing
+- `GatewayDaemon` now supports:
+  - `/gateway live`
+  - a `📺` action in the sessions dashboard
+  - start/refresh/stop callbacks on the live-view message itself
+  - restart-stable live-view ticking during the poll loop
+- Implementation decisions locked during FP-22:
+  - live view is an auto-refreshing whole-window Codex App screenshot, not a tmux pane stream
+  - the poll loop owns live-view ticking so the first `/gateway live` send and the first periodic refresh stay separate
+  - live views persist in SQLite by topic so a daemon restart resumes editing the same Telegram message
+  - stop and timeout keep the existing Telegram message and switch its controls to a `Start live` button instead of deleting the operator surface
+- Proofread fixes before sign-off:
+  - moved live-view ticking from the end of `poll_telegram_once()` to the start so zero-interval tests and production callbacks do not immediately double-refresh a just-started session
+  - updated all sessions-dashboard expectations after adding the new `📺` action, rather than weakening the dashboard assertions
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_config.py tests/unit/test_sessions_dashboard.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/unit/test_live_view.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py::test_gateway_flow_live_view_persists_and_edits_same_message -q` -> `227 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `367 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp22.json -q` plus diff-based changed-line audit -> `155/168 = 92.3%`

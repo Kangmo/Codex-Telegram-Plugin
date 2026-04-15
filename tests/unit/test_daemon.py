@@ -1,8 +1,10 @@
 from dataclasses import replace
+import time
 import pytest
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon, _mirror_control_text, _parse_topic_name
 from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
+from codex_telegram_gateway.live_view import LiveViewState, capture_hash_for_path
 from codex_telegram_gateway.recovery import (
     CALLBACK_RESTORE_CANCEL,
     CALLBACK_RESTORE_CONTINUE,
@@ -71,6 +73,33 @@ class StaticScreenshotProvider:
         return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
             file_path=self.file_path,
             send_as_document=self.send_as_document,
+        )
+
+
+class SequencedScreenshotProvider:
+    def __init__(self, file_paths: list[Path]) -> None:
+        self.file_paths = list(file_paths)
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def capture_thread(self, *, thread_id: str, thread_title: str, project_id: str | None):
+        self.calls.append((thread_id, thread_title, project_id))
+        capture_path = self.file_paths[min(len(self.calls) - 1, len(self.file_paths) - 1)]
+        return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
+            file_path=capture_path,
+            send_as_document=False,
+        )
+
+
+class MissingFileScreenshotProvider:
+    def __init__(self, file_path: Path) -> None:
+        self.file_path = file_path
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def capture_thread(self, *, thread_id: str, thread_title: str, project_id: str | None):
+        self.calls.append((thread_id, thread_title, project_id))
+        return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
+            file_path=self.file_path,
+            send_as_document=False,
         )
 
 
@@ -1314,6 +1343,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway bindings - List Codex thread to Telegram topic bindings\n"
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
                 "/gateway screenshot - Capture the current Codex App window for this thread\n"
+                "/gateway live - Start or refresh a live Codex App window feed\n"
                 "/gateway send - Browse project files and send one back to Telegram\n"
                 "/gateway verbose - Change supplemental Telegram notification mode\n"
                 "/gateway project - Choose or switch the Codex project for this topic\n"
@@ -3340,13 +3370,14 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
             "status `idle` • notify `all`",
             {
                 "inline_keyboard": [
-                    [
-                        {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
-                        {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
-                        {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
-                        {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
-                        {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
-                    ],
+                        [
+                            {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                            {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                            {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                            {"text": "📺", "callback_data": "gw:sessions:live:0:-100100:77"},
+                            {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                            {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                        ],
                     [
                         {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
                         {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
@@ -3384,6 +3415,7 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
                     {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
                     {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
                     {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                    {"text": "📺", "callback_data": "gw:sessions:live:0:-100100:77"},
                     {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
                     {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
                 ],
@@ -3901,6 +3933,564 @@ def test_poll_telegram_once_gateway_screenshot_sends_photo(tmp_path) -> None:
             "Screenshot · gateway-project / thread-1",
         )
     ]
+
+
+def test_poll_telegram_once_gateway_live_sends_photo_and_persists_view(tmp_path) -> None:
+    screenshot_path = tmp_path / "live.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway live",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    screenshot_provider = StaticScreenshotProvider(screenshot_path)
+    daemon = GatewayDaemon(
+        config=make_config(live_view_interval_seconds=5.0),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_photos == [
+        (
+            -100100,
+            77,
+            str(screenshot_path),
+            "Live view · gateway-project / thread-1",
+        )
+    ]
+    assert telegram.edited_reply_markups == [
+        (
+            -100100,
+            1,
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Refresh", "callback_data": "gw:live:refresh"},
+                        {"text": "Stop", "callback_data": "gw:live:stop"},
+                    ]
+                ]
+            },
+        )
+    ]
+    live_view = state.get_live_view(-100100, 77)
+    assert live_view is not None
+    assert live_view.message_id == 1
+    assert live_view.codex_thread_id == "thread-1"
+
+
+def test_poll_telegram_once_ticks_live_view_and_edits_same_message(tmp_path) -> None:
+    first_capture = tmp_path / "live-1.png"
+    second_capture = tmp_path / "live-2.png"
+    first_capture.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+    second_capture.write_bytes(b"\x89PNG\r\n\x1a\nsecond")
+    started_at = time.monotonic()
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=started_at,
+            next_refresh_at=0.0,
+            last_capture_hash="old",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    screenshot_provider = SequencedScreenshotProvider([first_capture, second_capture])
+    daemon = GatewayDaemon(
+        config=make_config(live_view_interval_seconds=0.0, live_view_timeout_seconds=300.0),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_photo_messages == [
+        (
+            -100100,
+            15,
+            str(first_capture),
+            "Live view · gateway-project / thread-1",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Refresh", "callback_data": "gw:live:refresh"},
+                        {"text": "Stop", "callback_data": "gw:live:stop"},
+                    ]
+                ]
+            },
+        )
+    ]
+
+
+def test_poll_telegram_once_live_view_stop_callback_clears_state() -> None:
+    started_at = time.monotonic()
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=started_at,
+            next_refresh_at=started_at + 3600.0,
+            last_capture_hash="hash",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-stop",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:live:stop",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="running",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(live_view_timeout_seconds=3600.0),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_live_view(-100100, 77) is None
+    assert telegram.edited_captions == [
+        (
+            -100100,
+            15,
+            "Live view · gateway-project / thread-1\nStopped.",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Start live", "callback_data": "gw:live:start"},
+                    ]
+                ]
+            },
+        )
+    ]
+    assert telegram.answered_callback_queries[-1] == ("cb-live-stop", "Stopped.")
+
+
+def test_poll_telegram_once_live_view_callback_rejects_unknown_action() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-unknown",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:live:nope",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="idle", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-live-unknown", "Unknown live view action.")
+
+
+def test_poll_telegram_once_live_view_callback_requires_binding() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-unbound",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:live:refresh",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="idle", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-live-unbound",
+        "This topic is not bound to any Codex thread.",
+    )
+
+
+def test_poll_telegram_once_live_view_start_callback_edits_existing_message(tmp_path) -> None:
+    screenshot_path = tmp_path / "live.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-start",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:live:start",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=StaticScreenshotProvider(screenshot_path),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_photo_messages == [
+        (
+            -100100,
+            15,
+            str(screenshot_path),
+            "Live view · gateway-project / thread-1",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Refresh", "callback_data": "gw:live:refresh"},
+                        {"text": "Stop", "callback_data": "gw:live:stop"},
+                    ]
+                ]
+            },
+        )
+    ]
+    assert telegram.answered_callback_queries[-1] == ("cb-live-start", "Live view started.")
+
+
+def test_poll_telegram_once_live_view_refresh_callback_rejects_stale_message() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic(),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-refresh-stale",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=16,
+        from_user_id=111,
+        data="gw:live:refresh",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-live-refresh-stale", "Live view is not active.")
+
+
+def test_poll_telegram_once_live_view_refresh_callback_reports_capture_failure(tmp_path) -> None:
+    missing_path = tmp_path / "missing.png"
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic(),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-live-refresh-fail",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:live:refresh",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=MissingFileScreenshotProvider(missing_path),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-live-refresh-fail",
+        "Live view failed: Screenshot file is missing.",
+    )
+
+
+def test_poll_telegram_once_sessions_dashboard_live_reports_capture_failure(tmp_path) -> None:
+    missing_path = tmp_path / "missing.png"
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-dashboard-live",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:live:0:-100100:77",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=MissingFileScreenshotProvider(missing_path),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-dashboard-live",
+        "Live view failed: Screenshot file is missing.",
+    )
+
+
+def test_poll_telegram_once_gateway_live_requires_binding() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway live",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="idle", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "This topic is not bound to any Codex thread.",
+        None,
+    )
+
+
+def test_poll_telegram_once_gateway_live_reports_capture_failure(tmp_path) -> None:
+    missing_path = tmp_path / "missing.png"
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway live",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=MissingFileScreenshotProvider(missing_path),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Failed to start live view: Screenshot file is missing.",
+        None,
+    )
+
+
+def test_poll_telegram_once_tick_live_view_stops_when_binding_missing() -> None:
+    state = DummyState()
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic(),
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_live_view(-100100, 77) is None
+    assert telegram.edited_captions[-1][2] == "Live view · gateway-project / thread-1\nStopped."
+
+
+def test_poll_telegram_once_tick_live_view_stops_when_binding_closed() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic(),
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert state.get_live_view(-100100, 77) is None
+    assert telegram.edited_captions[-1][2] == "Live view · gateway-project / thread-1\nTopic unavailable."
+
+
+def test_poll_telegram_once_tick_live_view_stops_on_timeout() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic() - 10.0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(live_view_timeout_seconds=1.0),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_live_view(-100100, 77) is None
+    assert telegram.edited_captions[-1][2] == "Live view · gateway-project / thread-1\nTimed out."
+
+
+def test_poll_telegram_once_tick_live_view_skips_unchanged_capture(tmp_path) -> None:
+    capture_path = tmp_path / "same.png"
+    capture_path.write_bytes(b"\x89PNG\r\n\x1a\nsame")
+    capture_hash = capture_hash_for_path(capture_path)
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_live_view(
+        LiveViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            started_at=time.monotonic(),
+            next_refresh_at=0.0,
+            last_capture_hash=capture_hash,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(thread_id="thread-1", title="thread-1", status="running", cwd="/Users/kangmo/sacle/src/gateway-project")
+    )
+    daemon = GatewayDaemon(
+        config=make_config(live_view_interval_seconds=5.0),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=StaticScreenshotProvider(capture_path),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_photo_messages == []
+    live_view = state.get_live_view(-100100, 77)
+    assert live_view is not None
+    assert live_view.last_capture_hash == capture_hash
 
 
 def test_poll_telegram_once_sessions_dashboard_screenshot_sends_photo(tmp_path) -> None:

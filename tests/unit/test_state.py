@@ -17,6 +17,7 @@ from codex_telegram_gateway.models import (
     ToolbarViewState,
     VoicePromptViewState,
 )
+from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.state import SqliteGatewayState
 
 
@@ -273,6 +274,29 @@ def test_sqlite_state_persists_voice_prompt_view(tmp_path) -> None:
     state.delete_voice_prompt_view(-100100, 77)
 
     assert state.get_voice_prompt_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_live_view(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    live_view = LiveViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=21,
+        codex_thread_id="thread-1",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        started_at=10.0,
+        next_refresh_at=15.0,
+        last_capture_hash="abc123",
+    )
+
+    state.upsert_live_view(live_view)
+
+    assert state.get_live_view(-100100, 77) == live_view
+    assert state.list_live_views() == [live_view]
+
+    state.delete_live_view(-100100, 77)
+
+    assert state.get_live_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_outbound_message_blocks(tmp_path) -> None:
