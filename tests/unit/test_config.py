@@ -41,3 +41,27 @@ def test_gateway_config_loads_topic_status_emoji_toggle_from_env_file(tmp_path) 
     config = GatewayConfig.from_env(env_file)
 
     assert config.telegram_topic_status_emoji_enabled is False
+
+
+def test_gateway_config_loads_lifecycle_intervals_from_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_BOT_TOKEN=test-token",
+                "TELEGRAM_ALLOWED_USER_IDS=111",
+                "TELEGRAM_DEFAULT_CHAT_ID=-100100",
+                "TELEGRAM_LIFECYCLE_PROBE_INTERVAL_SECONDS=12.5",
+                "TELEGRAM_LIFECYCLE_UNBOUND_TTL_SECONDS=34.5",
+                "TELEGRAM_LIFECYCLE_AUTOCLOSE_AFTER_SECONDS=56.5",
+                "TELEGRAM_LIFECYCLE_PRUNE_INTERVAL_SECONDS=78.5",
+            ]
+        )
+    )
+
+    config = GatewayConfig.from_env(env_file)
+
+    assert config.lifecycle_probe_interval_seconds == 12.5
+    assert config.lifecycle_unbound_ttl_seconds == 34.5
+    assert config.lifecycle_autoclose_after_seconds == 56.5
+    assert config.lifecycle_prune_interval_seconds == 78.5

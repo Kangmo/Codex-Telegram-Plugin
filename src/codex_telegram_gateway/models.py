@@ -106,6 +106,19 @@ class PendingTurn:
 
 
 @dataclass(frozen=True)
+class TopicLifecycle:
+    """Persisted lifecycle timestamps for one bound Telegram topic."""
+
+    codex_thread_id: str
+    chat_id: int
+    message_thread_id: int
+    bound_at: float | None = None
+    last_inbound_at: float | None = None
+    last_outbound_at: float | None = None
+    completed_at: float | None = None
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 

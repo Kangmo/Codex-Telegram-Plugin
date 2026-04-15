@@ -27,6 +27,16 @@ class StubTelegramBotClient(TelegramBotClient):
         destination.write_bytes(b"jpeg-bytes")
 
 
+class RecordingTelegramBotClient(TelegramBotClient):
+    def __init__(self) -> None:
+        super().__init__("test-token")
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def _call(self, method: str, payload: dict[str, object]) -> dict[str, object] | list[object]:
+        self.calls.append((method, payload))
+        return {}
+
+
 def test_get_updates_downloads_photo_and_returns_local_image_path(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     client = StubTelegramBotClient(
@@ -145,3 +155,19 @@ def test_is_topic_edit_permission_error_matches_admin_rights_failures() -> None:
     assert is_topic_edit_permission_error(TelegramApiError("Not enough rights to manage topics")) is True
     assert is_topic_edit_permission_error(TelegramApiError("CHAT_ADMIN_REQUIRED")) is True
     assert is_topic_edit_permission_error(TelegramApiError("some other telegram error")) is False
+
+
+def test_close_forum_topic_calls_telegram_api() -> None:
+    client = RecordingTelegramBotClient()
+
+    client.close_forum_topic(-100100, 77)
+
+    assert client.calls == [
+        (
+            "closeForumTopic",
+            {
+                "chat_id": -100100,
+                "message_thread_id": 77,
+            },
+        )
+    ]

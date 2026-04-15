@@ -239,6 +239,15 @@ class TelegramBotClient:
             },
         )
 
+    def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        self._call(
+            "closeForumTopic",
+            {
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+            },
+        )
+
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         try:
             result = self._call(

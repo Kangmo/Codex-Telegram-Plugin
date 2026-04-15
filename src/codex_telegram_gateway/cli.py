@@ -165,6 +165,7 @@ def _run_sync_iteration(
     daemon.deliver_inbound_once()
     after_deliver = state.pending_inbound_count()
     daemon.sync_codex_once()
+    daemon.run_lifecycle_sweeps()
     return {
         "pending_before": before,
         "pending_after_poll": after_poll,
@@ -189,6 +190,7 @@ def _run_poll_loop(
         while not stop_event.is_set():
             try:
                 daemon.poll_telegram_once()
+                daemon.run_lifecycle_sweeps()
             except Exception as exc:
                 print(str(exc), file=sys.stderr)
             stop_event.wait(interval_seconds)
@@ -219,6 +221,7 @@ def _run_codex_loop(
                 service.link_loaded_threads()
                 daemon.deliver_inbound_once()
                 daemon.sync_codex_once()
+                daemon.run_lifecycle_sweeps()
             except Exception as exc:
                 print(str(exc), file=sys.stderr)
             stop_event.wait(interval_seconds)

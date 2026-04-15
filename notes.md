@@ -179,6 +179,7 @@
 - FP-01 Topic close/reopen lifecycle
 - FP-02 Bidirectional topic rename sync
 - FP-03 Topic emoji/status state
+- FP-04 Lifecycle sweeps, topic probing, autoclose, unbound TTL, pruning
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -192,3 +193,12 @@
 - Added status-prefix stripping so Telegram-side topic renames continue to update the correct Codex thread title.
 - Added per-chat suppression after topic-edit permission failures so status-only prefix updates stop retrying noisily.
 - Coverage for tracked FP-03 changed source lines is 77/81 = 95.1%; the new `topic_status.py` helper module is 21/21 = 100.0%.
+
+### FP-04 verification
+- Added persisted `TopicLifecycle` state plus unbound-topic activity timestamps in SQLite.
+- Added periodic lifecycle sweeps for topic probing, completed-topic autoclose, unbound-topic TTL cleanup, and orphan history pruning.
+- Hooked lifecycle sweeps into CLI and MCP sync loops so the background runtime performs the same hygiene automatically.
+- Fixed two lifecycle edge cases during proof review:
+  - missing-topic probes now delete lifecycle rows as well as marking the binding deleted
+  - reopen/new-inbound flows now truly clear `completed_at` instead of accidentally preserving it
+- Feature-specific changed-statement coverage versus `main` is 152/169 = 89.9%.

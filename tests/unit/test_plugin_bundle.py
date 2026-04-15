@@ -63,3 +63,53 @@ def test_auto_sync_loaded_threads_calls_service(monkeypatch) -> None:
             "binding_status": "active",
         }
     ]
+
+
+def test_sync_once_runs_lifecycle_sweeps(monkeypatch) -> None:
+    module = importlib.import_module("codex_telegram_gateway.mcp_server")
+    calls: list[str] = []
+
+    class FakeState:
+        def __init__(self) -> None:
+            self._counts = iter([2, 3, 1])
+
+        def pending_inbound_count(self) -> int:
+            return next(self._counts)
+
+    class FakeDaemon:
+        def poll_telegram_once(self) -> None:
+            calls.append("poll_telegram_once")
+
+        def deliver_inbound_once(self) -> None:
+            calls.append("deliver_inbound_once")
+
+        def sync_codex_once(self) -> None:
+            calls.append("sync_codex_once")
+
+        def run_lifecycle_sweeps(self) -> None:
+            calls.append("run_lifecycle_sweeps")
+
+    @contextmanager
+    def fake_runtime(env_file: str | None):
+        calls.append(f"runtime:{env_file}")
+        yield SimpleNamespace(
+            state=FakeState(),
+            daemon=FakeDaemon(),
+        )
+
+    monkeypatch.setattr(module, "_runtime", fake_runtime)
+
+    result = module.sync_once("test.env")
+
+    assert calls == [
+        "runtime:test.env",
+        "poll_telegram_once",
+        "deliver_inbound_once",
+        "sync_codex_once",
+        "run_lifecycle_sweeps",
+    ]
+    assert result == {
+        "pending_before": 2,
+        "pending_after_poll": 3,
+        "pending_after_deliver": 1,
+    }

@@ -7,6 +7,7 @@ from codex_telegram_gateway.models import (
     OutboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
@@ -25,7 +26,9 @@ class DummyState:
         self.outbound_messages: dict[tuple[str, str], OutboundMessage] = {}
         self.inbound_messages: list[InboundMessage] = []
         self.pending_turns: dict[str, PendingTurn] = {}
+        self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
+        self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.telegram_cursor = 0
 
     def create_binding(self, binding: Binding) -> Binding:
@@ -160,6 +163,41 @@ class DummyState:
     def delete_pending_turn(self, codex_thread_id: str) -> None:
         self.pending_turns.pop(codex_thread_id, None)
 
+    def upsert_topic_lifecycle(self, topic_lifecycle: TopicLifecycle) -> TopicLifecycle:
+        self.topic_lifecycles[topic_lifecycle.codex_thread_id] = topic_lifecycle
+        return topic_lifecycle
+
+    def get_topic_lifecycle(self, codex_thread_id: str) -> TopicLifecycle | None:
+        return self.topic_lifecycles.get(codex_thread_id)
+
+    def list_topic_lifecycles(self) -> list[TopicLifecycle]:
+        return list(self.topic_lifecycles.values())
+
+    def delete_topic_lifecycle(self, codex_thread_id: str) -> None:
+        self.topic_lifecycles.pop(codex_thread_id, None)
+
+    def set_topic_project_last_seen(self, chat_id: int, message_thread_id: int, seen_at: float) -> None:
+        self.topic_project_last_seen[(chat_id, message_thread_id)] = seen_at
+
+    def get_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> float | None:
+        return self.topic_project_last_seen.get((chat_id, message_thread_id))
+
+    def list_topic_project_last_seen(self) -> list[tuple[int, int, float]]:
+        return [
+            (chat_id, message_thread_id, seen_at)
+            for (chat_id, message_thread_id), seen_at in self.topic_project_last_seen.items()
+        ]
+
+    def delete_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> None:
+        self.topic_project_last_seen.pop((chat_id, message_thread_id), None)
+
+    def prune_orphan_topic_history(self, live_topics: set[tuple[int, int]]) -> None:
+        self.topic_history = {
+            key: value
+            for key, value in self.topic_history.items()
+            if key in live_topics
+        }
+
 
 class DummyTelegramClient:
     """In-memory Telegram client double used by unit tests."""
@@ -176,6 +214,7 @@ class DummyTelegramClient:
         self.edited_reply_markups: list[tuple[int, int, dict[str, object] | None]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.edited_topics: list[tuple[int, int, str]] = []
+        self.closed_topics: list[tuple[int, int]] = []
 
     def create_forum_topic(self, chat_id: int, name: str) -> int:
         topic_id = self._next_topic_id
@@ -348,6 +387,9 @@ class DummyTelegramClient:
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         self.edited_topics.append((chat_id, message_thread_id, name))
+
+    def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        self.closed_topics.append((chat_id, message_thread_id))
 
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         return (chat_id, message_thread_id) not in self.dead_topics

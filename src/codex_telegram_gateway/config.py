@@ -12,6 +12,10 @@ class GatewayConfig:
     telegram_default_chat_id: int
     sync_mode: str
     telegram_topic_status_emoji_enabled: bool = True
+    lifecycle_probe_interval_seconds: float = 60.0
+    lifecycle_unbound_ttl_seconds: float = 1800.0
+    lifecycle_autoclose_after_seconds: float = 0.0
+    lifecycle_prune_interval_seconds: float = 300.0
     state_database_path: Path = Path(".codex-telegram/gateway.db")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
 
@@ -38,12 +42,36 @@ class GatewayConfig:
             "TELEGRAM_TOPIC_STATUS_EMOJI_ENABLED",
             default=True,
         )
+        lifecycle_probe_interval_seconds = _env_float(
+            env,
+            "TELEGRAM_LIFECYCLE_PROBE_INTERVAL_SECONDS",
+            default=60.0,
+        )
+        lifecycle_unbound_ttl_seconds = _env_float(
+            env,
+            "TELEGRAM_LIFECYCLE_UNBOUND_TTL_SECONDS",
+            default=1800.0,
+        )
+        lifecycle_autoclose_after_seconds = _env_float(
+            env,
+            "TELEGRAM_LIFECYCLE_AUTOCLOSE_AFTER_SECONDS",
+            default=0.0,
+        )
+        lifecycle_prune_interval_seconds = _env_float(
+            env,
+            "TELEGRAM_LIFECYCLE_PRUNE_INTERVAL_SECONDS",
+            default=300.0,
+        )
         return cls(
             telegram_bot_token=bot_token,
             telegram_allowed_user_ids=allowed_user_ids,
             telegram_default_chat_id=chat_id,
             sync_mode=sync_mode,
             telegram_topic_status_emoji_enabled=topic_status_emoji_enabled,
+            lifecycle_probe_interval_seconds=lifecycle_probe_interval_seconds,
+            lifecycle_unbound_ttl_seconds=lifecycle_unbound_ttl_seconds,
+            lifecycle_autoclose_after_seconds=lifecycle_autoclose_after_seconds,
+            lifecycle_prune_interval_seconds=lifecycle_prune_interval_seconds,
             state_database_path=state_database_path,
         )
 
@@ -85,3 +113,10 @@ def _env_bool(env: dict[str, str], name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Invalid boolean configuration for {name}: {value}")
+
+
+def _env_float(env: dict[str, str], name: str, *, default: float) -> float:
+    value = env.get(name)
+    if value is None:
+        return default
+    return float(value)

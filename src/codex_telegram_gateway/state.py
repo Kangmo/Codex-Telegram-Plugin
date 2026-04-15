@@ -9,6 +9,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
 )
@@ -103,6 +104,23 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 text TEXT NOT NULL,
                 local_image_paths_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_lifecycles (
+                codex_thread_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                bound_at REAL,
+                last_inbound_at REAL,
+                last_outbound_at REAL,
+                completed_at REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_project_activity (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                last_seen_at REAL NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
             );
             """
         )
@@ -642,6 +660,156 @@ class SqliteGatewayState:
         )
         self._connection.commit()
 
+    def upsert_topic_lifecycle(self, topic_lifecycle: TopicLifecycle) -> TopicLifecycle:
+        self._connection.execute(
+            """
+            INSERT INTO topic_lifecycles (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                bound_at,
+                last_inbound_at,
+                last_outbound_at,
+                completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id)
+            DO UPDATE SET
+                chat_id = excluded.chat_id,
+                message_thread_id = excluded.message_thread_id,
+                bound_at = excluded.bound_at,
+                last_inbound_at = excluded.last_inbound_at,
+                last_outbound_at = excluded.last_outbound_at,
+                completed_at = excluded.completed_at
+            """,
+            (
+                topic_lifecycle.codex_thread_id,
+                topic_lifecycle.chat_id,
+                topic_lifecycle.message_thread_id,
+                topic_lifecycle.bound_at,
+                topic_lifecycle.last_inbound_at,
+                topic_lifecycle.last_outbound_at,
+                topic_lifecycle.completed_at,
+            ),
+        )
+        self._connection.commit()
+        return topic_lifecycle
+
+    def get_topic_lifecycle(self, codex_thread_id: str) -> TopicLifecycle | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                bound_at,
+                last_inbound_at,
+                last_outbound_at,
+                completed_at
+            FROM topic_lifecycles
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._topic_lifecycle_from_row(row)
+
+    def list_topic_lifecycles(self) -> list[TopicLifecycle]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                bound_at,
+                last_inbound_at,
+                last_outbound_at,
+                completed_at
+            FROM topic_lifecycles
+            ORDER BY codex_thread_id
+            """
+        ).fetchall()
+        return [self._topic_lifecycle_from_row(row) for row in rows]
+
+    def delete_topic_lifecycle(self, codex_thread_id: str) -> None:
+        self._connection.execute(
+            "DELETE FROM topic_lifecycles WHERE codex_thread_id = ?",
+            (codex_thread_id,),
+        )
+        self._connection.commit()
+
+    def set_topic_project_last_seen(self, chat_id: int, message_thread_id: int, seen_at: float) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO topic_project_activity (
+                chat_id,
+                message_thread_id,
+                last_seen_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                last_seen_at = excluded.last_seen_at
+            """,
+            (chat_id, message_thread_id, seen_at),
+        )
+        self._connection.commit()
+
+    def get_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> float | None:
+        row = self._connection.execute(
+            """
+            SELECT last_seen_at
+            FROM topic_project_activity
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return float(row["last_seen_at"])
+
+    def list_topic_project_last_seen(self) -> list[tuple[int, int, float]]:
+        rows = self._connection.execute(
+            """
+            SELECT chat_id, message_thread_id, last_seen_at
+            FROM topic_project_activity
+            ORDER BY chat_id, message_thread_id
+            """
+        ).fetchall()
+        return [
+            (int(row["chat_id"]), int(row["message_thread_id"]), float(row["last_seen_at"]))
+            for row in rows
+        ]
+
+    def delete_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM topic_project_activity
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def prune_orphan_topic_history(self, live_topics: set[tuple[int, int]]) -> None:
+        rows = self._connection.execute(
+            """
+            SELECT DISTINCT chat_id, message_thread_id
+            FROM topic_history
+            """
+        ).fetchall()
+        for row in rows:
+            topic_key = (int(row["chat_id"]), int(row["message_thread_id"]))
+            if topic_key in live_topics:
+                continue
+            self._connection.execute(
+                """
+                DELETE FROM topic_history
+                WHERE chat_id = ? AND message_thread_id = ?
+                """,
+                topic_key,
+            )
+        self._connection.commit()
+
     @staticmethod
     def _binding_from_row(row: sqlite3.Row) -> Binding:
         return Binding(
@@ -662,6 +830,18 @@ class SqliteGatewayState:
             message_thread_id=row["message_thread_id"],
             turn_id=row["turn_id"],
             waiting_for_approval=bool(row["waiting_for_approval"]),
+        )
+
+    @staticmethod
+    def _topic_lifecycle_from_row(row: sqlite3.Row) -> TopicLifecycle:
+        return TopicLifecycle(
+            codex_thread_id=row["codex_thread_id"],
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            bound_at=row["bound_at"],
+            last_inbound_at=row["last_inbound_at"],
+            last_outbound_at=row["last_outbound_at"],
+            completed_at=row["completed_at"],
         )
 
     def _ensure_bindings_column(self, column_name: str, column_type: str) -> None:
