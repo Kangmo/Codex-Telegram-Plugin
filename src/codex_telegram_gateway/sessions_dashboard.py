@@ -7,6 +7,7 @@ _TARGETED_ACTIONS = {
     "new",
     "unbind",
     "unbind_confirm",
+    "live",
     "screenshot",
     "restore",
 }
@@ -113,6 +114,15 @@ def build_sessions_dashboard(
                     "text": "✂",
                     "callback_data": _targeted_callback(
                         "unbind",
+                        safe_page_index,
+                        entry.chat_id,
+                        entry.message_thread_id,
+                    ),
+                },
+                {
+                    "text": "📺",
+                    "callback_data": _targeted_callback(
+                        "live",
                         safe_page_index,
                         entry.chat_id,
                         entry.message_thread_id,

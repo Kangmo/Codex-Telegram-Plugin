@@ -18,6 +18,8 @@ class GatewayConfig:
     lifecycle_unbound_ttl_seconds: float = 1800.0
     lifecycle_autoclose_after_seconds: float = 0.0
     lifecycle_prune_interval_seconds: float = 300.0
+    live_view_interval_seconds: float = 5.0
+    live_view_timeout_seconds: float = 300.0
     state_database_path: Path = Path(".codex-telegram/gateway.db")
     toolbar_config_path: Path = Path(".codex-telegram/toolbar.toml")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
@@ -82,6 +84,16 @@ class GatewayConfig:
             "TELEGRAM_LIFECYCLE_PRUNE_INTERVAL_SECONDS",
             default=300.0,
         )
+        live_view_interval_seconds = _env_float(
+            env,
+            "CODEX_TELEGRAM_LIVE_VIEW_INTERVAL_SECONDS",
+            default=5.0,
+        )
+        live_view_timeout_seconds = _env_float(
+            env,
+            "CODEX_TELEGRAM_LIVE_VIEW_TIMEOUT_SECONDS",
+            default=300.0,
+        )
         voice_transcription_provider = env.get("CODEX_TELEGRAM_WHISPER_PROVIDER", "").strip()
         voice_transcription_api_key = env.get("CODEX_TELEGRAM_WHISPER_API_KEY", "").strip()
         voice_transcription_base_url = env.get("CODEX_TELEGRAM_WHISPER_BASE_URL", "").strip()
@@ -103,6 +115,8 @@ class GatewayConfig:
             lifecycle_unbound_ttl_seconds=lifecycle_unbound_ttl_seconds,
             lifecycle_autoclose_after_seconds=lifecycle_autoclose_after_seconds,
             lifecycle_prune_interval_seconds=lifecycle_prune_interval_seconds,
+            live_view_interval_seconds=live_view_interval_seconds,
+            live_view_timeout_seconds=live_view_timeout_seconds,
             state_database_path=state_database_path,
             toolbar_config_path=toolbar_config_path,
             voice_transcription_provider=voice_transcription_provider,

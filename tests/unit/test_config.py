@@ -146,3 +146,23 @@ def test_gateway_config_loads_voice_transcription_settings_from_env_file(tmp_pat
     assert config.voice_transcription_base_url == "https://api.openai.com/v1"
     assert config.voice_transcription_model == "whisper-1"
     assert config.voice_transcription_language == "en"
+
+
+def test_gateway_config_loads_live_view_settings_from_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_BOT_TOKEN=test-token",
+                "TELEGRAM_ALLOWED_USER_IDS=111",
+                "TELEGRAM_DEFAULT_CHAT_ID=-100100",
+                "CODEX_TELEGRAM_LIVE_VIEW_INTERVAL_SECONDS=2.5",
+                "CODEX_TELEGRAM_LIVE_VIEW_TIMEOUT_SECONDS=180.0",
+            ]
+        )
+    )
+
+    config = GatewayConfig.from_env(env_file)
+
+    assert config.live_view_interval_seconds == 2.5
+    assert config.live_view_timeout_seconds == 180.0

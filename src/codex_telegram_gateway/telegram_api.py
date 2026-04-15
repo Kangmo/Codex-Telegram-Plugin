@@ -375,6 +375,51 @@ class TelegramBotClient:
             payload["reply_markup"] = json.dumps(reply_markup)
         self._call("editMessageText", payload)
 
+    def edit_message_photo_file(
+        self,
+        chat_id: int,
+        message_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        media_payload: dict[str, object] = {
+            "type": "photo",
+            "media": "attach://photo",
+        }
+        if caption is not None:
+            media_payload["caption"] = caption
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": json.dumps(media_payload),
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        self._call_multipart(
+            "editMessageMedia",
+            payload,
+            file_field_name="photo",
+            file_path=Path(file_path),
+        )
+
+    def edit_message_caption(
+        self,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": caption,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        self._call("editMessageCaption", payload)
+
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         self._call(
             "editForumTopic",

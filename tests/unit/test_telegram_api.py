@@ -561,6 +561,60 @@ def test_send_photo_file_calls_telegram_api_with_multipart_upload(tmp_path) -> N
     ]
 
 
+def test_edit_message_photo_file_calls_telegram_api_with_multipart_upload(tmp_path) -> None:
+    client = RecordingTelegramBotClient()
+    file_path = tmp_path / "live.png"
+    file_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client.edit_message_photo_file(
+        -100100,
+        42,
+        file_path,
+        caption="Live view · gateway-project / thread-1",
+        reply_markup={"inline_keyboard": [[{"text": "Stop", "callback_data": "gw:live:stop"}]]},
+    )
+
+    assert client.multipart_calls == [
+        (
+            "editMessageMedia",
+            {
+                "chat_id": -100100,
+                "message_id": 42,
+                "media": (
+                    '{"type": "photo", "media": "attach://photo", "caption": '
+                    '"Live view \\u00b7 gateway-project / thread-1"}'
+                ),
+                "reply_markup": '{"inline_keyboard": [[{"text": "Stop", "callback_data": "gw:live:stop"}]]}',
+            },
+            "photo",
+            file_path,
+        )
+    ]
+
+
+def test_edit_message_caption_calls_telegram_api() -> None:
+    client = RecordingTelegramBotClient()
+
+    client.edit_message_caption(
+        -100100,
+        42,
+        "Live view · gateway-project / thread-1\nStopped.",
+        reply_markup={"inline_keyboard": [[{"text": "Start live", "callback_data": "gw:live:start"}]]},
+    )
+
+    assert client.calls == [
+        (
+            "editMessageCaption",
+            {
+                "chat_id": -100100,
+                "message_id": 42,
+                "caption": "Live view · gateway-project / thread-1\nStopped.",
+                "reply_markup": '{"inline_keyboard": [[{"text": "Start live", "callback_data": "gw:live:start"}]]}',
+            },
+        )
+    ]
+
+
 def test_send_document_file_rejects_multipart_responses_without_message_id(tmp_path) -> None:
     client = BrokenMultipartTelegramBotClient()
     file_path = tmp_path / "notes.txt"

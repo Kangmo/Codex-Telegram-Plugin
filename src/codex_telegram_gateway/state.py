@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 import time
 
+from codex_telegram_gateway.live_view import LiveViewState
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -222,6 +223,18 @@ class SqliteGatewayState:
                 page_index INTEGER NOT NULL DEFAULT 0,
                 query TEXT,
                 selected_relative_path TEXT,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS live_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                project_id TEXT,
+                started_at REAL NOT NULL,
+                next_refresh_at REAL NOT NULL DEFAULT 0.0,
+                last_capture_hash TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1547,6 +1560,112 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM send_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_live_view(self, live_view: LiveViewState) -> LiveViewState:
+        self._connection.execute(
+            """
+            INSERT INTO live_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_id,
+                started_at,
+                next_refresh_at,
+                last_capture_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                project_id = excluded.project_id,
+                started_at = excluded.started_at,
+                next_refresh_at = excluded.next_refresh_at,
+                last_capture_hash = excluded.last_capture_hash
+            """,
+            (
+                live_view.chat_id,
+                live_view.message_thread_id,
+                live_view.message_id,
+                live_view.codex_thread_id,
+                live_view.project_id,
+                live_view.started_at,
+                live_view.next_refresh_at,
+                live_view.last_capture_hash,
+            ),
+        )
+        self._connection.commit()
+        return live_view
+
+    def get_live_view(self, chat_id: int, message_thread_id: int) -> LiveViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_id,
+                started_at,
+                next_refresh_at,
+                last_capture_hash
+            FROM live_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return LiveViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            project_id=row["project_id"],
+            started_at=row["started_at"],
+            next_refresh_at=row["next_refresh_at"],
+            last_capture_hash=row["last_capture_hash"],
+        )
+
+    def list_live_views(self) -> list[LiveViewState]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_id,
+                started_at,
+                next_refresh_at,
+                last_capture_hash
+            FROM live_views
+            ORDER BY chat_id, message_thread_id
+            """
+        ).fetchall()
+        return [
+            LiveViewState(
+                chat_id=row["chat_id"],
+                message_thread_id=row["message_thread_id"],
+                message_id=row["message_id"],
+                codex_thread_id=row["codex_thread_id"],
+                project_id=row["project_id"],
+                started_at=row["started_at"],
+                next_refresh_at=row["next_refresh_at"],
+                last_capture_hash=row["last_capture_hash"],
+            )
+            for row in rows
+        ]
+
+    def delete_live_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM live_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),
