@@ -421,6 +421,8 @@ Code review notes:
 Branch and status:
 
 - Feature branch: `feature/fp-11-send-file-browser-and-upload`
+- Feature commit: `8a08655`
+- Merge commit on `main`: `dea79a2`
 
 Implementation decisions:
 
@@ -1002,6 +1004,8 @@ Match `ccgram`’s secure Telegram-side file browser for sending local files int
   - send-browser state is cleared when rebinding a topic to a new thread and when unbinding a topic so stale inline keyboards cannot cross bindings
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_send_command.py tests/unit/test_send_security.py tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `216 passed`
 - Coverage verification:
   - feature-specific changed executable statements versus `main`: `197/223 = 88.3%`
   - `send_callbacks.py`: `20/20 = 100.0%`
@@ -1011,6 +1015,8 @@ Match `ccgram`’s secure Telegram-side file browser for sending local files int
   - `state.py` full-file regression coverage after the new tests: `330/343 = 96.2%`
   - `models.py` full-file regression coverage after the new tests: `134/134 = 100.0%`
 - Feature branch: `feature/fp-11-send-file-browser-and-upload`
+- Feature commit: `8a08655`
+- Merge commit on `main`: `dea79a2`
 
 ### FP-12: `/toolbar` Configurable Action Bar
 
