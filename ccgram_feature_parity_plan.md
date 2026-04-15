@@ -41,7 +41,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-07 | `/resume` | P0 | Adapted | Missing |
 | FP-08 | `/unbind` | P0 | Native | Missing |
 | FP-09 | `/restore` and richer recovery flows | P0 | Adapted | Partial today |
-| FP-10 | `/upgrade` | P2 | Adapted | Not critical |
+| FP-10 | `/upgrade` | P2 | Adapted | Implemented |
 | FP-11 | `/send` file browser/upload | P0 | Native | Implemented |
 | FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Implemented |
 | FP-13 | `/verbose` and notification modes | P0 | Native | Implemented |
@@ -112,9 +112,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-10: `/upgrade`
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-11: `/send` File Browser and Upload
 - [x] Implemented
@@ -1079,6 +1079,49 @@ Provide a safe plugin-upgrade operator path, adapted from `ccgram`’s self-upda
   - `/upgrade` renders the correct local source paths
 - E2E:
   - developer-mode local reinstall flow in a temp plugin cache
+
+**Implementation completed**
+
+- Re-reviewed `ccgram`’s upgrade handler before implementation:
+  - `/tmp/ccgram-review/src/ccgram/handlers/upgrade.py`
+- Added `src/codex_telegram_gateway/upgrade_diagnostics.py` as a pure discovery/rendering module.
+- `GatewayDaemon` now supports `/gateway upgrade` and returns a diagnostics report containing:
+  - installed plugin version from `.codex-plugin/plugin.json`
+  - detected plugin root
+  - plugin manifest and `.mcp.json` paths
+  - matching user/repo marketplace entries when present
+  - exact operator-facing local upgrade steps
+
+**Implementation decisions locked during FP-10**
+
+- Kept FP-10 diagnostics-only. The original optional `--apply-local` idea was intentionally dropped for now so the plugin does not mutate its own checkout or marketplace installation from Telegram.
+- Marketplace discovery checks the two documented installation scopes only:
+  - repo-local `.agents/plugins/marketplace.json`
+  - user-local `~/.agents/plugins/marketplace.json`
+- Relative marketplace source paths are rendered exactly as configured and also resolved against the marketplace file directory so the operator can see the concrete filesystem target Codex App will likely load.
+- `/gateway upgrade` is a gateway command only. It does not add a top-level Telegram menu command, which remains reserved for `/gateway` plus pass-through slash commands.
+
+**Proofreading notes**
+
+- Confirmed the command branch sits near the other diagnostics commands and returns before thread-bound routing, so `/gateway upgrade` never queues into Codex by mistake.
+- Checked the help output after adding the new subcommand and updated the snapshot-style test instead of weakening the command listing assertion.
+- Added an explicit daemon failure-path test for missing diagnostics so the user gets a visible error message instead of the poller silently dropping the command.
+
+**Verification**
+
+- Red phase:
+  - `.venv/bin/pytest tests/e2e/test_gateway_flow.py::test_gateway_flow_upgrade_command_reports_version_and_marketplace_source -q` -> failed because `/gateway upgrade` fell back to generic help text
+  - `.venv/bin/pytest tests/unit/test_upgrade_diagnostics.py -q` -> `3 failed` with `NotImplementedError` on the interface-only scaffolding
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_upgrade_diagnostics.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_upgrade_sends_rendered_diagnostics tests/unit/test_daemon.py::test_poll_telegram_once_gateway_upgrade_reports_discovery_failure tests/e2e/test_gateway_flow.py::test_gateway_flow_upgrade_command_reports_version_and_marketplace_source -q` -> `6 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `391 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp10.json -q` plus diff-based changed-line audit including new source files -> `79/85 = 92.9%`
+- Branch and merge:
+  - feature branch `feature/fp-10-upgrade`
+  - feature commit `<pending>`
+  - merge commit on `main` `<pending>`
 
 ### FP-11: `/send` File Browser and Upload
 

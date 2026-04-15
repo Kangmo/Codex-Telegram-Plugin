@@ -676,3 +676,30 @@
   - `.venv/bin/pytest -q` -> `385 passed`
 - Feature-specific changed-executable coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp23.json -q` plus diff-based changed-line audit including new source files -> `188/199 = 94.5%`
+
+### FP-10 verification
+- Branch and merge:
+  - feature branch `feature/fp-10-upgrade`
+  - feature commit `<pending>`
+  - merge commit on `main` `<pending>`
+- Re-reviewed `ccgram` upgrade source before implementation:
+  - `/tmp/ccgram-review/src/ccgram/handlers/upgrade.py`
+- Added `upgrade_diagnostics.py` for:
+  - plugin root discovery
+  - plugin version/manifest discovery
+  - repo/user marketplace install discovery
+  - operator-facing upgrade instructions rendering
+- `GatewayDaemon` now handles `/gateway upgrade` directly and returns a diagnostics report instead of mutating the plugin installation.
+- Implementation decisions locked during FP-10:
+  - keep the feature diagnostics-only; do not run `git pull`, reinstall, or self-restart from Telegram
+  - restrict marketplace lookup to the documented repo-local and user-local plugin marketplace manifests
+  - render both raw and resolved marketplace source paths when available
+- Proofread fixes before sign-off:
+  - updated the gateway help snapshot after adding the new subcommand
+  - added an explicit failure-path test so missing-manifest discovery errors become visible Telegram output
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_upgrade_diagnostics.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_upgrade_sends_rendered_diagnostics tests/unit/test_daemon.py::test_poll_telegram_once_gateway_upgrade_reports_discovery_failure tests/e2e/test_gateway_flow.py::test_gateway_flow_upgrade_command_reports_version_and_marketplace_source -q` -> `6 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `391 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp10.json -q` plus diff-based changed-line audit including new source files -> `79/85 = 92.9%`
