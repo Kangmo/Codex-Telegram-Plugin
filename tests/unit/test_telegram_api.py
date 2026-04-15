@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from codex_telegram_gateway.telegram_api import TelegramApiError, TelegramBotClient, is_missing_topic_error
+from codex_telegram_gateway.telegram_api import (
+    TelegramApiError,
+    TelegramBotClient,
+    is_missing_topic_error,
+    is_topic_edit_permission_error,
+)
 
 
 class StubTelegramBotClient(TelegramBotClient):
@@ -134,3 +139,9 @@ def test_is_missing_topic_error_matches_lifecycle_errors() -> None:
     assert is_missing_topic_error(TelegramApiError("Topic closed")) is True
     assert is_missing_topic_error(TelegramApiError("message thread not found")) is True
     assert is_missing_topic_error(TelegramApiError("some other telegram error")) is False
+
+
+def test_is_topic_edit_permission_error_matches_admin_rights_failures() -> None:
+    assert is_topic_edit_permission_error(TelegramApiError("Not enough rights to manage topics")) is True
+    assert is_topic_edit_permission_error(TelegramApiError("CHAT_ADMIN_REQUIRED")) is True
+    assert is_topic_edit_permission_error(TelegramApiError("some other telegram error")) is False

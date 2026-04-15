@@ -445,3 +445,15 @@ def is_missing_topic_error(exc: TelegramApiError) -> bool:
             "thread not found",
         )
     )
+
+
+def is_topic_edit_permission_error(exc: TelegramApiError) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "not enough rights",
+            "chat_admin_required",
+            "administrator rights",
+        )
+    )

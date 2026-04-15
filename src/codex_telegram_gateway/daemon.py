@@ -25,7 +25,19 @@ from codex_telegram_gateway.service import (
     GatewayService,
     format_topic_name,
 )
-from codex_telegram_gateway.telegram_api import is_missing_topic_error
+from codex_telegram_gateway.telegram_api import (
+    is_missing_topic_error,
+    is_topic_edit_permission_error,
+)
+from codex_telegram_gateway.topic_status import (
+    TOPIC_STATUS_APPROVAL,
+    TOPIC_STATUS_CLOSED,
+    TOPIC_STATUS_FAILED,
+    TOPIC_STATUS_IDLE,
+    TOPIC_STATUS_RUNNING,
+    format_topic_title_for_status,
+    strip_topic_status_prefix,
+)
 
 
 class GatewayDaemon:
@@ -48,6 +60,8 @@ class GatewayDaemon:
         self._telegram = telegram
         self._codex = codex
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
+        self._topic_status_overrides: dict[tuple[int, int], str] = {}
+        self._topic_status_disabled_chats: set[int] = set()
         self._service = GatewayService(
             config=config,
             state=state,
@@ -68,27 +82,24 @@ class GatewayDaemon:
             if pending_turn is not None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
             thread = self._codex.read_thread(binding.codex_thread_id)
-            if binding.binding_status == ACTIVE_BINDING_STATUS:
-                desired_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
-                if binding.topic_name != desired_topic_name:
-                    try:
-                        self._telegram.edit_forum_topic(
-                            binding.chat_id,
-                            binding.message_thread_id,
-                            desired_topic_name,
-                        )
-                    except Exception as exc:
-                        if self._mark_binding_deleted_if_missing_topic(binding, exc):
-                            binding = self._state.get_binding_by_thread(binding.codex_thread_id)
-                        else:
-                            raise
-                    else:
-                        binding = self._state.create_binding(
-                            replace(
-                                binding,
-                                topic_name=desired_topic_name,
-                            )
-                        )
+            if binding.binding_status != DELETED_BINDING_STATUS:
+                topic_status = self._topic_status_for_binding(binding, pending_turn, turn_result)
+                base_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
+                desired_topic_name = self._desired_topic_name(
+                    binding,
+                    base_topic_name=base_topic_name,
+                    topic_status=topic_status,
+                )
+                if not self._topic_name_matches_desired(
+                    binding,
+                    desired_topic_name=desired_topic_name,
+                    base_topic_name=base_topic_name,
+                ):
+                    binding = self._sync_topic_name(
+                        binding,
+                        desired_topic_name=desired_topic_name,
+                        base_topic_name=base_topic_name,
+                    )
                 if binding.binding_status == ACTIVE_BINDING_STATUS:
                     for event in self._codex.list_events(binding.codex_thread_id):
                         active_turn_id = pending_turn.turn_id if pending_turn is not None else None
@@ -108,6 +119,14 @@ class GatewayDaemon:
                 continue
 
             self._state.delete_pending_turn(binding.codex_thread_id)
+            if turn_result.status == "completed":
+                self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
+            else:
+                self._set_topic_status_override(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    TOPIC_STATUS_FAILED,
+                )
             self._clear_typing_state(binding.chat_id, binding.message_thread_id)
             if binding.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
                 try:
@@ -209,6 +228,10 @@ class GatewayDaemon:
                 inbound_message.chat_id,
                 inbound_message.message_thread_id,
                 force=True,
+            )
+            self._clear_topic_status_override(
+                inbound_message.chat_id,
+                inbound_message.message_thread_id,
             )
             turn_result = self._codex.start_turn(
                 StartedTurn(
@@ -313,6 +336,91 @@ class GatewayDaemon:
 
     def _clear_typing_state(self, chat_id: int, message_thread_id: int) -> None:
         self._last_typing_sent_at.pop((chat_id, message_thread_id), None)
+
+    def _set_topic_status_override(self, chat_id: int, message_thread_id: int, status: str) -> None:
+        self._topic_status_overrides[(chat_id, message_thread_id)] = status
+
+    def _clear_topic_status_override(self, chat_id: int, message_thread_id: int) -> None:
+        self._topic_status_overrides.pop((chat_id, message_thread_id), None)
+
+    def _topic_status_for_binding(
+        self,
+        binding: Binding,
+        pending_turn: PendingTurn | None,
+        turn_result: TurnResult | None = None,
+    ) -> str:
+        key = (binding.chat_id, binding.message_thread_id)
+        if binding.binding_status == CLOSED_BINDING_STATUS:
+            return TOPIC_STATUS_CLOSED
+        if pending_turn is not None:
+            self._clear_topic_status_override(*key)
+            if turn_result is not None and turn_result.waiting_for_approval:
+                return TOPIC_STATUS_APPROVAL
+            if turn_result is not None and _is_terminal_turn_status(turn_result.status):
+                if turn_result.status == "completed":
+                    return TOPIC_STATUS_IDLE
+                return TOPIC_STATUS_FAILED
+            return TOPIC_STATUS_RUNNING
+        return self._topic_status_overrides.get(key, TOPIC_STATUS_IDLE)
+
+    def _desired_topic_name(
+        self,
+        binding: Binding,
+        *,
+        base_topic_name: str,
+        topic_status: str,
+    ) -> str:
+        emoji_enabled = (
+            self._config.telegram_topic_status_emoji_enabled
+            and binding.chat_id not in self._topic_status_disabled_chats
+        )
+        return format_topic_title_for_status(
+            base_topic_name,
+            topic_status,
+            emoji_enabled=emoji_enabled,
+        )
+
+    def _sync_topic_name(
+        self,
+        binding: Binding,
+        *,
+        desired_topic_name: str,
+        base_topic_name: str,
+    ) -> Binding:
+        try:
+            self._telegram.edit_forum_topic(
+                binding.chat_id,
+                binding.message_thread_id,
+                desired_topic_name,
+            )
+        except Exception as exc:
+            if (
+                desired_topic_name != base_topic_name
+                and is_topic_edit_permission_error(exc)
+            ):
+                self._topic_status_disabled_chats.add(binding.chat_id)
+                return binding
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return self._state.get_binding_by_thread(binding.codex_thread_id)
+            raise
+        return self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+
+    def _topic_name_matches_desired(
+        self,
+        binding: Binding,
+        *,
+        desired_topic_name: str,
+        base_topic_name: str,
+    ) -> bool:
+        if binding.topic_name == desired_topic_name:
+            return True
+        if (
+            desired_topic_name == base_topic_name
+            and binding.chat_id in self._topic_status_disabled_chats
+            and binding.topic_name is not None
+        ):
+            return strip_topic_status_prefix(binding.topic_name) == base_topic_name
+        return False
 
     def _send_message_parts(
         self,
@@ -464,6 +572,7 @@ class GatewayDaemon:
                 binding_status=ACTIVE_BINDING_STATUS,
             )
         )
+        self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
 
     def _handle_topic_edited(self, update: dict[str, object]) -> None:
         binding = self._state.get_binding_by_topic(
@@ -473,15 +582,31 @@ class GatewayDaemon:
         if binding is None or binding.binding_status != ACTIVE_BINDING_STATUS:
             return
 
-        new_name = str(update.get("topic_name") or "").strip()
-        if not new_name or new_name == (binding.topic_name or ""):
+        raw_name = str(update.get("topic_name") or "").strip()
+        if not raw_name or raw_name == (binding.topic_name or ""):
             return
 
         thread = self._codex.read_thread(binding.codex_thread_id)
         project_id = binding.project_id or thread.cwd
+        topic_status = self._topic_status_for_binding(
+            binding,
+            self._state.get_pending_turn(binding.codex_thread_id),
+        )
+        desired_topic_name = self._desired_topic_name(
+            binding,
+            base_topic_name=format_topic_name(project_id, thread.title),
+            topic_status=topic_status,
+        )
         canonical_name = format_topic_name(project_id, thread.title)
+        new_name = strip_topic_status_prefix(raw_name)
         if new_name == canonical_name:
-            self._state.create_binding(replace(binding, topic_name=canonical_name))
+            binding = self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+            if raw_name != desired_topic_name:
+                self._sync_topic_name(
+                    binding,
+                    desired_topic_name=desired_topic_name,
+                    base_topic_name=canonical_name,
+                )
             return
 
         parsed_name = _parse_topic_name(new_name)
@@ -494,29 +619,25 @@ class GatewayDaemon:
             and parsed_name[1] != thread.title
         ):
             renamed_thread = self._codex.rename_thread(binding.codex_thread_id, parsed_name[1])
-            desired_topic_name = format_topic_name(project_id, renamed_thread.title)
+            desired_topic_name = self._desired_topic_name(
+                binding,
+                base_topic_name=format_topic_name(project_id, renamed_thread.title),
+                topic_status=topic_status,
+            )
             self._state.create_binding(replace(binding, topic_name=desired_topic_name))
-            if desired_topic_name != new_name:
-                try:
-                    self._telegram.edit_forum_topic(
-                        binding.chat_id,
-                        binding.message_thread_id,
-                        desired_topic_name,
-                    )
-                except Exception as exc:
-                    if not self._mark_binding_deleted_if_missing_topic(binding, exc):
-                        raise
+            if desired_topic_name != raw_name:
+                self._sync_topic_name(
+                    binding,
+                    desired_topic_name=desired_topic_name,
+                    base_topic_name=format_topic_name(project_id, renamed_thread.title),
+                )
             return
 
-        try:
-            self._telegram.edit_forum_topic(
-                binding.chat_id,
-                binding.message_thread_id,
-                canonical_name,
-            )
-        except Exception as exc:
-            if not self._mark_binding_deleted_if_missing_topic(binding, exc):
-                raise
+        self._sync_topic_name(
+            binding,
+            desired_topic_name=desired_topic_name,
+            base_topic_name=canonical_name,
+        )
 
     def _mark_binding_deleted_if_missing_topic(self, binding: Binding, exc: Exception) -> bool:
         if not is_missing_topic_error(exc):
@@ -527,6 +648,7 @@ class GatewayDaemon:
                 binding_status=DELETED_BINDING_STATUS,
             )
         )
+        self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
         return True
 

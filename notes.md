@@ -178,9 +178,17 @@
 ### Completed features
 - FP-01 Topic close/reopen lifecycle
 - FP-02 Bidirectional topic rename sync
+- FP-03 Topic emoji/status state
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
 - Added reverse rename handling from Telegram topic title to Codex thread title when the canonical project prefix is preserved.
 - Restores canonical topic names when the rename is malformed or attempts to change the project segment.
 - Coverage for FP-02-specific lines is 46/46 = 100.0%.
+
+### FP-03 verification
+- Added lightweight topic-status prefixes for non-idle states: running, waiting approval, failed, and closed.
+- Idle topics intentionally remain unprefixed to avoid constant rename churn across loaded Codex App threads.
+- Added status-prefix stripping so Telegram-side topic renames continue to update the correct Codex thread title.
+- Added per-chat suppression after topic-edit permission failures so status-only prefix updates stop retrying noisily.
+- Coverage for tracked FP-03 changed source lines is 77/81 = 95.1%; the new `topic_status.py` helper module is 21/21 = 100.0%.
