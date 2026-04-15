@@ -1345,6 +1345,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway bindings - List Codex thread to Telegram topic bindings\n"
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
                 "/gateway screenshot - Capture the current Codex App window for this thread\n"
+                "/gateway panes - Show the Codex App thread summary for tmux-style pane compatibility\n"
                 "/gateway live - Start or refresh a live Codex App window feed\n"
                 "/gateway send - Browse project files and send one back to Telegram\n"
                 "/gateway verbose - Change supplemental Telegram notification mode\n"
@@ -4022,6 +4023,55 @@ def test_poll_telegram_once_gateway_screenshot_sends_photo(tmp_path) -> None:
             77,
             str(screenshot_path),
             "Screenshot · gateway-project / thread-1",
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_panes_reports_project_threads() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway panes",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-2")
+    codex.set_thread_status("thread-2", "running")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "thread-3")
+    codex.create_thread("/Users/kangmo/sacle/src/other-project", "other-project-thread")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "`/panes` is not available in Codex App mode.\n\n"
+            "Current topic thread:\n"
+            "- `thread-1` in `gateway-project`\n\n"
+            "Loaded threads in this project:\n"
+            "- `thread-1` (this topic, idle)\n"
+            "- `thread-2` (running)\n"
+            "- `thread-3` (idle)\n\n"
+            "Use `/gateway threads` for a full list, `/gateway screenshot` for a capture, or `/gateway live` for a live view.",
+            None,
         )
     ]
 
