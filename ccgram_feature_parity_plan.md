@@ -1342,6 +1342,8 @@ Expose explicit command-driven recall of recent topic messages, not only reply-w
 
 - Branch and merge:
   - feature branch `feature/fp-16-top-level-recall-flow`
+  - feature commit `f6b579a`
+  - merge commit on `main` `2884792`
 - Reviewed `ccgram` recall references before implementation:
   - `src/ccgram/handlers/command_history.py`
   - `src/ccgram/tests/handlers/test_command_history.py`

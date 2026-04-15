@@ -519,6 +519,8 @@
 ### FP-16 verification
 - Branch and merge:
   - feature branch `feature/fp-16-top-level-recall-flow`
+  - feature commit `f6b579a`
+  - merge commit on `main` `2884792`
 - Reviewed `ccgram` recall handling in `handlers/command_history.py` and its unit tests before implementation.
 - Added `recall_command.py` for shared history-label rendering plus top-level recall prompt generation.
 - `/gateway recall` now exposes recent topic history beyond the two shortcut buttons already present in the response/status widgets.
