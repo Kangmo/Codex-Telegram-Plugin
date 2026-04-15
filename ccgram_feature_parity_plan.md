@@ -369,9 +369,11 @@ Code review notes:
 
 ### FP-09: `/restore` and Rich Recovery Flows
 
-Branch and status:
+Branch and merge:
 
 - Feature branch: `feature/fp-09-restore-and-richer-recovery-flows`
+- Feature commit: `67f4ec5`
+- Merge commit on `main`: `a3b4dc3`
 
 Implementation decisions:
 
