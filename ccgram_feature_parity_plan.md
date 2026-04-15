@@ -1342,6 +1342,10 @@ Provide a Telegram-triggered visual snapshot of the current Codex App thread.
 
 **Implementation notes**
 
+- Branch and merge:
+  - feature branch `feature/fp-14-screenshot`
+  - feature commit `aecb122`
+  - merge commit on `main` `de40180`
 - Reviewed `ccgram` screenshot flow before implementation:
   - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
   - screenshot dispatch hooks in `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`

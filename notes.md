@@ -583,8 +583,8 @@
 ### FP-14 verification
 - Branch and merge:
   - feature branch `feature/fp-14-screenshot`
-  - feature commit pending until this feature is committed
-  - merge commit on `main` pending until this feature is merged
+  - feature commit `aecb122`
+  - merge commit on `main` `de40180`
 - Re-reviewed `ccgram` screenshot sources before implementation:
   - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
   - `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
