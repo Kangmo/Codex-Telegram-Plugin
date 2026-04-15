@@ -547,6 +547,74 @@ def test_gateway_restore_continue_survives_restart_and_routes_next_message(tmp_p
     assert codex.started_turns == [StartedTurn(thread_id="thread-1", text="Please continue.")]
 
 
+def test_verbose_mode_persists_across_restart_and_suppresses_typing(tmp_path) -> None:
+    database_path = tmp_path / "gateway.db"
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Quiet topic",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state = SqliteGatewayState(database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Quiet topic",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway verbose",
+    )
+    first_daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+    first_daemon.poll_telegram_once()
+
+    restarted_state = SqliteGatewayState(database_path)
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-verbose-muted",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:verbose:set:muted",
+    )
+    second_daemon = GatewayDaemon(config=config, state=restarted_state, telegram=telegram, codex=codex)
+    second_daemon.poll_telegram_once()
+
+    assert restarted_state.get_binding_by_thread("thread-1").sync_mode == "muted"
+
+    telegram.push_update(
+        update_id=3,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please continue quietly.",
+    )
+    second_daemon.poll_telegram_once()
+    second_daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [StartedTurn(thread_id="thread-1", text="Please continue quietly.")]
+    assert telegram.sent_chat_actions == []
+
+
 def test_command_menu_sync_persists_observed_passthrough_commands_across_restart(tmp_path) -> None:
     database_path = tmp_path / "gateway.db"
     telegram = FakeTelegramClient()
@@ -655,7 +723,7 @@ def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> No
         "1. 🟢 `(gateway-project) Dashboard thread`\n"
         "project `gateway-project` • thread `Dashboard thread`\n"
         "topic `77` • id `thread-1`\n"
-        "status `idle` • notify `assistant_plus_alerts`",
+        "status `idle` • notify `all`",
         {
             "inline_keyboard": [
                 [
@@ -693,7 +761,7 @@ def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> No
         "1. 🟢 `(gateway-project) Dashboard thread`\n"
         "project `gateway-project` • thread `Renamed live thread`\n"
         "topic `77` • id `thread-1`\n"
-        "status `idle` • notify `assistant_plus_alerts`",
+        "status `idle` • notify `all`",
         {
             "inline_keyboard": [
                 [

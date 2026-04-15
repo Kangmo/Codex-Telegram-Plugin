@@ -44,7 +44,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-10 | `/upgrade` | P2 | Adapted | Not critical |
 | FP-11 | `/send` file browser/upload | P0 | Native | Implemented |
 | FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Missing |
-| FP-13 | `/verbose` and notification modes | P0 | Native | Missing |
+| FP-13 | `/verbose` and notification modes | P0 | Native | Implemented |
 | FP-14 | `/screenshot` | P1 | Adapted | Missing |
 | FP-15 | `/panes` compatibility | P2 | Compatibility only | Codex App has no pane model |
 | FP-16 | `/recall` top-level recall flow | P1 | Native | Partial via reply widget only |
@@ -127,9 +127,9 @@ Update these checkboxes as each feature lands.
 - [ ] Line by line proof reading for code review done
 
 ### FP-13: `/verbose` and Notification Modes
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-14: `/screenshot`
 - [ ] Implemented
@@ -1087,6 +1087,25 @@ Give operators control over noise level like `ccgram`’s verbose/muted modes.
   - same turn under each mode emits expected subset of messages
 - E2E:
   - switch modes live and verify new behavior without restart
+
+### FP-13 verification
+
+- Added a dedicated `notification_modes.py` module for mode normalization, inline-picker rendering, callback parsing, and the notification gating matrix.
+- Added `/gateway verbose` plus inline callbacks so each topic can switch between `all`, `important`, `errors_only`, and `muted` without restart.
+- The gateway now routes supplemental Telegram chatter through a single notification gate:
+  - typing indicators
+  - failure/interruption notices
+  - session/status dashboard labels
+- Assistant replies are intentionally never muted in this port. Unlike `ccgram`, Telegram is the primary conversation surface here, so notification modes only suppress supplemental chatter rather than the actual response stream.
+- Proofread findings and fixes:
+  - normalized legacy persisted values so `assistant_plus_alerts` reads back as `all`
+  - normalized legacy `assistant_only` to `important`
+  - ensured mirror topics can still use `/gateway verbose` because the mode is topic-local, not a project-management action
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_notification_modes.py tests/unit/test_daemon.py tests/unit/test_sessions_dashboard.py tests/e2e/test_gateway_flow.py` -> `154 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `244 passed`
+- Feature-specific changed-statement coverage for tracked source diff is `40/48 = 83.3%`.
 
 ### FP-14: `/screenshot`
 

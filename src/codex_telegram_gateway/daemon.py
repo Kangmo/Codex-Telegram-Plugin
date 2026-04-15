@@ -31,6 +31,13 @@ from codex_telegram_gateway.models import (
     TopicProject,
     TurnResult,
 )
+from codex_telegram_gateway.notification_modes import (
+    build_verbose_picker,
+    normalize_notification_mode,
+    notification_mode_button_text,
+    parse_verbose_callback,
+    should_emit_notification,
+)
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
 from codex_telegram_gateway.service import (
     DEFAULT_NEW_THREAD_TITLE,
@@ -198,15 +205,11 @@ class GatewayDaemon:
                     )
                 self._clear_typing_state(target.chat_id, target.message_thread_id)
                 if target.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
-                    try:
-                        self._telegram.send_message(
-                            target.chat_id,
-                            target.message_thread_id,
-                            _turn_status_text(turn_result.status),
-                        )
-                    except Exception as exc:
-                        if not self._mark_binding_deleted_if_missing_topic(target, exc):
-                            raise
+                    self._send_binding_notification(
+                        target,
+                        text=_turn_status_text(turn_result.status),
+                        kind="error",
+                    )
             if turn_result.status == "completed":
                 self._mark_topic_completed(binding.codex_thread_id)
 
@@ -517,6 +520,9 @@ class GatewayDaemon:
             self._state.delete_topic_creation_job(topic_creation_job.codex_thread_id, topic_creation_job.chat_id)
 
     def _send_typing_if_due(self, chat_id: int, message_thread_id: int, *, force: bool = False) -> None:
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is not None and not self._should_emit_binding_notification(binding, kind="typing"):
+            return
         now = time.monotonic()
         key = (chat_id, message_thread_id)
         if not force:
@@ -531,6 +537,22 @@ class GatewayDaemon:
 
     def _clear_typing_state(self, chat_id: int, message_thread_id: int) -> None:
         self._last_typing_sent_at.pop((chat_id, message_thread_id), None)
+
+    def _should_emit_binding_notification(self, binding: Binding, *, kind: str) -> bool:
+        return should_emit_notification(binding.sync_mode, kind)
+
+    def _send_binding_notification(self, binding: Binding, *, text: str, kind: str) -> None:
+        if not self._should_emit_binding_notification(binding, kind=kind):
+            return
+        try:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                text,
+            )
+        except Exception as exc:
+            if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                raise
 
     def run_lifecycle_sweeps(
         self,
@@ -1063,6 +1085,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_SESSIONS_PREFIX):
             self._handle_sessions_callback(update)
+            return
+        if data.startswith(_CALLBACK_VERBOSE_PREFIX):
+            self._handle_verbose_callback(update)
             return
         if data.startswith(_CALLBACK_SEND_PREFIX):
             self._handle_send_callback(update)
@@ -1749,6 +1774,43 @@ class GatewayDaemon:
 
         self._telegram.answer_callback_query(callback_query_id, "Unknown response action.")
 
+    def _handle_verbose_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        parsed_callback = parse_verbose_callback(str(update["data"]))
+        if parsed_callback is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown verbose action.")
+            return
+        if parsed_callback["action"] == "dismiss":
+            self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+            self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None:
+            self._telegram.answer_callback_query(callback_query_id, "This topic is not bound to any Codex thread.")
+            return
+
+        updated_binding = self._save_binding(
+            replace(
+                binding,
+                sync_mode=str(parsed_callback["mode"]),
+            )
+        )
+        text, reply_markup = build_verbose_picker(updated_binding.sync_mode)
+        self._telegram.edit_message_text(
+            chat_id,
+            message_id,
+            text,
+            reply_markup=reply_markup,
+        )
+        self._telegram.answer_callback_query(
+            callback_query_id,
+            notification_mode_button_text(updated_binding.sync_mode),
+        )
+
     def _handle_send_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
         chat_id = int(update["chat_id"])
@@ -2380,6 +2442,23 @@ class GatewayDaemon:
             self._open_send_browser(binding, query=command_args)
             return
 
+        if command_name == "verbose":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            text, reply_markup = build_verbose_picker(binding.sync_mode)
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                text,
+                reply_markup=reply_markup,
+            )
+            return
+
         if command_name == "project":
             if binding is not None and not self._is_primary_binding(binding):
                 self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
@@ -2747,6 +2826,7 @@ class GatewayDaemon:
         thread = self._codex.read_thread(binding.codex_thread_id)
         pending_turn = self._state.get_pending_turn(binding.codex_thread_id)
         project_name = Path(binding.project_id or thread.cwd or "").name or "-"
+        notification_mode = normalize_notification_mode(binding.sync_mode)
         pending_suffix = ""
         if pending_turn is not None:
             pending_suffix = " (waiting for approval)" if pending_turn.waiting_for_approval else " (running)"
@@ -2756,6 +2836,7 @@ class GatewayDaemon:
             f"Thread title: `{thread.title}`\n"
             f"Thread id: `{binding.codex_thread_id}`\n"
             f"Topic id: `{binding.message_thread_id}`\n"
+            f"Notification mode: `{notification_mode}`\n"
             f"Codex status: `{thread.status}`{pending_suffix}"
         )
 
@@ -2893,7 +2974,7 @@ class GatewayDaemon:
             thread_title=thread_title,
             codex_thread_id=binding.codex_thread_id,
             thread_status=self._session_dashboard_thread_status(binding, thread, pending_turn),
-            notification_mode=binding.sync_mode,
+            notification_mode=normalize_notification_mode(binding.sync_mode),
             mirror_count=len(self._state.list_mirror_bindings_for_thread(binding.codex_thread_id)),
             status_icon=self._session_dashboard_status_icon(binding, thread, pending_turn),
             warning_text=warning_text,
@@ -3007,6 +3088,7 @@ _CALLBACK_SYNC_PREFIX = "gw:sync:"
 _CALLBACK_SYNC_FIX = f"{_CALLBACK_SYNC_PREFIX}fix"
 _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
+_CALLBACK_VERBOSE_PREFIX = "gw:verbose:"
 _CALLBACK_SEND_PREFIX = "gw:send:"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
@@ -3039,6 +3121,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("send", "Browse project files and send one back to Telegram"),
+    _BotCommand("verbose", "Change supplemental Telegram notification mode"),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),
     _BotCommand("status", "Show the current topic binding and thread status"),
     _BotCommand("sync", "Audit bindings and recover deleted topics"),
