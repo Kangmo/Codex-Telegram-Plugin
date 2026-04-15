@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, parse, request
+from uuid import uuid4
 
 
 class TelegramApiError(RuntimeError):
@@ -203,6 +204,56 @@ class TelegramBotClient:
             },
         )
 
+    def send_document_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "message_thread_id": message_thread_id,
+        }
+        if caption:
+            payload["caption"] = caption
+        result = self._call_multipart(
+            "sendDocument",
+            payload,
+            file_field_name="document",
+            file_path=Path(file_path),
+        )
+        message_id = result.get("message_id")
+        if not isinstance(message_id, int):
+            raise TelegramApiError(f"Unexpected sendDocument response: {result}")
+        return message_id
+
+    def send_photo_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "message_thread_id": message_thread_id,
+        }
+        if caption:
+            payload["caption"] = caption
+        result = self._call_multipart(
+            "sendPhoto",
+            payload,
+            file_field_name="photo",
+            file_path=Path(file_path),
+        )
+        message_id = result.get("message_id")
+        if not isinstance(message_id, int):
+            raise TelegramApiError(f"Unexpected sendPhoto response: {result}")
+        return message_id
+
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         payload: dict[str, object] = {"callback_query_id": callback_query_id}
         if text is not None:
@@ -395,6 +446,44 @@ class TelegramBotClient:
             self._raise_api_error(method, data)
         return data["result"]
 
+    def _call_multipart(
+        self,
+        method: str,
+        payload: dict[str, object],
+        *,
+        file_field_name: str,
+        file_path: Path,
+    ) -> dict[str, object] | list[object]:
+        boundary = f"codex-telegram-{uuid4().hex}"
+        body = _encode_multipart_form_data(
+            payload,
+            file_field_name=file_field_name,
+            file_path=file_path,
+            boundary=boundary,
+        )
+        req = request.Request(
+            f"{self._base_url}/{method}",
+            data=body,
+            method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+        except error.HTTPError as exc:
+            body_text = exc.read().decode()
+            try:
+                data = json.loads(body_text)
+            except json.JSONDecodeError:
+                raise TelegramApiError(f"Telegram HTTP error for {method}: {body_text}") from exc
+            self._raise_api_error(method, data)
+        except error.URLError as exc:
+            raise TelegramApiError(f"Telegram request failed for {method}: {exc}") from exc
+
+        if not data.get("ok"):
+            self._raise_api_error(method, data)
+        return data["result"]
+
     @staticmethod
     def _raise_api_error(method: str, data: dict[str, object]) -> None:
         retry_after_seconds = _retry_after_seconds(data)
@@ -465,6 +554,38 @@ def _retry_after_seconds(data: dict[str, object]) -> int | None:
     if isinstance(retry_after, int):
         return max(1, retry_after)
     return None
+
+
+def _encode_multipart_form_data(
+    payload: dict[str, object],
+    *,
+    file_field_name: str,
+    file_path: Path,
+    boundary: str,
+) -> bytes:
+    lines: list[bytes] = []
+    for key, value in payload.items():
+        lines.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
+                f"{value}\r\n".encode(),
+            ]
+        )
+    lines.extend(
+        [
+            f"--{boundary}\r\n".encode(),
+            (
+                f'Content-Disposition: form-data; name="{file_field_name}"; '
+                f'filename="{file_path.name}"\r\n'
+            ).encode(),
+            b"Content-Type: application/octet-stream\r\n\r\n",
+            file_path.read_bytes(),
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    return b"".join(lines)
 
 
 def _is_image_document(document: dict[str, object]) -> bool:

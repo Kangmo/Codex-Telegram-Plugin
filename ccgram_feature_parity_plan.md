@@ -42,7 +42,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-08 | `/unbind` | P0 | Native | Missing |
 | FP-09 | `/restore` and richer recovery flows | P0 | Adapted | Partial today |
 | FP-10 | `/upgrade` | P2 | Adapted | Not critical |
-| FP-11 | `/send` file browser/upload | P0 | Native | Missing |
+| FP-11 | `/send` file browser/upload | P0 | Native | Implemented |
 | FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Missing |
 | FP-13 | `/verbose` and notification modes | P0 | Native | Missing |
 | FP-14 | `/screenshot` | P1 | Adapted | Missing |
@@ -117,9 +117,9 @@ Update these checkboxes as each feature lands.
 - [ ] Line by line proof reading for code review done
 
 ### FP-11: `/send` File Browser and Upload
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-12: `/toolbar` Configurable Action Bar
 - [ ] Implemented
@@ -415,6 +415,67 @@ Code review notes:
 - The first version of the new tests was wrong in two places: it queued multiple callback updates before changing state, which meant one `poll_telegram_once()` processed the whole batch under the old state. Those tests were fixed before sign-off so each callback branch is asserted under the intended binding state.
 - The proofread pass identified a UX issue where `Continue Here` would restore routing but leave the topic name drifted until a later sync. That was fixed by renaming the topic immediately inside the restore callback.
 - The proofread pass also identified menu spam risk on repeated messages to a closed topic. `_offer_restore_prompt()` now reuses the existing restore-menu message id when present.
+
+### FP-11: `/send` File Browser and Upload
+
+Branch and status:
+
+- Feature branch: `feature/fp-11-send-file-browser-and-upload`
+
+Implementation decisions:
+
+- `/gateway send` is implemented as a project-root-scoped Telegram file browser rather than an arbitrary-path sender.
+- The feature is split into three dedicated modules:
+  - `send_security.py` for path containment, browse pagination, search, and preview metadata
+  - `send_command.py` for browser/preview rendering
+  - `send_callbacks.py` for compact callback parsing
+- Send-browser state is persisted in SQLite as `SendViewState`, keyed by `chat_id + message_thread_id`, so callback navigation is restart-safe and one active browser exists per topic.
+- Query resolution order is:
+  - exact safe relative path
+  - exact safe directory open
+  - exact safe file preview
+  - search fallback for other text
+- Mirror topics reject `/gateway send` because file-management controls stay in the primary topic.
+- Telegram outbound file delivery uses dedicated multipart helpers:
+  - `send_document_file`
+  - `send_photo_file`
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - path traversal and symlink escape rejection
+  - browse pagination and search behavior
+  - preview rendering and callback parsing
+  - SQLite persistence of send-browser state
+  - daemon command/callback flows for root browse, directory open, preview, document send, photo send, stale widgets, and mirror/unbound rejection
+  - Telegram multipart upload success and error handling
+  - end-to-end file send from a bound project into Telegram
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_send_command.py tests/unit/test_send_security.py tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `216 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `153/156 = 98.1%`
+  - `src/codex_telegram_gateway/models.py`: `11/11 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py`: `21/44 = 47.7%`
+  - `src/codex_telegram_gateway/send_callbacks.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/send_command.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/send_security.py`: `0/0 = 100.0%`
+  - `TOTAL`: `197/223 = 88.3%`
+- Whole-module regression coverage from the focused FP-11 suite:
+  - `send_callbacks.py`: `20/20 = 100.0%`
+  - `send_command.py`: `31/31 = 100.0%`
+  - `send_security.py`: `85/92 = 92.4%`
+  - `daemon.py`: `1411/1720 = 82.0%`
+  - `state.py`: `330/343 = 96.2%`
+  - `models.py`: `134/134 = 100.0%`
+
+Code review notes:
+
+- The proofread pass found a real crafted-callback bug: negative indexes were accepted by the parser and could select the last list entry via Python negative indexing. The parser now rejects negative indexes.
+- The proofread pass found a second crafted-callback bug: preview callbacks could target directories and crash preview generation. The daemon now rejects directory-preview callbacks cleanly.
+- The proofread pass also found stale-state leakage around rebinding/unbind flows. Send-browser state is now cleared when a topic is rebound to a new thread or unbound from its thread.
 
 ### FP-17: Command Discovery and Telegram Menu Sync
 
@@ -912,6 +973,44 @@ Match `ccgram`’s secure Telegram-side file browser for sending local files int
   - browsing and file selection send the correct file type
 - E2E:
   - upload a project image and a text file from the browser into Telegram
+
+### FP-11 verification
+- Added a dedicated send-browser stack:
+  - `send_security.py` for project-root containment checks, browse pagination, query search, and file preview metadata
+  - `send_command.py` for Telegram inline-keyboard rendering
+  - `send_callbacks.py` for compact callback parsing
+- Added persisted `SendViewState` plus new `GatewayState`/`TelegramClient` interfaces so one active browser can be tracked safely per topic.
+- Added outbound Telegram upload helpers in `telegram_api.py`:
+  - `send_document_file`
+  - `send_photo_file`
+  - multipart form-data encoding for local file delivery
+- Added `/gateway send` handling in the daemon with these flows:
+  - bound primary topic only
+  - root project browse
+  - exact file preview
+  - exact directory open
+  - text-search fallback when the query is not a safe in-root path
+  - inline callbacks for page, enter, preview, back, root, cancel, send document, and send photo
+- Design decisions locked during implementation:
+  - browser scope is strictly the bound project root; absolute-path browsing is intentionally unsupported
+  - routing uses persisted `chat_id + message_thread_id + message_id` browser state and never relies on mutable topic titles or browser text
+  - query resolution order is exact safe path first, then directory/file direct open, then search fallback
+  - mirror topics remain conversation surfaces only, so `/gateway send` is blocked there like the other topic-management controls
+- Proofread fixes landed before sign-off:
+  - crafted negative callback indexes are rejected instead of using Python negative indexing into the listing
+  - crafted preview callbacks that target a directory are rejected cleanly instead of crashing preview generation
+  - send-browser state is cleared when rebinding a topic to a new thread and when unbinding a topic so stale inline keyboards cannot cross bindings
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_send_command.py tests/unit/test_send_security.py tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Coverage verification:
+  - feature-specific changed executable statements versus `main`: `197/223 = 88.3%`
+  - `send_callbacks.py`: `20/20 = 100.0%`
+  - `send_command.py`: `31/31 = 100.0%`
+  - `send_security.py`: `85/92 = 92.4%`
+  - `daemon.py` full-file regression coverage after the new tests: `1411/1720 = 82.0%`
+  - `state.py` full-file regression coverage after the new tests: `330/343 = 96.2%`
+  - `models.py` full-file regression coverage after the new tests: `134/134 = 100.0%`
+- Feature branch: `feature/fp-11-send-file-browser-and-upload`
 
 ### FP-12: `/toolbar` Configurable Action Bar
 

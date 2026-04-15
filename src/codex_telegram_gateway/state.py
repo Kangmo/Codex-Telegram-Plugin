@@ -13,6 +13,7 @@ from codex_telegram_gateway.models import (
     PendingTurn,
     RestoreViewState,
     ResumeViewState,
+    SendViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -166,6 +167,19 @@ class SqliteGatewayState:
                 message_id INTEGER NOT NULL,
                 codex_thread_id TEXT NOT NULL,
                 issue_kind TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS send_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                project_root TEXT NOT NULL,
+                current_relative_path TEXT NOT NULL DEFAULT '.',
+                page_index INTEGER NOT NULL DEFAULT 0,
+                query TEXT,
+                selected_relative_path TEXT,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1140,6 +1154,87 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM restore_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
+        self._connection.execute(
+            """
+            INSERT INTO send_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_root,
+                current_relative_path,
+                page_index,
+                query,
+                selected_relative_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                project_root = excluded.project_root,
+                current_relative_path = excluded.current_relative_path,
+                page_index = excluded.page_index,
+                query = excluded.query,
+                selected_relative_path = excluded.selected_relative_path
+            """,
+            (
+                send_view.chat_id,
+                send_view.message_thread_id,
+                send_view.message_id,
+                send_view.codex_thread_id,
+                send_view.project_root,
+                send_view.current_relative_path,
+                send_view.page_index,
+                send_view.query,
+                send_view.selected_relative_path,
+            ),
+        )
+        self._connection.commit()
+        return send_view
+
+    def get_send_view(self, chat_id: int, message_thread_id: int) -> SendViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_root,
+                current_relative_path,
+                page_index,
+                query,
+                selected_relative_path
+            FROM send_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return SendViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            project_root=row["project_root"],
+            current_relative_path=row["current_relative_path"],
+            page_index=row["page_index"],
+            query=row["query"],
+            selected_relative_path=row["selected_relative_path"],
+        )
+
+    def delete_send_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM send_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),
