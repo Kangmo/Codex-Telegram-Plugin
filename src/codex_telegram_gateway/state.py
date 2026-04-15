@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from codex_telegram_gateway.models import (
+    ACTIVE_BINDING_STATUS,
     Binding,
     CodexProject,
     InboundMessage,
@@ -34,6 +35,7 @@ class SqliteGatewayState:
                 topic_name TEXT,
                 sync_mode TEXT NOT NULL,
                 project_id TEXT,
+                binding_status TEXT NOT NULL DEFAULT 'active',
                 UNIQUE(chat_id, message_thread_id)
             );
 
@@ -105,6 +107,7 @@ class SqliteGatewayState:
             """
         )
         self._ensure_bindings_column("project_id", "TEXT")
+        self._ensure_bindings_column("binding_status", "TEXT NOT NULL DEFAULT 'active'")
         self._ensure_table_column("inbound_queue", "local_image_paths_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_table_column("outbound_messages", "reply_markup_json", "TEXT")
         self._ensure_table_column("topic_projects", "pending_update_id", "INTEGER")
@@ -135,8 +138,9 @@ class SqliteGatewayState:
                 message_thread_id,
                 topic_name,
                 sync_mode,
-                project_id
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                project_id,
+                binding_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 binding.codex_thread_id,
@@ -145,6 +149,7 @@ class SqliteGatewayState:
                 binding.topic_name,
                 binding.sync_mode,
                 binding.project_id,
+                binding.binding_status,
             ),
         )
         self._connection.commit()
@@ -153,7 +158,7 @@ class SqliteGatewayState:
     def list_bindings(self) -> list[Binding]:
         rows = self._connection.execute(
             """
-            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
             FROM bindings
             ORDER BY codex_thread_id
             """
@@ -163,7 +168,7 @@ class SqliteGatewayState:
     def get_binding_by_thread(self, codex_thread_id: str) -> Binding:
         row = self._connection.execute(
             """
-            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
             FROM bindings
             WHERE codex_thread_id = ?
             """,
@@ -176,7 +181,7 @@ class SqliteGatewayState:
     def get_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
         row = self._connection.execute(
             """
-            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
             FROM bindings
             WHERE chat_id = ? AND message_thread_id = ?
             """,
@@ -646,6 +651,7 @@ class SqliteGatewayState:
             topic_name=row["topic_name"],
             sync_mode=row["sync_mode"],
             project_id=row["project_id"],
+            binding_status=row["binding_status"] or ACTIVE_BINDING_STATUS,
         )
 
     @staticmethod

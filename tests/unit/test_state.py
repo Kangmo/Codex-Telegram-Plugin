@@ -1,4 +1,5 @@
 from codex_telegram_gateway.models import (
+    CLOSED_BINDING_STATUS,
     Binding,
     CodexProject,
     InboundMessage,
@@ -66,6 +67,33 @@ def test_sqlite_state_routes_by_topic_id_even_if_topic_name_changes(tmp_path) ->
 
     assert state.get_binding_by_thread("thread-1") == renamed
     assert state.get_binding_by_topic(-100100, 77) == renamed
+
+
+def test_sqlite_state_persists_binding_status_updates(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    active = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="topic-name",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    closed = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="topic-name",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        binding_status=CLOSED_BINDING_STATUS,
+    )
+
+    state.create_binding(active)
+    state.create_binding(closed)
+
+    assert state.get_binding_by_thread("thread-1") == closed
+    assert state.get_binding_by_topic(-100100, 77) == closed
 
 
 def test_sqlite_state_persists_loaded_projects_and_topic_project_selection(tmp_path) -> None:

@@ -1,13 +1,16 @@
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.models import (
+    ACTIVE_BINDING_STATUS,
     Binding,
+    CLOSED_BINDING_STATUS,
     CodexProject,
     CodexThread,
+    DELETED_BINDING_STATUS,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -22,6 +25,7 @@ from codex_telegram_gateway.service import (
     GatewayService,
     format_topic_name,
 )
+from codex_telegram_gateway.telegram_api import is_missing_topic_error
 
 
 class GatewayDaemon:
@@ -64,27 +68,32 @@ class GatewayDaemon:
             if pending_turn is not None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
             thread = self._codex.read_thread(binding.codex_thread_id)
-            desired_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
-            if binding.topic_name != desired_topic_name:
-                self._telegram.edit_forum_topic(
-                    binding.chat_id,
-                    binding.message_thread_id,
-                    desired_topic_name,
-                )
-                binding = self._state.create_binding(
-                    binding.__class__(
-                        codex_thread_id=binding.codex_thread_id,
-                        chat_id=binding.chat_id,
-                        message_thread_id=binding.message_thread_id,
-                        topic_name=desired_topic_name,
-                        sync_mode=binding.sync_mode,
-                        project_id=binding.project_id,
-                    )
-                )
-            for event in self._codex.list_events(binding.codex_thread_id):
-                active_turn_id = pending_turn.turn_id if pending_turn is not None else None
-                active_turn_result = turn_result if active_turn_id == _event_turn_id(event.event_id) else None
-                self._sync_outbound_event(binding, event, active_turn_result=active_turn_result)
+            if binding.binding_status == ACTIVE_BINDING_STATUS:
+                desired_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
+                if binding.topic_name != desired_topic_name:
+                    try:
+                        self._telegram.edit_forum_topic(
+                            binding.chat_id,
+                            binding.message_thread_id,
+                            desired_topic_name,
+                        )
+                    except Exception as exc:
+                        if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                            binding = self._state.get_binding_by_thread(binding.codex_thread_id)
+                        else:
+                            raise
+                    else:
+                        binding = self._state.create_binding(
+                            replace(
+                                binding,
+                                topic_name=desired_topic_name,
+                            )
+                        )
+                if binding.binding_status == ACTIVE_BINDING_STATUS:
+                    for event in self._codex.list_events(binding.codex_thread_id):
+                        active_turn_id = pending_turn.turn_id if pending_turn is not None else None
+                        active_turn_result = turn_result if active_turn_id == _event_turn_id(event.event_id) else None
+                        self._sync_outbound_event(binding, event, active_turn_result=active_turn_result)
 
             if pending_turn is None:
                 continue
@@ -92,17 +101,24 @@ class GatewayDaemon:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
 
             if turn_result.waiting_for_approval or not _is_terminal_turn_status(turn_result.status):
-                self._send_typing_if_due(binding.chat_id, binding.message_thread_id)
+                if binding.binding_status == ACTIVE_BINDING_STATUS:
+                    self._send_typing_if_due(binding.chat_id, binding.message_thread_id)
+                else:
+                    self._clear_typing_state(binding.chat_id, binding.message_thread_id)
                 continue
 
             self._state.delete_pending_turn(binding.codex_thread_id)
             self._clear_typing_state(binding.chat_id, binding.message_thread_id)
-            if turn_result.status != "completed":
-                self._telegram.send_message(
-                    binding.chat_id,
-                    binding.message_thread_id,
-                    _turn_status_text(turn_result.status),
-                )
+            if binding.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
+                try:
+                    self._telegram.send_message(
+                        binding.chat_id,
+                        binding.message_thread_id,
+                        _turn_status_text(turn_result.status),
+                    )
+                except Exception as exc:
+                    if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                        raise
 
     def poll_telegram_once(self) -> None:
         self._sync_projects_once()
@@ -120,27 +136,37 @@ class GatewayDaemon:
                 message_thread_id = int(update["message_thread_id"])
                 from_user_id = int(update["from_user_id"])
 
-                if from_user_id not in self._config.telegram_allowed_user_ids:
-                    continue
-
                 if kind == "topic_created":
                     self._record_topic_created(update)
                     continue
+                if kind == "topic_closed":
+                    self._handle_topic_closed(update)
+                    continue
+                if kind == "topic_reopened":
+                    self._handle_topic_reopened(update)
+                    continue
                 if kind == "callback_query":
+                    if from_user_id not in self._config.telegram_allowed_user_ids:
+                        continue
                     self._handle_callback_query(update)
                     continue
                 if kind != "message":
+                    continue
+
+                if from_user_id not in self._config.telegram_allowed_user_ids:
                     continue
 
                 text = str(update.get("text") or "")
                 local_image_paths = _normalized_local_image_paths(update)
                 if not text and not local_image_paths:
                     continue
+                binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+                if binding is not None and binding.binding_status != ACTIVE_BINDING_STATUS:
+                    continue
                 command = _parse_command(text)
                 if command is not None:
                     self._handle_command(update, command_name=command[0], command_args=command[1])
                     continue
-                binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
                 if binding is None:
                     self._handle_unbound_topic_message(update)
                     continue
@@ -166,6 +192,10 @@ class GatewayDaemon:
                     pending_turn.chat_id,
                     pending_turn.message_thread_id,
                 )
+                continue
+
+            binding = self._state.get_binding_by_thread(inbound_message.codex_thread_id)
+            if binding.binding_status != ACTIVE_BINDING_STATUS:
                 continue
 
             thread = self._codex.read_thread(inbound_message.codex_thread_id)
@@ -205,18 +235,23 @@ class GatewayDaemon:
         if outbound_message is None:
             if self._state.has_seen_event(binding.codex_thread_id, event.event_id):
                 return
-            outbound_message = OutboundMessage(
-                codex_thread_id=binding.codex_thread_id,
-                event_id=event.event_id,
-                telegram_message_ids=self._send_message_parts(
-                    binding.chat_id,
-                    binding.message_thread_id,
-                    event.text,
+            try:
+                outbound_message = OutboundMessage(
+                    codex_thread_id=binding.codex_thread_id,
+                    event_id=event.event_id,
+                    telegram_message_ids=self._send_message_parts(
+                        binding.chat_id,
+                        binding.message_thread_id,
+                        event.text,
+                        reply_markup=reply_markup,
+                    ),
+                    text=event.text,
                     reply_markup=reply_markup,
-                ),
-                text=event.text,
-                reply_markup=reply_markup,
-            )
+                )
+            except Exception as exc:
+                if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                    return
+                raise
             self._state.upsert_outbound_message(outbound_message)
             self._state.mark_event_seen(binding.codex_thread_id, event.event_id)
             return
@@ -224,15 +259,20 @@ class GatewayDaemon:
         if outbound_message.text == event.text and outbound_message.reply_markup == reply_markup:
             return
 
-        updated_message_ids = self._sync_message_parts(
-            binding.chat_id,
-            binding.message_thread_id,
-            outbound_message.telegram_message_ids,
-            outbound_message.text,
-            event.text,
-            previous_reply_markup=outbound_message.reply_markup,
-            next_reply_markup=reply_markup,
-        )
+        try:
+            updated_message_ids = self._sync_message_parts(
+                binding.chat_id,
+                binding.message_thread_id,
+                outbound_message.telegram_message_ids,
+                outbound_message.text,
+                event.text,
+                previous_reply_markup=outbound_message.reply_markup,
+                next_reply_markup=reply_markup,
+            )
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return
+            raise
         self._state.upsert_outbound_message(
             OutboundMessage(
                 codex_thread_id=outbound_message.codex_thread_id,
@@ -392,6 +432,47 @@ class GatewayDaemon:
                 browse_page=existing.browse_page if existing else 0,
             )
         )
+
+    def _handle_topic_closed(self, update: dict[str, object]) -> None:
+        binding = self._state.get_binding_by_topic(
+            int(update["chat_id"]),
+            int(update["message_thread_id"]),
+        )
+        if binding is None or binding.binding_status == CLOSED_BINDING_STATUS:
+            return
+        self._state.create_binding(
+            replace(
+                binding,
+                binding_status=CLOSED_BINDING_STATUS,
+            )
+        )
+        self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+
+    def _handle_topic_reopened(self, update: dict[str, object]) -> None:
+        binding = self._state.get_binding_by_topic(
+            int(update["chat_id"]),
+            int(update["message_thread_id"]),
+        )
+        if binding is None or binding.binding_status == ACTIVE_BINDING_STATUS:
+            return
+        self._state.create_binding(
+            replace(
+                binding,
+                binding_status=ACTIVE_BINDING_STATUS,
+            )
+        )
+
+    def _mark_binding_deleted_if_missing_topic(self, binding: Binding, exc: Exception) -> bool:
+        if not is_missing_topic_error(exc):
+            return False
+        self._state.create_binding(
+            replace(
+                binding,
+                binding_status=DELETED_BINDING_STATUS,
+            )
+        )
+        self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+        return True
 
     def _handle_unbound_topic_message(self, update: dict[str, object]) -> None:
         chat_id = int(update["chat_id"])
@@ -1237,12 +1318,23 @@ class GatewayDaemon:
         for binding in bindings:
             if binding.codex_thread_id not in loaded_threads:
                 unloaded_bindings.append(binding)
+            if binding.binding_status == CLOSED_BINDING_STATUS:
+                continue
+            if binding.binding_status == DELETED_BINDING_STATUS:
+                dead_topics.append(binding)
+                continue
             try:
                 topic_exists = self._telegram.probe_topic(binding.chat_id, binding.message_thread_id)
             except Exception:
                 topic_exists = True
             if not topic_exists:
-                dead_topics.append(binding)
+                deleted_binding = self._state.create_binding(
+                    replace(
+                        binding,
+                        binding_status=DELETED_BINDING_STATUS,
+                    )
+                )
+                dead_topics.append(deleted_binding)
 
         return _SyncAudit(
             loaded_threads=list(loaded_threads.values()),
@@ -1265,12 +1357,17 @@ class GatewayDaemon:
         lines = ["Gateway bindings", ""]
         for binding in sorted(bindings, key=lambda item: ((item.topic_name or ""), item.codex_thread_id)):
             thread = loaded_threads.get(binding.codex_thread_id)
-            loaded_marker = "🟢" if thread is not None else "⚫"
+            if binding.binding_status == CLOSED_BINDING_STATUS:
+                loaded_marker = "🟡"
+            elif binding.binding_status == DELETED_BINDING_STATUS:
+                loaded_marker = "🔴"
+            else:
+                loaded_marker = "🟢" if thread is not None else "⚫"
             project_name = Path(binding.project_id or (thread.cwd if thread else "") or "").name or "-"
             thread_title = thread.title if thread is not None else (binding.topic_name or binding.codex_thread_id)
             lines.append(
                 f"{loaded_marker} ({project_name}) {thread_title}\n"
-                f"topic `{binding.message_thread_id}` • thread `{binding.codex_thread_id}`"
+                f"topic `{binding.message_thread_id}` • thread `{binding.codex_thread_id}` • status `{binding.binding_status}`"
             )
         lines.append("")
         lines.append("Use `/gateway sync` to audit bindings and recover deleted topics.")

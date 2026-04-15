@@ -96,6 +96,29 @@ class TelegramBotClient:
                         "topic_name": str(message["forum_topic_created"].get("name") or ""),
                     }
                 )
+                continue
+            if message.get("forum_topic_closed") is True:
+                updates.append(
+                    {
+                        "kind": "topic_closed",
+                        "update_id": int(update["update_id"]),
+                        "chat_id": int(chat["id"]),
+                        "message_thread_id": message_thread_id,
+                        "from_user_id": int(sender["id"]) if isinstance(sender, dict) else 0,
+                    }
+                )
+                continue
+            if message.get("forum_topic_reopened") is True:
+                updates.append(
+                    {
+                        "kind": "topic_reopened",
+                        "update_id": int(update["update_id"]),
+                        "chat_id": int(chat["id"]),
+                        "message_thread_id": message_thread_id,
+                        "from_user_id": int(sender["id"]) if isinstance(sender, dict) else 0,
+                    }
+                )
+                continue
             text = message.get("text")
             caption = message.get("caption")
             local_image_paths = self._extract_local_image_paths(message)
@@ -215,7 +238,7 @@ class TelegramBotClient:
                 },
             )
         except TelegramApiError as exc:
-            if _is_missing_topic_error(exc):
+            if is_missing_topic_error(exc):
                 return False
             raise
 
@@ -397,7 +420,7 @@ def _is_image_document(document: dict[str, object]) -> bool:
     return Path(file_name).suffix.lower() in _IMAGE_DOCUMENT_EXTENSIONS
 
 
-def _is_missing_topic_error(exc: TelegramApiError) -> bool:
+def is_missing_topic_error(exc: TelegramApiError) -> bool:
     message = str(exc).lower()
     return any(
         token in message
