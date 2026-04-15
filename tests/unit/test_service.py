@@ -156,6 +156,37 @@ def test_link_current_thread_reuses_mapping_after_thread_title_change() -> None:
     assert telegram._next_topic_id == 1
 
 
+def test_link_current_thread_queues_mirror_topic_creation_jobs() -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        telegram_mirror_chat_ids=(-100200, -100300),
+        sync_mode="assistant_plus_alerts",
+    )
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Remove browser entitlement",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/blink",
+        )
+    )
+    service = GatewayService(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    service.link_current_thread()
+
+    assert state.get_topic_creation_job("thread-1", -100200) is not None
+    assert state.get_topic_creation_job("thread-1", -100300) is not None
+
+
 def test_bind_topic_to_project_defaults_to_untitled() -> None:
     config = GatewayConfig(
         telegram_bot_token="token",

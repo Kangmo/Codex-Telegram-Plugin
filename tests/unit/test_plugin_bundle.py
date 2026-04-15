@@ -113,3 +113,62 @@ def test_sync_once_runs_lifecycle_sweeps(monkeypatch) -> None:
         "pending_after_poll": 3,
         "pending_after_deliver": 1,
     }
+
+
+def test_list_bindings_includes_mirrors(monkeypatch) -> None:
+    module = importlib.import_module("codex_telegram_gateway.mcp_server")
+
+    @contextmanager
+    def fake_runtime(env_file: str | None):
+        del env_file
+        yield SimpleNamespace(
+            state=SimpleNamespace(
+                list_bindings=lambda: [
+                    Binding(
+                        codex_thread_id="thread-1",
+                        chat_id=-100100,
+                        message_thread_id=7,
+                        topic_name="(blink) Remove browser entitlement",
+                        sync_mode="assistant_plus_alerts",
+                        project_id="/Users/kangmo/projs/blink",
+                    )
+                ],
+                list_mirror_bindings=lambda: [
+                    Binding(
+                        codex_thread_id="thread-1",
+                        chat_id=-100200,
+                        message_thread_id=8,
+                        topic_name="(blink) Remove browser entitlement",
+                        sync_mode="assistant_plus_alerts",
+                        project_id="/Users/kangmo/projs/blink",
+                    )
+                ],
+            )
+        )
+
+    monkeypatch.setattr(module, "_runtime", fake_runtime)
+
+    result = module.list_bindings("test.env")
+
+    assert result == [
+        {
+            "codex_thread_id": "thread-1",
+            "chat_id": -100100,
+            "message_thread_id": 7,
+            "topic_name": "(blink) Remove browser entitlement",
+            "sync_mode": "assistant_plus_alerts",
+            "project_id": "/Users/kangmo/projs/blink",
+            "binding_status": "active",
+            "mirrors": [
+                {
+                    "codex_thread_id": "thread-1",
+                    "chat_id": -100200,
+                    "message_thread_id": 8,
+                    "topic_name": "(blink) Remove browser entitlement",
+                    "sync_mode": "assistant_plus_alerts",
+                    "project_id": "/Users/kangmo/projs/blink",
+                    "binding_status": "active",
+                }
+            ],
+        }
+    ]

@@ -180,6 +180,7 @@
 - FP-02 Bidirectional topic rename sync
 - FP-03 Topic emoji/status state
 - FP-04 Lifecycle sweeps, topic probing, autoclose, unbound TTL, pruning
+- FP-05 Multi-chat fanout and Telegram flood-control backoff
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -202,3 +203,11 @@
   - missing-topic probes now delete lifecycle rows as well as marking the binding deleted
   - reopen/new-inbound flows now truly clear `completed_at` instead of accidentally preserving it
 - Feature-specific changed-statement coverage versus `main` is 152/169 = 89.9%.
+
+### FP-05 verification
+- Added optional `TELEGRAM_MIRROR_CHAT_IDS` support and a deduped `telegram_target_chat_ids` config view.
+- Added persisted mirror bindings plus mirror-specific seen-event, outbound-message, and topic-creation-queue state.
+- Added mirror topic creation in the daemon with persisted retry scheduling when Telegram returns `RetryAfter`.
+- Added mirror-aware outbound sync and inbound routing so mirrored topics can feed the same Codex thread.
+- Hardened the design during proof review by blocking project/thread rebinding controls inside mirror topics; mirror topics remain conversation surfaces only.
+- Feature-specific changed-statement coverage versus `main` is 225/261 = 86.2%.

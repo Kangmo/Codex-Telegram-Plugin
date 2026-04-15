@@ -2,7 +2,12 @@ import time
 from pathlib import Path
 
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.models import ACTIVE_BINDING_STATUS, Binding, TopicLifecycle
+from codex_telegram_gateway.models import (
+    ACTIVE_BINDING_STATUS,
+    Binding,
+    TopicCreationJob,
+    TopicLifecycle,
+)
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
 
 
@@ -32,13 +37,15 @@ class GatewayService:
         return [self.link_thread(thread.thread_id) for thread in self._codex.list_loaded_threads()]
 
     def link_thread(self, thread_id: str) -> Binding:
+        thread = self._codex.read_thread(thread_id)
         try:
             # Existing thread-id mapping wins even if titles drift later.
-            return self._state.get_binding_by_thread(thread_id)
+            existing_binding = self._state.get_binding_by_thread(thread_id)
+            self._queue_mirror_creation_jobs(existing_binding, thread_title=thread.title, project_id=thread.cwd or None)
+            return existing_binding
         except KeyError:
             pass
 
-        thread = self._codex.read_thread(thread_id)
         topic_name = format_topic_name(thread.cwd, thread.title)
         message_thread_id = self._telegram.create_forum_topic(
             self._config.telegram_default_chat_id,
@@ -64,6 +71,11 @@ class GatewayService:
         )
         for event in self._codex.list_events(thread_id):
             self._state.mark_event_seen(thread_id, event.event_id)
+        self._queue_mirror_creation_jobs(
+            created_binding,
+            thread_title=thread.title,
+            project_id=thread.cwd or None,
+        )
         return created_binding
 
     def bind_topic_to_project(
@@ -100,6 +112,11 @@ class GatewayService:
         )
         for event in self._codex.list_events(created_thread.thread_id):
             self._state.mark_event_seen(created_thread.thread_id, event.event_id)
+        self._queue_mirror_creation_jobs(
+            created_binding,
+            thread_title=created_thread.title,
+            project_id=project_id,
+        )
         return created_binding
 
     def recreate_topic(self, codex_thread_id: str) -> Binding:
@@ -129,7 +146,43 @@ class GatewayService:
         latest_assistant_event_id = _latest_assistant_event_id(self._codex.list_events(codex_thread_id))
         if latest_assistant_event_id is not None:
             self._state.delete_seen_event(codex_thread_id, latest_assistant_event_id)
+        self._queue_mirror_creation_jobs(
+            recreated_binding,
+            thread_title=thread.title,
+            project_id=recreated_binding.project_id,
+        )
         return recreated_binding
+
+    def _queue_mirror_creation_jobs(
+        self,
+        binding: Binding,
+        *,
+        thread_title: str,
+        project_id: str | None,
+    ) -> None:
+        mirror_chat_ids = [
+            chat_id
+            for chat_id in self._config.telegram_target_chat_ids
+            if chat_id != binding.chat_id
+        ]
+        if not mirror_chat_ids:
+            return
+        topic_name = format_topic_name(project_id or "", thread_title)
+        existing_mirror_chat_ids = {
+            mirror_binding.chat_id
+            for mirror_binding in self._state.list_mirror_bindings_for_thread(binding.codex_thread_id)
+        }
+        for chat_id in mirror_chat_ids:
+            if chat_id in existing_mirror_chat_ids:
+                continue
+            self._state.upsert_topic_creation_job(
+                TopicCreationJob(
+                    codex_thread_id=binding.codex_thread_id,
+                    chat_id=chat_id,
+                    topic_name=topic_name,
+                    project_id=project_id,
+                )
+            )
 
 def format_topic_name(project_id: str, thread_title: str) -> str:
     project_name = Path(project_id).name.strip()

@@ -175,7 +175,18 @@ def list_loaded_threads(env_file: str = ".env") -> list[dict[str, object]]:
 )
 def list_bindings(env_file: str = ".env") -> list[dict[str, object]]:
     with _runtime(env_file) as runtime:
-        return [binding.__dict__ for binding in runtime.state.list_bindings()]
+        mirror_bindings_by_thread: dict[str, list[dict[str, object]]] = {}
+        for mirror_binding in runtime.state.list_mirror_bindings():
+            mirror_bindings_by_thread.setdefault(mirror_binding.codex_thread_id, []).append(
+                mirror_binding.__dict__
+            )
+        return [
+            {
+                **binding.__dict__,
+                "mirrors": mirror_bindings_by_thread.get(binding.codex_thread_id, []),
+            }
+            for binding in runtime.state.list_bindings()
+        ]
 
 
 @mcp.tool(

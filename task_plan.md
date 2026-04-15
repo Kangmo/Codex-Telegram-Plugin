@@ -22,4 +22,4 @@ Produce a feature-by-feature parity plan for the missing `ccgram` Telegram gatew
 ## Errors Encountered
 
 ## Status
-**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record, with FP-01 through FP-04 completed and FP-05 next.
+**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record, with FP-01 through FP-05 completed and FP-06 next.

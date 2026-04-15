@@ -5,6 +5,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
@@ -212,6 +213,64 @@ def test_sqlite_state_prunes_orphan_topic_history(tmp_path) -> None:
 
     assert state.list_topic_history(-100100, 77) == [TopicHistoryEntry(text="keep me")]
     assert state.list_topic_history(-100100, 88) == []
+
+
+def test_sqlite_state_persists_mirror_bindings_events_outbound_and_creation_jobs(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    mirror_binding = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100200,
+        message_thread_id=88,
+        topic_name="(gateway-project) thread-1",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    outbound_message = OutboundMessage(
+        codex_thread_id="thread-1",
+        event_id="event-1",
+        telegram_message_ids=(99,),
+        text="mirrored reply",
+    )
+    topic_creation_job = TopicCreationJob(
+        codex_thread_id="thread-2",
+        chat_id=-100300,
+        topic_name="(other-project) untitled",
+        project_id="/Users/kangmo/sacle/src/other-project",
+        retry_after_at=123.0,
+    )
+
+    state.upsert_mirror_binding(mirror_binding)
+    state.mark_mirror_event_seen("thread-1", "event-1", chat_id=-100200, message_thread_id=88)
+    state.upsert_mirror_outbound_message(
+        outbound_message,
+        chat_id=-100200,
+        message_thread_id=88,
+    )
+    state.upsert_topic_creation_job(topic_creation_job)
+
+    assert state.get_mirror_binding_by_topic(-100200, 88) == mirror_binding
+    assert state.list_mirror_bindings_for_thread("thread-1") == [mirror_binding]
+    assert state.has_mirror_seen_event("thread-1", "event-1", chat_id=-100200, message_thread_id=88) is True
+    assert state.get_mirror_outbound_message(
+        "thread-1",
+        "event-1",
+        chat_id=-100200,
+        message_thread_id=88,
+    ) == outbound_message
+    assert state.get_topic_creation_job("thread-2", -100300) == topic_creation_job
+
+    state.delete_mirror_seen_event("thread-1", "event-1", chat_id=-100200, message_thread_id=88)
+    state.delete_mirror_outbound_messages("thread-1", chat_id=-100200)
+    state.delete_topic_creation_job("thread-2", -100300)
+
+    assert state.has_mirror_seen_event("thread-1", "event-1", chat_id=-100200, message_thread_id=88) is False
+    assert state.get_mirror_outbound_message(
+        "thread-1",
+        "event-1",
+        chat_id=-100200,
+        message_thread_id=88,
+    ) is None
+    assert state.get_topic_creation_job("thread-2", -100300) is None
 
 
 def test_sqlite_state_can_delete_seen_events_and_outbound_messages(tmp_path) -> None:

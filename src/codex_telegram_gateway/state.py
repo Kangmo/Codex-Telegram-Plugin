@@ -9,6 +9,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
@@ -46,6 +47,26 @@ class SqliteGatewayState:
                 PRIMARY KEY (codex_thread_id, event_id)
             );
 
+            CREATE TABLE IF NOT EXISTS mirror_bindings (
+                codex_thread_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                topic_name TEXT,
+                sync_mode TEXT NOT NULL,
+                project_id TEXT,
+                binding_status TEXT NOT NULL DEFAULT 'active',
+                PRIMARY KEY (codex_thread_id, chat_id),
+                UNIQUE(chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mirror_seen_events (
+                codex_thread_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (codex_thread_id, chat_id, message_thread_id, event_id)
+            );
+
             CREATE TABLE IF NOT EXISTS outbound_messages (
                 codex_thread_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -53,6 +74,17 @@ class SqliteGatewayState:
                 text TEXT NOT NULL,
                 reply_markup_json TEXT,
                 PRIMARY KEY (codex_thread_id, event_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mirror_outbound_messages (
+                codex_thread_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                telegram_message_ids_json TEXT NOT NULL,
+                text TEXT NOT NULL,
+                reply_markup_json TEXT,
+                PRIMARY KEY (codex_thread_id, chat_id, message_thread_id, event_id)
             );
 
             CREATE TABLE IF NOT EXISTS inbound_queue (
@@ -121,6 +153,15 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 last_seen_at REAL NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_creation_queue (
+                codex_thread_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                topic_name TEXT NOT NULL,
+                project_id TEXT,
+                retry_after_at REAL,
+                PRIMARY KEY (codex_thread_id, chat_id)
             );
             """
         )
@@ -201,6 +242,74 @@ class SqliteGatewayState:
             """
             SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
             FROM bindings
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._binding_from_row(row)
+
+    def upsert_mirror_binding(self, binding: Binding) -> Binding:
+        self._connection.execute(
+            """
+            INSERT INTO mirror_bindings (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                topic_name,
+                sync_mode,
+                project_id,
+                binding_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id, chat_id)
+            DO UPDATE SET
+                message_thread_id = excluded.message_thread_id,
+                topic_name = excluded.topic_name,
+                sync_mode = excluded.sync_mode,
+                project_id = excluded.project_id,
+                binding_status = excluded.binding_status
+            """,
+            (
+                binding.codex_thread_id,
+                binding.chat_id,
+                binding.message_thread_id,
+                binding.topic_name,
+                binding.sync_mode,
+                binding.project_id,
+                binding.binding_status,
+            ),
+        )
+        self._connection.commit()
+        return binding
+
+    def list_mirror_bindings(self) -> list[Binding]:
+        rows = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
+            FROM mirror_bindings
+            ORDER BY codex_thread_id, chat_id
+            """
+        ).fetchall()
+        return [self._binding_from_row(row) for row in rows]
+
+    def list_mirror_bindings_for_thread(self, codex_thread_id: str) -> list[Binding]:
+        rows = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
+            FROM mirror_bindings
+            WHERE codex_thread_id = ?
+            ORDER BY chat_id
+            """,
+            (codex_thread_id,),
+        ).fetchall()
+        return [self._binding_from_row(row) for row in rows]
+
+    def get_mirror_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        row = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, message_thread_id, topic_name, sync_mode, project_id, binding_status
+            FROM mirror_bindings
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),
@@ -370,6 +479,62 @@ class SqliteGatewayState:
         )
         self._connection.commit()
 
+    def mark_mirror_event_seen(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO mirror_seen_events (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                event_id
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (codex_thread_id, chat_id, message_thread_id, event_id),
+        )
+        self._connection.commit()
+
+    def has_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> bool:
+        row = self._connection.execute(
+            """
+            SELECT 1
+            FROM mirror_seen_events
+            WHERE codex_thread_id = ? AND chat_id = ? AND message_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, chat_id, message_thread_id, event_id),
+        ).fetchone()
+        return row is not None
+
+    def delete_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM mirror_seen_events
+            WHERE codex_thread_id = ? AND chat_id = ? AND message_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, chat_id, message_thread_id, event_id),
+        )
+        self._connection.commit()
+
     def enqueue_inbound(self, inbound_message: InboundMessage) -> None:
         self._connection.execute(
             """
@@ -512,6 +677,84 @@ class SqliteGatewayState:
             WHERE codex_thread_id = ?
             """,
             (codex_thread_id,),
+        )
+        self._connection.commit()
+
+    def upsert_mirror_outbound_message(
+        self,
+        outbound_message: OutboundMessage,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> OutboundMessage:
+        self._connection.execute(
+            """
+            INSERT INTO mirror_outbound_messages (
+                codex_thread_id,
+                chat_id,
+                message_thread_id,
+                event_id,
+                telegram_message_ids_json,
+                text,
+                reply_markup_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id, chat_id, message_thread_id, event_id)
+            DO UPDATE SET
+                telegram_message_ids_json = excluded.telegram_message_ids_json,
+                text = excluded.text,
+                reply_markup_json = excluded.reply_markup_json
+            """,
+            (
+                outbound_message.codex_thread_id,
+                chat_id,
+                message_thread_id,
+                outbound_message.event_id,
+                json.dumps(list(outbound_message.telegram_message_ids)),
+                outbound_message.text,
+                _json_or_none(outbound_message.reply_markup),
+            ),
+        )
+        self._connection.commit()
+        return outbound_message
+
+    def get_mirror_outbound_message(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> OutboundMessage | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                codex_thread_id,
+                event_id,
+                telegram_message_ids_json,
+                text,
+                reply_markup_json
+            FROM mirror_outbound_messages
+            WHERE codex_thread_id = ? AND chat_id = ? AND message_thread_id = ? AND event_id = ?
+            """,
+            (codex_thread_id, chat_id, message_thread_id, event_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return OutboundMessage(
+            codex_thread_id=row["codex_thread_id"],
+            event_id=row["event_id"],
+            telegram_message_ids=_message_ids_from_json(row["telegram_message_ids_json"]),
+            text=row["text"],
+            reply_markup=_reply_markup_from_json(row["reply_markup_json"]),
+        )
+
+    def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM mirror_outbound_messages
+            WHERE codex_thread_id = ? AND chat_id = ?
+            """,
+            (codex_thread_id, chat_id),
         )
         self._connection.commit()
 
@@ -808,6 +1051,81 @@ class SqliteGatewayState:
                 """,
                 topic_key,
             )
+        self._connection.commit()
+
+    def upsert_topic_creation_job(self, topic_creation_job: TopicCreationJob) -> TopicCreationJob:
+        self._connection.execute(
+            """
+            INSERT INTO topic_creation_queue (
+                codex_thread_id,
+                chat_id,
+                topic_name,
+                project_id,
+                retry_after_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(codex_thread_id, chat_id)
+            DO UPDATE SET
+                topic_name = excluded.topic_name,
+                project_id = excluded.project_id,
+                retry_after_at = excluded.retry_after_at
+            """,
+            (
+                topic_creation_job.codex_thread_id,
+                topic_creation_job.chat_id,
+                topic_creation_job.topic_name,
+                topic_creation_job.project_id,
+                topic_creation_job.retry_after_at,
+            ),
+        )
+        self._connection.commit()
+        return topic_creation_job
+
+    def get_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> TopicCreationJob | None:
+        row = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, topic_name, project_id, retry_after_at
+            FROM topic_creation_queue
+            WHERE codex_thread_id = ? AND chat_id = ?
+            """,
+            (codex_thread_id, chat_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return TopicCreationJob(
+            codex_thread_id=row["codex_thread_id"],
+            chat_id=row["chat_id"],
+            topic_name=row["topic_name"],
+            project_id=row["project_id"],
+            retry_after_at=row["retry_after_at"],
+        )
+
+    def list_topic_creation_jobs(self) -> list[TopicCreationJob]:
+        rows = self._connection.execute(
+            """
+            SELECT codex_thread_id, chat_id, topic_name, project_id, retry_after_at
+            FROM topic_creation_queue
+            ORDER BY chat_id, codex_thread_id
+            """
+        ).fetchall()
+        return [
+            TopicCreationJob(
+                codex_thread_id=row["codex_thread_id"],
+                chat_id=row["chat_id"],
+                topic_name=row["topic_name"],
+                project_id=row["project_id"],
+                retry_after_at=row["retry_after_at"],
+            )
+            for row in rows
+        ]
+
+    def delete_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM topic_creation_queue
+            WHERE codex_thread_id = ? AND chat_id = ?
+            """,
+            (codex_thread_id, chat_id),
+        )
         self._connection.commit()
 
     @staticmethod
