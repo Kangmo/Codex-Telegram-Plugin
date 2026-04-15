@@ -24,6 +24,8 @@ class FakeTelegramClient:
         self._next_topic_id = 1
         self._updates: list[dict[str, object]] = []
         self._next_message_id = 1
+        self._deleted_message_ids: set[int] = set()
+        self._live_message_ids: set[int] = set()
         self.created_topics: list[tuple[int, str]] = []
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.sent_documents: list[tuple[int, int, str, str | None]] = []
@@ -118,6 +120,7 @@ class FakeTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_messages.append((chat_id, message_thread_id, text, reply_markup))
         return message_id
 
@@ -134,6 +137,7 @@ class FakeTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_documents.append((chat_id, message_thread_id, str(file_path), caption))
         return message_id
 
@@ -147,6 +151,7 @@ class FakeTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_photos.append((chat_id, message_thread_id, str(file_path), caption))
         return message_id
 
@@ -175,10 +180,16 @@ class FakeTelegramClient:
         text: str,
         reply_markup: dict[str, object] | None = None,
     ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
         self.edited_messages.append((chat_id, message_id, text, reply_markup))
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         del chat_id, message_thread_id, name
+
+    def delete_message_locally(self, message_id: int) -> None:
+        self._deleted_message_ids.add(message_id)
+        self._live_message_ids.discard(message_id)
 
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         del chat_id, message_thread_id
@@ -186,6 +197,16 @@ class FakeTelegramClient:
 
     def clear_sent_messages(self) -> None:
         self.sent_messages.clear()
+
+
+def non_bubble_sent_messages(
+    telegram: FakeTelegramClient,
+) -> list[tuple[int, int, str, dict[str, object] | None]]:
+    return [
+        message
+        for message in telegram.sent_messages
+        if not message[2].startswith("Topic status\n\n")
+    ]
 
 
 class FakeCodexBridge:
@@ -354,7 +375,7 @@ def test_gateway_flow_end_to_end(tmp_path) -> None:
     daemon.sync_codex_once()
     daemon.sync_codex_once()
 
-    assert telegram.sent_messages == [
+    assert non_bubble_sent_messages(telegram) == [
         (-100100, binding.message_thread_id, "Completed the refactor.", None),
     ]
 
@@ -976,3 +997,61 @@ def test_interactive_prompt_callback_expires_after_restart(tmp_path) -> None:
             None,
         )
     ]
+
+
+def test_status_bubble_recreated_after_message_deleted(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Status bubble",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Status bubble",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    initial_bubble = state.get_status_bubble_view(-100100, 77)
+    assert initial_bubble is not None
+    assert initial_bubble.message_id == 1
+
+    telegram.delete_message_locally(1)
+    state.upsert_pending_turn(
+        __import__("codex_telegram_gateway.models", fromlist=["PendingTurn"]).PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+
+    daemon.sync_codex_once()
+
+    recreated_bubble = state.get_status_bubble_view(-100100, 77)
+    assert recreated_bubble is not None
+    assert recreated_bubble.message_id == 2
+    assert telegram.sent_messages[-1][2].startswith("Topic status\n\nProject: `gateway-project`")

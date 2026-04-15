@@ -18,6 +18,7 @@ from codex_telegram_gateway.interactive_bridge import (
     render_interactive_prompt,
     start_interactive_prompt_session,
 )
+from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -33,6 +34,7 @@ from codex_telegram_gateway.models import (
     RestoreViewState,
     ResumeViewState,
     SendViewState,
+    StatusBubbleViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -135,6 +137,7 @@ class GatewayDaemon:
         self._topic_status_disabled_chats: set[int] = set()
         self._interactive_prompt_sessions: dict[str, InteractivePromptSession] = {}
         self._interactive_prompt_renders: dict[str, tuple[str, dict[str, object] | None]] = {}
+        self._status_bubble_renders: dict[tuple[int, int], tuple[str, dict[str, object]]] = {}
         self._lifecycle_timers = {
             "probe": 0.0,
             "autoclose": 0.0,
@@ -152,6 +155,11 @@ class GatewayDaemon:
         self._sync_projects_once()
         self._sync_loaded_threads_once()
         self._process_topic_creation_jobs()
+        pending_inbound_counts: dict[str, int] = {}
+        for inbound_message in self._state.list_pending_inbound():
+            pending_inbound_counts[inbound_message.codex_thread_id] = (
+                pending_inbound_counts.get(inbound_message.codex_thread_id, 0) + 1
+            )
         pending_turns_by_thread = {
             pending_turn.codex_thread_id: pending_turn
             for pending_turn in self._state.list_pending_turns()
@@ -163,11 +171,12 @@ class GatewayDaemon:
             if pending_turn is not None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
             thread = self._codex.read_thread(binding.codex_thread_id)
+            events = self._codex.list_events(binding.codex_thread_id)
+            latest_summary = _latest_assistant_summary(events)
             active_targets: list[Binding] = []
             for target in targets:
                 if target.binding_status == DELETED_BINDING_STATUS:
                     continue
-                active_targets.append(target)
                 topic_status = self._topic_status_for_binding(target, pending_turn, turn_result)
                 base_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
                 desired_topic_name = self._desired_topic_name(
@@ -185,13 +194,24 @@ class GatewayDaemon:
                         desired_topic_name=desired_topic_name,
                         base_topic_name=base_topic_name,
                     )
+                active_targets.append(target)
                 if target.binding_status == ACTIVE_BINDING_STATUS:
-                    for event in self._codex.list_events(binding.codex_thread_id):
+                    for event in events:
                         active_turn_id = pending_turn.turn_id if pending_turn is not None else None
                         active_turn_result = turn_result if active_turn_id == _event_turn_id(event.event_id) else None
                         self._sync_outbound_event(target, event, active_turn_result=active_turn_result)
 
             if pending_turn is None:
+                for target in active_targets:
+                    if target.binding_status == ACTIVE_BINDING_STATUS:
+                        self._sync_status_bubble_for_binding(
+                            target,
+                            thread=thread,
+                            pending_turn=None,
+                            turn_result=None,
+                            latest_summary=latest_summary,
+                            queued_count=pending_inbound_counts.get(binding.codex_thread_id, 0),
+                        )
                 continue
             if turn_result is None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
@@ -202,6 +222,14 @@ class GatewayDaemon:
                 for target in active_targets:
                     if target.binding_status == ACTIVE_BINDING_STATUS:
                         self._send_typing_if_due(target.chat_id, target.message_thread_id)
+                        self._sync_status_bubble_for_binding(
+                            target,
+                            thread=thread,
+                            pending_turn=pending_turn,
+                            turn_result=turn_result,
+                            latest_summary=latest_summary,
+                            queued_count=pending_inbound_counts.get(binding.codex_thread_id, 0),
+                        )
                     else:
                         self._clear_typing_state(target.chat_id, target.message_thread_id)
                 continue
@@ -227,6 +255,15 @@ class GatewayDaemon:
                         target,
                         text=_turn_status_text(turn_result.status),
                         kind="error",
+                    )
+                if target.binding_status == ACTIVE_BINDING_STATUS:
+                    self._sync_status_bubble_for_binding(
+                        target,
+                        thread=thread,
+                        pending_turn=None,
+                        turn_result=None,
+                        latest_summary=latest_summary,
+                        queued_count=pending_inbound_counts.get(binding.codex_thread_id, 0),
                     )
             if turn_result.status == "completed":
                 self._mark_topic_completed(binding.codex_thread_id)
@@ -926,6 +963,98 @@ class GatewayDaemon:
         history = self._state.list_topic_history(binding.chat_id, binding.message_thread_id, limit=2)
         return _response_widget_markup(status=status, history=history)
 
+    def _sync_status_bubble_for_binding(
+        self,
+        binding: Binding,
+        *,
+        thread: CodexThread,
+        pending_turn: PendingTurn | None,
+        turn_result: TurnResult | None,
+        latest_summary: str | None,
+        queued_count: int,
+    ) -> None:
+        history = self._state.list_topic_history(binding.chat_id, binding.message_thread_id, limit=2)
+        snapshot = StatusBubbleSnapshot(
+            project_name=Path(binding.project_id or thread.cwd or "").name or "-",
+            thread_title=thread.title,
+            state=self._status_bubble_state(binding, pending_turn, turn_result),
+            queued_count=queued_count,
+            latest_summary=latest_summary or "No assistant reply yet.",
+            history_labels=tuple(_history_entry_label(entry) for entry in history),
+        )
+        text, reply_markup = build_status_bubble(snapshot)
+        key = (binding.chat_id, binding.message_thread_id)
+        existing_view = self._state.get_status_bubble_view(binding.chat_id, binding.message_thread_id)
+        cached_render = self._status_bubble_renders.get(key)
+        if (
+            existing_view is not None
+            and existing_view.codex_thread_id == binding.codex_thread_id
+            and cached_render == (text, reply_markup)
+        ):
+            return
+
+        try:
+            if existing_view is not None:
+                message_id = existing_view.message_id
+                self._telegram.edit_message_text(
+                    binding.chat_id,
+                    message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            else:
+                message_id = self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
+                self._status_bubble_renders.pop(key, None)
+                return
+            try:
+                message_id = self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            except Exception as send_exc:
+                if self._mark_binding_deleted_if_missing_topic(binding, send_exc):
+                    self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
+                    self._status_bubble_renders.pop(key, None)
+                    return
+                raise
+
+        self._state.upsert_status_bubble_view(
+            StatusBubbleViewState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                message_id=message_id,
+                codex_thread_id=binding.codex_thread_id,
+            )
+        )
+        self._status_bubble_renders[key] = (text, reply_markup)
+
+    def _status_bubble_state(
+        self,
+        binding: Binding,
+        pending_turn: PendingTurn | None,
+        turn_result: TurnResult | None,
+    ) -> str:
+        topic_status = self._topic_status_for_binding(binding, pending_turn, turn_result)
+        if topic_status == TOPIC_STATUS_RUNNING:
+            return "running"
+        if topic_status == TOPIC_STATUS_APPROVAL:
+            return "approval"
+        if topic_status == TOPIC_STATUS_FAILED:
+            return "failed"
+        if topic_status == TOPIC_STATUS_CLOSED:
+            return "closed"
+        return "ready"
+
     def _sync_interactive_prompt_for_binding(self, binding: Binding) -> None:
         if not self._is_primary_binding(binding):
             return
@@ -1219,6 +1348,8 @@ class GatewayDaemon:
             self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+        self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
+        self._status_bubble_renders.pop((binding.chat_id, binding.message_thread_id), None)
         return True
 
     def _handle_unbound_topic_message(self, update: dict[str, object]) -> None:
@@ -2969,6 +3100,8 @@ class GatewayDaemon:
                 target.chat_id,
                 target.message_thread_id,
             )
+            self._state.delete_status_bubble_view(target.chat_id, target.message_thread_id)
+            self._status_bubble_renders.pop((target.chat_id, target.message_thread_id), None)
             self._state.delete_topic_history(target.chat_id, target.message_thread_id)
             self._clear_typing_state(target.chat_id, target.message_thread_id)
             self._clear_topic_status_override(target.chat_id, target.message_thread_id)
@@ -3815,6 +3948,19 @@ def _history_entry_label(entry: TopicHistoryEntry, limit: int = 20) -> str:
     if len(label) <= limit:
         return label
     return label[: limit - 1].rstrip() + "…"
+
+
+def _latest_assistant_summary(events: list) -> str | None:
+    for event in reversed(events):
+        if getattr(event, "kind", None) != "assistant_message":
+            continue
+        text = " ".join(str(getattr(event, "text", "")).split()).strip()
+        if not text:
+            continue
+        if len(text) <= 120:
+            return text
+        return text[:119].rstrip() + "…"
+    return None
 
 
 def _event_turn_id(event_id: str) -> str | None:

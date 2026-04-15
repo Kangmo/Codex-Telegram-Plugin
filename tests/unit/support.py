@@ -13,6 +13,7 @@ from codex_telegram_gateway.models import (
     RestoreViewState,
     ResumeViewState,
     SendViewState,
+    StatusBubbleViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -46,6 +47,7 @@ class DummyState:
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
         self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
+        self.status_bubble_views: dict[tuple[int, int], StatusBubbleViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
@@ -339,6 +341,21 @@ class DummyState:
     def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
         self.interactive_prompt_views.pop((chat_id, message_thread_id), None)
 
+    def upsert_status_bubble_view(
+        self,
+        status_bubble_view: StatusBubbleViewState,
+    ) -> StatusBubbleViewState:
+        self.status_bubble_views[
+            (status_bubble_view.chat_id, status_bubble_view.message_thread_id)
+        ] = status_bubble_view
+        return status_bubble_view
+
+    def get_status_bubble_view(self, chat_id: int, message_thread_id: int) -> StatusBubbleViewState | None:
+        return self.status_bubble_views.get((chat_id, message_thread_id))
+
+    def delete_status_bubble_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.status_bubble_views.pop((chat_id, message_thread_id), None)
+
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
         self.send_views[(send_view.chat_id, send_view.message_thread_id)] = send_view
         return send_view
@@ -418,6 +435,8 @@ class DummyTelegramClient:
         self._next_topic_id = 1
         self._updates: list[dict[str, object]] = []
         self._next_message_id = 1
+        self._deleted_message_ids: set[int] = set()
+        self._live_message_ids: set[int] = set()
         self.dead_topics: set[tuple[int, int]] = set()
         self.created_topics: list[tuple[int, str]] = []
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
@@ -596,6 +615,7 @@ class DummyTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_messages.append((chat_id, message_thread_id, text, reply_markup))
         return message_id
 
@@ -612,6 +632,7 @@ class DummyTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_documents.append((chat_id, message_thread_id, str(file_path), caption))
         return message_id
 
@@ -625,6 +646,7 @@ class DummyTelegramClient:
     ) -> int:
         message_id = self._next_message_id
         self._next_message_id += 1
+        self._live_message_ids.add(message_id)
         self.sent_photos.append((chat_id, message_thread_id, str(file_path), caption))
         return message_id
 
@@ -637,6 +659,8 @@ class DummyTelegramClient:
         message_id: int,
         reply_markup: dict[str, object] | None,
     ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
         self.edited_reply_markups.append((chat_id, message_id, reply_markup))
 
     def edit_message_text(
@@ -646,10 +670,16 @@ class DummyTelegramClient:
         text: str,
         reply_markup: dict[str, object] | None = None,
     ) -> None:
+        if message_id in self._deleted_message_ids:
+            raise RuntimeError("message to edit not found")
         self.edited_messages.append((chat_id, message_id, text, reply_markup))
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
         self.edited_topics.append((chat_id, message_thread_id, name))
+
+    def delete_message_locally(self, message_id: int) -> None:
+        self._deleted_message_ids.add(message_id)
+        self._live_message_ids.discard(message_id)
 
     def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
         self.closed_topics.append((chat_id, message_thread_id))

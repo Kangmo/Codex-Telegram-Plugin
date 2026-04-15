@@ -15,6 +15,7 @@ from codex_telegram_gateway.models import (
     RestoreViewState,
     ResumeViewState,
     SendViewState,
+    StatusBubbleViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -178,6 +179,14 @@ class SqliteGatewayState:
                 codex_thread_id TEXT NOT NULL,
                 prompt_id TEXT NOT NULL,
                 prompt_kind TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS status_bubble_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1238,6 +1247,65 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM interactive_prompt_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_status_bubble_view(
+        self,
+        status_bubble_view: StatusBubbleViewState,
+    ) -> StatusBubbleViewState:
+        self._connection.execute(
+            """
+            INSERT INTO status_bubble_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id
+            """,
+            (
+                status_bubble_view.chat_id,
+                status_bubble_view.message_thread_id,
+                status_bubble_view.message_id,
+                status_bubble_view.codex_thread_id,
+            ),
+        )
+        self._connection.commit()
+        return status_bubble_view
+
+    def get_status_bubble_view(self, chat_id: int, message_thread_id: int) -> StatusBubbleViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id
+            FROM status_bubble_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return StatusBubbleViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+        )
+
+    def delete_status_bubble_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM status_bubble_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

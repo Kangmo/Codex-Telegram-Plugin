@@ -86,6 +86,16 @@ class FakeTelegramClient:
         return True
 
 
+def non_bubble_sent_messages(
+    telegram: FakeTelegramClient,
+) -> list[tuple[int, int, str, dict[str, object] | None]]:
+    return [
+        message
+        for message in telegram.sent_messages
+        if not message[2].startswith("Topic status\n\n")
+    ]
+
+
 class FakeCodexBridge:
     def __init__(self, threads: list[CodexThread]) -> None:
         self.current_thread_id = threads[0].thread_id
@@ -284,4 +294,4 @@ def test_resume_after_restart_rebinds_non_loaded_thread_without_replaying_old_ou
             None,
         )
     ]
-    assert telegram.sent_messages[-1] == (-100100, 77, "fresh reply", None)
+    assert non_bubble_sent_messages(telegram)[-1] == (-100100, 77, "fresh reply", None)
