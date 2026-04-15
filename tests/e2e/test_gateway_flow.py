@@ -209,6 +209,16 @@ def non_bubble_sent_messages(
     ]
 
 
+def non_bubble_edited_messages(
+    telegram: FakeTelegramClient,
+) -> list[tuple[int, int, str, dict[str, object] | None]]:
+    return [
+        message
+        for message in telegram.edited_messages
+        if not message[2].startswith("Topic status\n\n")
+    ]
+
+
 class FakeCodexBridge:
     """In-memory Codex bridge stub used by the end-to-end contract."""
 
@@ -1055,3 +1065,74 @@ def test_status_bubble_recreated_after_message_deleted(tmp_path) -> None:
     assert recreated_bubble is not None
     assert recreated_bubble.message_id == 2
     assert telegram.sent_messages[-1][2].startswith("Topic status\n\nProject: `gateway-project`")
+
+
+def test_gateway_flow_batches_tool_progress_and_sends_one_terminal_summary(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Batch tool progress",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    service = GatewayService(config=config, state=state, telegram=telegram, codex=codex)
+    binding = service.link_current_thread()
+    daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        from_user_id=111,
+        text="Please continue.",
+    )
+    daemon.poll_telegram_once()
+    daemon.deliver_inbound_once()
+
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:tool-batch:0",
+            thread_id="thread-1",
+            kind="tool_batch",
+            text="⚡ 1 command\n• pwd  ⏳ running",
+        )
+    )
+    daemon.sync_codex_once()
+
+    codex.replace_event(
+        "thread-1",
+        "thread-1:turn-1:tool-batch:0",
+        "⚡ 2 commands\n• pwd  ✅ /tmp/project\n• pytest -q  ⏳ running",
+    )
+    daemon.sync_codex_once()
+
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:completion-summary",
+            thread_id="thread-1",
+            kind="completion_summary",
+            text="✓ Done — pytest -q: 3 passed in 0.80s",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="completed")
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, binding.message_thread_id, "⚡ 1 command\n• pwd  ⏳ running", None),
+        (-100100, binding.message_thread_id, "✓ Done — pytest -q: 3 passed in 0.80s", None),
+    ]
+    assert non_bubble_edited_messages(telegram)[-1] == (
+        -100100,
+        1,
+        "⚡ 2 commands\n• pwd  ✅ /tmp/project\n• pytest -q  ⏳ running",
+        None,
+    )

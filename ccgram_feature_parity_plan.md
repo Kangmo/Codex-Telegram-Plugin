@@ -52,7 +52,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-18 | Full sessions dashboard | P0 | Native | Partial today |
 | FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Implemented |
 | FP-20 | Dedicated status bubble | P0 | Native | Implemented |
-| FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Missing |
+| FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Implemented |
 | FP-22 | Live view | P1 | Adapted | Missing |
 | FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
 | FP-24 | General file intake and unsupported-content UX | P0 | Native | Partial today |
@@ -167,9 +167,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-21: Tool Batching, Failure Probing, Completion Summaries
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-22: Live View
 - [ ] Implemented
@@ -1624,6 +1624,41 @@ Make Telegram output concise and informative during long Codex runs.
   - mixed assistant/tool sequences render as expected
 - E2E:
   - long run with many tool calls produces compact output instead of message spam
+
+### FP-21 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-21-tool-batching-failure-probing-completion-summaries`
+  - feature commit `TBD after feature commit`
+  - merge commit on `main` `TBD after merge`
+- Added a dedicated `response_builder.py` normalization layer for Codex App `thread/read` turns so Telegram can render more than raw assistant text:
+  - contiguous `commandExecution` items now collapse into stable `tool_batch` events
+  - terminal turns without a final assistant reply now emit a dedicated `completion_summary` event
+  - command failure/success state is inferred from exit codes plus interesting output-line heuristics
+- `CodexAppServerClient.list_events()` now delegates to the response builder, so the daemon receives a replayable outbound event stream instead of only assistant blocks.
+- The daemon now treats `tool_batch` and `completion_summary` as first-class outbound events, which means:
+  - long command-heavy turns edit a single Telegram message as the batch grows
+  - tool-only turns still end with a concise terminal message instead of going silent
+  - the status bubble can surface the latest meaningful summary even when no assistant message exists
+- Replay logic for recreated topics now uses the latest visible event, not only the latest assistant event, so tool-batch and completion-summary output can be recovered after topic recreation.
+- Implementation decisions locked during FP-21:
+  - Codex App does not expose `ccgram`’s raw `tool_use` and `tool_result` transcript blocks, so this gateway adapts parity through `commandExecution` batching rather than pretending the tmux transcript model exists
+  - a dedicated completion-summary event suppresses the old generic terminal failure alert for that turn to keep Telegram output concise
+  - terminal summaries are emitted whenever the last rendered item in the turn is not an assistant reply, even if an earlier assistant planning note appeared before the final command batch
+- Proofread fixes landed before sign-off:
+  - failure probing now prefers concrete lines like `AssertionError: boom` over vague first-line summaries such as `tests failed`
+  - completion-summary suppression was corrected so turns with an early assistant note and a final command batch still emit a terminal summary
+  - the daemon keeps Telegram’s send/edit contract intact by applying inline widgets through reply-markup edits instead of changing the outbound text-delivery path
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_response_builder.py tests/unit/test_codex_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `164 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `274 passed`
+- Feature-specific changed-executable coverage for FP-21 source work:
+  - `src/codex_telegram_gateway/response_builder.py`: `117/138 = 84.8%`
+  - `src/codex_telegram_gateway/codex_api.py` changed executable lines: `2/2 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `14/14 = 100.0%`
+  - `src/codex_telegram_gateway/service.py` changed executable lines: `5/5 = 100.0%`
+  - `TOTAL`: `138/159 = 86.8%`
 
 ### FP-22: Live View
 
