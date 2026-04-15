@@ -11,6 +11,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    ResumeViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -101,7 +102,19 @@ class CodexBridge(Protocol):
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         ...
 
+    def list_resumable_threads(
+        self,
+        project_id: str,
+        *,
+        exclude_thread_id: str | None = None,
+        limit: int = 12,
+    ) -> list[CodexThread]:
+        ...
+
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
+        ...
+
+    def resume_thread(self, thread_id: str) -> CodexThread:
         ...
 
     def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
@@ -252,6 +265,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_resume_view(self, resume_view: ResumeViewState) -> ResumeViewState:
+        ...
+
+    def get_resume_view(self, chat_id: int, message_thread_id: int) -> ResumeViewState | None:
+        ...
+
+    def delete_resume_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:

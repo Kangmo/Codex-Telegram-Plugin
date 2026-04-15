@@ -20,6 +20,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    ResumeViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -32,6 +33,14 @@ from codex_telegram_gateway.service import (
     DEFAULT_NEW_THREAD_TITLE,
     GatewayService,
     format_topic_name,
+)
+from codex_telegram_gateway.resume_command import (
+    CALLBACK_RESUME_CANCEL,
+    CALLBACK_RESUME_PAGE_PREFIX,
+    CALLBACK_RESUME_PICK_PREFIX,
+    parse_resume_page_callback,
+    parse_resume_pick_callback,
+    render_resume_picker,
 )
 from codex_telegram_gateway.telegram_api import (
     is_missing_topic_error,
@@ -1011,6 +1020,9 @@ class GatewayDaemon:
         if data.startswith(CALLBACK_HISTORY_PREFIX):
             self._handle_history_callback(update)
             return
+        if data.startswith(CALLBACK_RESUME_PAGE_PREFIX) or data.startswith(CALLBACK_RESUME_PICK_PREFIX) or data == CALLBACK_RESUME_CANCEL:
+            self._handle_resume_callback(update)
+            return
         if data.startswith(_CALLBACK_SYNC_PREFIX):
             self._handle_sync_callback(update)
             return
@@ -1303,6 +1315,80 @@ class GatewayDaemon:
 
         self._show_history_message(binding, page_index=page_index, message_id=message_id)
         self._telegram.answer_callback_query(callback_query_id, "Page updated.")
+
+    def _handle_resume_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        data = str(update["data"])
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        resume_view = self._state.get_resume_view(chat_id, message_thread_id)
+
+        if data == CALLBACK_RESUME_CANCEL:
+            if resume_view is not None and resume_view.message_id == message_id:
+                self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+                self._state.delete_resume_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "Cancelled.")
+            return
+
+        if binding is None or not self._is_primary_binding(binding):
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer eligible for resume.")
+            return
+        if resume_view is None or resume_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This resume picker is stale.")
+            return
+
+        project_id = binding.project_id or self._codex.read_thread(binding.codex_thread_id).cwd
+        if project_id != resume_view.project_id:
+            self._telegram.answer_callback_query(callback_query_id, "This resume picker no longer matches the topic.")
+            return
+
+        page_index = parse_resume_page_callback(data)
+        if page_index is not None:
+            self._open_resume_picker(binding, page_index=page_index, message_id=message_id)
+            self._telegram.answer_callback_query(callback_query_id, "Page updated.")
+            return
+
+        picked_thread_id = parse_resume_pick_callback(data)
+        if picked_thread_id is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown resume action.")
+            return
+
+        resumable_threads = self._codex.list_resumable_threads(
+            project_id,
+            exclude_thread_id=binding.codex_thread_id,
+        )
+        target_thread = next(
+            (thread for thread in resumable_threads if thread.thread_id == picked_thread_id),
+            None,
+        )
+        if target_thread is None:
+            self._telegram.answer_callback_query(callback_query_id, "That thread is no longer available.")
+            return
+
+        previous_thread_id = binding.codex_thread_id
+        rebound_binding = self._service.rebind_topic_to_thread(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            codex_thread_id=picked_thread_id,
+        )
+        self._state.delete_pending_turn(previous_thread_id)
+        self._state.delete_topic_lifecycle(previous_thread_id)
+        self._state.delete_history_view(chat_id, message_thread_id)
+        self._state.delete_resume_view(chat_id, message_thread_id)
+        self._clear_typing_state(chat_id, message_thread_id)
+        self._clear_topic_status_override(chat_id, message_thread_id)
+        self._telegram.edit_message_text(
+            chat_id,
+            message_id,
+            (
+                f"Resumed this topic into `{target_thread.title}`.\n"
+                f"Thread id: `{rebound_binding.codex_thread_id}`"
+            ),
+            reply_markup=None,
+        )
+        self._telegram.answer_callback_query(callback_query_id, "Resumed.")
 
     def _handle_queue_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -1643,6 +1729,20 @@ class GatewayDaemon:
             self._show_history_message(binding)
             return
 
+        if command_name == "resume":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "No Codex thread is bound to this topic yet.",
+                )
+                return
+            if not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
+            self._open_resume_picker(binding)
+            return
+
         if command_name == "bindings":
             self._telegram.send_message(
                 chat_id,
@@ -1731,6 +1831,64 @@ class GatewayDaemon:
     @staticmethod
     def _history_display_name(binding: Binding, thread: CodexThread) -> str:
         return binding.topic_name or format_topic_name(binding.project_id or thread.cwd, thread.title)
+
+    def _open_resume_picker(self, binding: Binding, *, page_index: int = 0, message_id: int | None = None) -> None:
+        project_id = binding.project_id or self._codex.read_thread(binding.codex_thread_id).cwd
+        if not project_id:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "This topic is bound, but the Codex project path is missing.",
+            )
+            return
+        threads = self._codex.list_resumable_threads(
+            project_id,
+            exclude_thread_id=binding.codex_thread_id,
+        )
+        if not threads:
+            if message_id is None:
+                self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    "No other Codex threads were found in this project.",
+                )
+            else:
+                self._telegram.edit_message_text(
+                    binding.chat_id,
+                    message_id,
+                    "No other Codex threads were found in this project.",
+                    reply_markup=None,
+                )
+            self._state.delete_resume_view(binding.chat_id, binding.message_thread_id)
+            return
+        text, reply_markup = render_resume_picker(
+            project_id=project_id,
+            threads=threads,
+            page_index=page_index,
+        )
+        if message_id is None:
+            message_id = self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                text,
+                reply_markup=reply_markup,
+            )
+        else:
+            self._telegram.edit_message_text(
+                binding.chat_id,
+                message_id,
+                text,
+                reply_markup=reply_markup,
+            )
+        self._state.upsert_resume_view(
+            ResumeViewState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                message_id=message_id,
+                project_id=project_id,
+                page_index=page_index,
+            )
+        )
 
     def _start_new_thread(
         self,
@@ -2036,6 +2194,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("projects", "List loaded Codex App projects"),
     _BotCommand("threads", "List loaded Codex App threads"),
     _BotCommand("history", "Show paginated history for this Codex thread"),
+    _BotCommand("resume", "Resume another Codex thread from this project"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),

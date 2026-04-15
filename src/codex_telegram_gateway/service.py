@@ -153,6 +153,46 @@ class GatewayService:
         )
         return recreated_binding
 
+    def rebind_topic_to_thread(
+        self,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+        codex_thread_id: str,
+    ) -> Binding:
+        thread = self._codex.read_thread(codex_thread_id)
+        if thread.status == "notLoaded":
+            thread = self._codex.resume_thread(codex_thread_id)
+        topic_name = format_topic_name(thread.cwd, thread.title)
+        self._telegram.edit_forum_topic(chat_id, message_thread_id, topic_name)
+        rebound_binding = self._state.create_binding(
+            Binding(
+                codex_thread_id=codex_thread_id,
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                topic_name=topic_name,
+                sync_mode=self._config.sync_mode,
+                project_id=thread.cwd or None,
+                binding_status=ACTIVE_BINDING_STATUS,
+            )
+        )
+        self._state.upsert_topic_lifecycle(
+            TopicLifecycle(
+                codex_thread_id=rebound_binding.codex_thread_id,
+                chat_id=rebound_binding.chat_id,
+                message_thread_id=rebound_binding.message_thread_id,
+                bound_at=time.time(),
+            )
+        )
+        for event in self._codex.list_events(codex_thread_id):
+            self._state.mark_event_seen(codex_thread_id, event.event_id)
+        self._queue_mirror_creation_jobs(
+            rebound_binding,
+            thread_title=thread.title,
+            project_id=thread.cwd or None,
+        )
+        return rebound_binding
+
     def _queue_mirror_creation_jobs(
         self,
         binding: Binding,

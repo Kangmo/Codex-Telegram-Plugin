@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from unittest.mock import patch
 
 from codex_telegram_gateway.codex_api import CodexAppServerClient, _build_turn_input, _turn_waits_for_approval
 from codex_telegram_gateway.models import CodexHistoryEntry, CodexThread
@@ -257,3 +258,57 @@ def test_list_history_entries_normalizes_user_assistant_and_command_items() -> N
             timestamp="2026-04-15T10:01:00Z",
         ),
     ]
+
+
+def test_list_resumable_threads_uses_app_store_threads_and_marks_unloaded() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._codex_home = __import__("pathlib").Path("/tmp/.codex")  # type: ignore[attr-defined]
+
+    def fake_list_loaded_threads() -> list[CodexThread]:
+        return [
+            CodexThread(
+                thread_id="thread-2",
+                title="Loaded thread",
+                status="idle",
+                cwd="/tmp/project",
+            )
+        ]
+
+    client.list_loaded_threads = fake_list_loaded_threads  # type: ignore[method-assign]
+
+    with patch("codex_telegram_gateway.codex_api.list_project_threads") as list_project_threads:
+        list_project_threads.return_value = [
+            __import__("codex_telegram_gateway.app_store", fromlist=["AppStoreThread"]).AppStoreThread(
+                thread_id="thread-2",
+                cwd="/tmp/project",
+                title="Loaded thread",
+                updated_at=20,
+            ),
+            __import__("codex_telegram_gateway.app_store", fromlist=["AppStoreThread"]).AppStoreThread(
+                thread_id="thread-3",
+                cwd="/tmp/project",
+                title="Older thread",
+                updated_at=10,
+            ),
+        ]
+
+        assert client.list_resumable_threads("/tmp/project", exclude_thread_id="thread-1") == [
+            CodexThread(
+                thread_id="thread-2",
+                title="Loaded thread",
+                status="idle",
+                cwd="/tmp/project",
+            ),
+            CodexThread(
+                thread_id="thread-3",
+                title="Older thread",
+                status="notLoaded",
+                cwd="/tmp/project",
+            ),
+        ]
+        list_project_threads.assert_called_once_with(
+            client._codex_home,  # type: ignore[attr-defined]
+            "/tmp/project",
+            exclude_thread_id="thread-1",
+            limit=12,
+        )

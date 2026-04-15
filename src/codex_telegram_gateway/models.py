@@ -151,6 +151,17 @@ class HistoryViewState:
 
 
 @dataclass(frozen=True)
+class ResumeViewState:
+    """Persisted Telegram resume-picker context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    project_id: str
+    page_index: int = 0
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 
