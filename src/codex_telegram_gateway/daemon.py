@@ -15,6 +15,7 @@ from codex_telegram_gateway.models import (
     OutboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
@@ -38,6 +39,14 @@ from codex_telegram_gateway.topic_status import (
     format_topic_title_for_status,
     strip_topic_status_prefix,
 )
+from codex_telegram_gateway.topic_lifecycle import (
+    is_unbound_topic_expired,
+    should_autoclose_topic,
+    should_probe_topics,
+    should_prune_state,
+)
+
+_UNSET = object()
 
 
 class GatewayDaemon:
@@ -62,6 +71,12 @@ class GatewayDaemon:
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
         self._topic_status_disabled_chats: set[int] = set()
+        self._lifecycle_timers = {
+            "probe": 0.0,
+            "autoclose": 0.0,
+            "prune": 0.0,
+            "unbound": 0.0,
+        }
         self._service = GatewayService(
             config=config,
             state=state,
@@ -138,6 +153,8 @@ class GatewayDaemon:
                 except Exception as exc:
                     if not self._mark_binding_deleted_if_missing_topic(binding, exc):
                         raise
+            if turn_result.status == "completed":
+                self._mark_topic_completed(binding.codex_thread_id)
 
     def poll_telegram_once(self) -> None:
         self._sync_projects_once()
@@ -170,6 +187,8 @@ class GatewayDaemon:
                 if kind == "callback_query":
                     if from_user_id not in self._config.telegram_allowed_user_ids:
                         continue
+                    if self._state.get_binding_by_topic(chat_id, message_thread_id) is None:
+                        self._state.set_topic_project_last_seen(chat_id, message_thread_id, time.time())
                     self._handle_callback_query(update)
                     continue
                 if kind != "message":
@@ -280,6 +299,7 @@ class GatewayDaemon:
                 raise
             self._state.upsert_outbound_message(outbound_message)
             self._state.mark_event_seen(binding.codex_thread_id, event.event_id)
+            self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
             return
 
         if outbound_message.text == event.text and outbound_message.reply_markup == reply_markup:
@@ -308,6 +328,7 @@ class GatewayDaemon:
                 reply_markup=reply_markup,
             )
         )
+        self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
 
     def _sync_projects_once(self) -> None:
         for project in self._codex.list_loaded_projects():
@@ -336,6 +357,168 @@ class GatewayDaemon:
 
     def _clear_typing_state(self, chat_id: int, message_thread_id: int) -> None:
         self._last_typing_sent_at.pop((chat_id, message_thread_id), None)
+
+    def run_lifecycle_sweeps(
+        self,
+        *,
+        now_monotonic: float | None = None,
+        now_epoch: float | None = None,
+    ) -> None:
+        monotonic_now = time.monotonic() if now_monotonic is None else now_monotonic
+        epoch_now = time.time() if now_epoch is None else now_epoch
+
+        if should_probe_topics(
+            self._lifecycle_timers["probe"],
+            now=monotonic_now,
+            interval_seconds=self._config.lifecycle_probe_interval_seconds,
+        ):
+            self._lifecycle_timers["probe"] = monotonic_now
+            self._probe_topic_existence()
+
+        if should_probe_topics(
+            self._lifecycle_timers["autoclose"],
+            now=monotonic_now,
+            interval_seconds=self._config.lifecycle_probe_interval_seconds,
+        ):
+            self._lifecycle_timers["autoclose"] = monotonic_now
+            self._autoclose_completed_topics(epoch_now)
+
+        if should_probe_topics(
+            self._lifecycle_timers["unbound"],
+            now=monotonic_now,
+            interval_seconds=self._config.lifecycle_probe_interval_seconds,
+        ):
+            self._lifecycle_timers["unbound"] = monotonic_now
+            self._expire_unbound_topics(epoch_now)
+
+        if should_prune_state(
+            self._lifecycle_timers["prune"],
+            now=monotonic_now,
+            interval_seconds=self._config.lifecycle_prune_interval_seconds,
+        ):
+            self._lifecycle_timers["prune"] = monotonic_now
+            self._prune_stale_state()
+
+    def _touch_topic_lifecycle(
+        self,
+        codex_thread_id: str,
+        *,
+        bound_at: float | None | object = _UNSET,
+        last_inbound_at: float | None | object = _UNSET,
+        last_outbound_at: float | None | object = _UNSET,
+        completed_at: float | None | object = _UNSET,
+    ) -> None:
+        binding = self._state.get_binding_by_thread(codex_thread_id)
+        existing = self._state.get_topic_lifecycle(codex_thread_id)
+        resolved_bound_at = existing.bound_at if existing is not None else None
+        if bound_at is not _UNSET:
+            resolved_bound_at = bound_at
+        if existing is None and bound_at is _UNSET:
+            resolved_bound_at = time.time()
+        resolved_last_inbound_at = existing.last_inbound_at if existing is not None else None
+        if last_inbound_at is not _UNSET:
+            resolved_last_inbound_at = last_inbound_at
+        resolved_last_outbound_at = existing.last_outbound_at if existing is not None else None
+        if last_outbound_at is not _UNSET:
+            resolved_last_outbound_at = last_outbound_at
+        resolved_completed_at = existing.completed_at if existing is not None else None
+        if completed_at is not _UNSET:
+            resolved_completed_at = completed_at
+        topic_lifecycle = TopicLifecycle(
+            codex_thread_id=codex_thread_id,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+            bound_at=resolved_bound_at,
+            last_inbound_at=resolved_last_inbound_at,
+            last_outbound_at=resolved_last_outbound_at,
+            completed_at=resolved_completed_at,
+        )
+        self._state.upsert_topic_lifecycle(topic_lifecycle)
+
+    def _mark_topic_completed(self, codex_thread_id: str) -> None:
+        self._touch_topic_lifecycle(codex_thread_id, completed_at=time.time())
+
+    def _probe_topic_existence(self) -> None:
+        for binding in self._state.list_bindings():
+            if binding.binding_status == DELETED_BINDING_STATUS:
+                continue
+            if self._telegram.probe_topic(binding.chat_id, binding.message_thread_id):
+                continue
+            self._state.create_binding(
+                replace(
+                    binding,
+                    binding_status=DELETED_BINDING_STATUS,
+                )
+            )
+            self._state.delete_topic_lifecycle(binding.codex_thread_id)
+            self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
+            self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+
+    def _autoclose_completed_topics(self, now_epoch: float) -> None:
+        for topic_lifecycle in self._state.list_topic_lifecycles():
+            if not should_autoclose_topic(
+                topic_lifecycle,
+                now=now_epoch,
+                timeout_seconds=self._config.lifecycle_autoclose_after_seconds,
+            ):
+                continue
+            binding = self._state.get_binding_by_thread(topic_lifecycle.codex_thread_id)
+            if binding.binding_status != ACTIVE_BINDING_STATUS:
+                continue
+            if self._state.get_pending_turn(topic_lifecycle.codex_thread_id) is not None:
+                continue
+            try:
+                self._telegram.close_forum_topic(binding.chat_id, binding.message_thread_id)
+            except Exception as exc:
+                if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                    raise
+                continue
+            self._state.create_binding(
+                replace(
+                    binding,
+                    binding_status=CLOSED_BINDING_STATUS,
+                )
+            )
+            self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+
+    def _expire_unbound_topics(self, now_epoch: float) -> None:
+        live_topic_keys = {
+            (binding.chat_id, binding.message_thread_id)
+            for binding in self._state.list_bindings()
+            if binding.binding_status != DELETED_BINDING_STATUS
+        }
+        for chat_id, message_thread_id, last_seen_at in self._state.list_topic_project_last_seen():
+            if (chat_id, message_thread_id) in live_topic_keys:
+                continue
+            if not is_unbound_topic_expired(
+                last_seen_at,
+                now=now_epoch,
+                ttl_seconds=self._config.lifecycle_unbound_ttl_seconds,
+            ):
+                continue
+            try:
+                self._telegram.close_forum_topic(chat_id, message_thread_id)
+            except Exception as exc:
+                if not is_missing_topic_error(exc):
+                    raise
+            self._state.delete_topic_project(chat_id, message_thread_id)
+            self._state.delete_topic_project_last_seen(chat_id, message_thread_id)
+
+    def _prune_stale_state(self) -> None:
+        live_topics = {
+            (binding.chat_id, binding.message_thread_id)
+            for binding in self._state.list_bindings()
+            if binding.binding_status != DELETED_BINDING_STATUS
+        }
+        live_topics.update(
+            (topic_project.chat_id, topic_project.message_thread_id)
+            for topic_project in (
+                self._state.get_topic_project(chat_id, message_thread_id)
+                for chat_id, message_thread_id, _ in self._state.list_topic_project_last_seen()
+            )
+            if topic_project is not None
+        )
+        self._state.prune_orphan_topic_history(live_topics)
 
     def _set_topic_status_override(self, chat_id: int, message_thread_id: int, status: str) -> None:
         self._topic_status_overrides[(chat_id, message_thread_id)] = status
@@ -543,6 +726,7 @@ class GatewayDaemon:
                 browse_page=existing.browse_page if existing else 0,
             )
         )
+        self._state.set_topic_project_last_seen(chat_id, message_thread_id, time.time())
 
     def _handle_topic_closed(self, update: dict[str, object]) -> None:
         binding = self._state.get_binding_by_topic(
@@ -572,6 +756,8 @@ class GatewayDaemon:
                 binding_status=ACTIVE_BINDING_STATUS,
             )
         )
+        if self._state.get_topic_lifecycle(binding.codex_thread_id) is not None:
+            self._touch_topic_lifecycle(binding.codex_thread_id, completed_at=None)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
 
     def _handle_topic_edited(self, update: dict[str, object]) -> None:
@@ -648,6 +834,7 @@ class GatewayDaemon:
                 binding_status=DELETED_BINDING_STATUS,
             )
         )
+        self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
         return True
@@ -1387,6 +1574,11 @@ class GatewayDaemon:
             binding.message_thread_id,
             text=text,
             local_image_paths=local_image_paths,
+        )
+        self._touch_topic_lifecycle(
+            binding.codex_thread_id,
+            last_inbound_at=time.time(),
+            completed_at=None,
         )
         if pending_turn is None:
             return

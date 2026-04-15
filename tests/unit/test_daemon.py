@@ -12,6 +12,8 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicLifecycle,
+    TopicHistoryEntry,
     TopicProject,
     TurnResult,
 )
@@ -121,6 +123,14 @@ def test_sync_codex_once_edits_existing_message_when_same_event_grows() -> None:
 def test_poll_telegram_once_marks_binding_closed_and_reopened_from_topic_events() -> None:
     state = DummyState()
     state.create_binding(make_binding())
+    state.upsert_topic_lifecycle(
+        TopicLifecycle(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            completed_at=10.0,
+        )
+    )
     telegram = DummyTelegramClient()
     codex = DummyCodexBridge(
         CodexThread(
@@ -155,6 +165,7 @@ def test_poll_telegram_once_marks_binding_closed_and_reopened_from_topic_events(
     daemon.poll_telegram_once()
 
     assert state.get_binding_by_thread("thread-1").binding_status == ACTIVE_BINDING_STATUS
+    assert state.get_topic_lifecycle("thread-1").completed_at is None
 
 
 def test_poll_telegram_once_topic_rename_updates_codex_thread_title_for_authorized_user() -> None:
@@ -2439,3 +2450,187 @@ def test_sync_codex_once_renames_topic_when_codex_thread_title_changes() -> None
 
     assert telegram.edited_topics == [(-100100, 77, "(gateway-project) actual thread title")]
     assert state.get_binding_by_thread(binding.codex_thread_id).topic_name == "(gateway-project) actual thread title"
+
+
+def test_poll_telegram_once_backfills_topic_lifecycle_for_existing_binding_without_row() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="Please continue.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    lifecycle = state.get_topic_lifecycle("thread-1")
+    assert lifecycle is not None
+    assert lifecycle.bound_at is not None
+    assert lifecycle.last_inbound_at is not None
+    assert lifecycle.last_outbound_at is None
+    assert lifecycle.completed_at is None
+
+
+def test_run_lifecycle_sweeps_marks_missing_topic_deleted_and_removes_lifecycle() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_topic_lifecycle(
+        TopicLifecycle(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            bound_at=1.0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.dead_topics.add((-100100, 77))
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.run_lifecycle_sweeps(now_monotonic=60.0, now_epoch=60.0)
+
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
+    assert state.get_topic_lifecycle("thread-1") is None
+
+
+def test_run_lifecycle_sweeps_autocloses_completed_topic_after_timeout() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_topic_lifecycle(
+        TopicLifecycle(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            bound_at=1.0,
+            completed_at=10.0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+            lifecycle_autoclose_after_seconds=30.0,
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.run_lifecycle_sweeps(now_monotonic=60.0, now_epoch=45.0)
+
+    assert telegram.closed_topics == [(-100100, 77)]
+    assert state.get_binding_by_thread("thread-1").binding_status == CLOSED_BINDING_STATUS
+
+
+def test_run_lifecycle_sweeps_expires_unbound_topic_after_ttl() -> None:
+    state = DummyState()
+    state.upsert_topic_project(
+        TopicProject(
+            chat_id=-100100,
+            message_thread_id=91,
+            topic_name="Unbound topic",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            picker_message_id=12,
+        )
+    )
+    state.set_topic_project_last_seen(-100100, 91, 10.0)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+            lifecycle_unbound_ttl_seconds=30.0,
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.run_lifecycle_sweeps(now_monotonic=60.0, now_epoch=45.0)
+
+    assert telegram.closed_topics == [(-100100, 91)]
+    assert state.get_topic_project(-100100, 91) is None
+    assert state.get_topic_project_last_seen(-100100, 91) is None
+
+
+def test_run_lifecycle_sweeps_prunes_orphan_topic_history() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.record_topic_history(-100100, 77, text="keep me")
+    state.record_topic_history(-100100, 88, text="delete me")
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+            lifecycle_prune_interval_seconds=30.0,
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.run_lifecycle_sweeps(now_monotonic=45.0, now_epoch=45.0)
+
+    assert state.list_topic_history(-100100, 77) == [TopicHistoryEntry(text="keep me")]
+    assert state.list_topic_history(-100100, 88) == []

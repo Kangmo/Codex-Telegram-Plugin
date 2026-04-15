@@ -82,9 +82,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-04: Lifecycle Sweeps, Topic Probing, Autoclose, Unbound TTL, Pruning
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-05: Multi-Chat Fanout and Telegram Flood-Control Backoff
 - [ ] Implemented

@@ -86,6 +86,7 @@ def _background_sync_loop(stop_event: threading.Event, env_file: str) -> None:
                 runtime.daemon.poll_telegram_once()
                 runtime.daemon.deliver_inbound_once()
                 runtime.daemon.sync_codex_once()
+                runtime.daemon.run_lifecycle_sweeps()
             except Exception:
                 traceback.print_exc()
             stop_event.wait(_BACKGROUND_SYNC_INTERVAL_SECONDS)
@@ -220,6 +221,7 @@ def sync_once(env_file: str = ".env") -> dict[str, object]:
         runtime.daemon.deliver_inbound_once()
         after_deliver = runtime.state.pending_inbound_count()
         runtime.daemon.sync_codex_once()
+        runtime.daemon.run_lifecycle_sweeps()
         return {
             "pending_before": before,
             "pending_after_poll": after_poll,

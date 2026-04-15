@@ -5,6 +5,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
 )
@@ -173,6 +174,44 @@ def test_sqlite_state_persists_recent_topic_history_with_dedup(tmp_path) -> None
         ),
         TopicHistoryEntry(text="First request"),
     ]
+
+
+def test_sqlite_state_persists_topic_lifecycle_and_project_activity(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    lifecycle = TopicLifecycle(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        bound_at=1.0,
+        last_inbound_at=2.0,
+        last_outbound_at=3.0,
+        completed_at=4.0,
+    )
+
+    state.upsert_topic_lifecycle(lifecycle)
+    state.set_topic_project_last_seen(-100100, 88, 9.5)
+
+    assert state.get_topic_lifecycle("thread-1") == lifecycle
+    assert state.list_topic_lifecycles() == [lifecycle]
+    assert state.get_topic_project_last_seen(-100100, 88) == 9.5
+    assert state.list_topic_project_last_seen() == [(-100100, 88, 9.5)]
+
+    state.delete_topic_lifecycle("thread-1")
+    state.delete_topic_project_last_seen(-100100, 88)
+
+    assert state.get_topic_lifecycle("thread-1") is None
+    assert state.get_topic_project_last_seen(-100100, 88) is None
+
+
+def test_sqlite_state_prunes_orphan_topic_history(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    state.record_topic_history(-100100, 77, text="keep me")
+    state.record_topic_history(-100100, 88, text="delete me")
+
+    state.prune_orphan_topic_history({(-100100, 77)})
+
+    assert state.list_topic_history(-100100, 77) == [TopicHistoryEntry(text="keep me")]
+    assert state.list_topic_history(-100100, 88) == []
 
 
 def test_sqlite_state_can_delete_seen_events_and_outbound_messages(tmp_path) -> None:

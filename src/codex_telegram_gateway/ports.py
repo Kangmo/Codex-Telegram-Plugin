@@ -10,6 +10,7 @@ from codex_telegram_gateway.models import (
     OutboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
@@ -61,6 +62,9 @@ class TelegramClient(Protocol):
         ...
 
     def edit_forum_topic(self, chat_id: int, message_thread_id: int, name: str) -> None:
+        ...
+
+    def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
@@ -217,4 +221,31 @@ class GatewayState(Protocol):
         ...
 
     def delete_pending_turn(self, codex_thread_id: str) -> None:
+        ...
+
+    def upsert_topic_lifecycle(self, topic_lifecycle: TopicLifecycle) -> TopicLifecycle:
+        ...
+
+    def get_topic_lifecycle(self, codex_thread_id: str) -> TopicLifecycle | None:
+        ...
+
+    def list_topic_lifecycles(self) -> list[TopicLifecycle]:
+        ...
+
+    def delete_topic_lifecycle(self, codex_thread_id: str) -> None:
+        ...
+
+    def set_topic_project_last_seen(self, chat_id: int, message_thread_id: int, seen_at: float) -> None:
+        ...
+
+    def get_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> float | None:
+        ...
+
+    def list_topic_project_last_seen(self) -> list[tuple[int, int, float]]:
+        ...
+
+    def delete_topic_project_last_seen(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def prune_orphan_topic_history(self, live_topics: set[tuple[int, int]]) -> None:
         ...

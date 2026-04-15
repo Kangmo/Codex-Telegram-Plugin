@@ -39,6 +39,11 @@ def test_link_current_thread_creates_topic_and_binding() -> None:
     assert binding.project_id == "/Users/kangmo/sacle/src/blink"
     assert state.get_binding_by_thread("thread-1") == binding
     assert telegram.created_topics == [(-100100, "(blink) Remove browser entitlement")]
+    lifecycle = state.get_topic_lifecycle("thread-1")
+    assert lifecycle is not None
+    assert lifecycle.chat_id == -100100
+    assert lifecycle.message_thread_id == 1
+    assert lifecycle.bound_at is not None
 
 
 def test_link_loaded_threads_reuses_existing_binding() -> None:

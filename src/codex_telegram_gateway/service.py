@@ -1,7 +1,8 @@
+import time
 from pathlib import Path
 
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.models import ACTIVE_BINDING_STATUS, Binding
+from codex_telegram_gateway.models import ACTIVE_BINDING_STATUS, Binding, TopicLifecycle
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
 
 
@@ -53,6 +54,14 @@ class GatewayService:
             binding_status=ACTIVE_BINDING_STATUS,
         )
         created_binding = self._state.create_binding(binding)
+        self._state.upsert_topic_lifecycle(
+            TopicLifecycle(
+                codex_thread_id=created_binding.codex_thread_id,
+                chat_id=created_binding.chat_id,
+                message_thread_id=created_binding.message_thread_id,
+                bound_at=time.time(),
+            )
+        )
         for event in self._codex.list_events(thread_id):
             self._state.mark_event_seen(thread_id, event.event_id)
         return created_binding
@@ -81,6 +90,14 @@ class GatewayService:
             binding_status=ACTIVE_BINDING_STATUS,
         )
         created_binding = self._state.create_binding(binding)
+        self._state.upsert_topic_lifecycle(
+            TopicLifecycle(
+                codex_thread_id=created_binding.codex_thread_id,
+                chat_id=created_binding.chat_id,
+                message_thread_id=created_binding.message_thread_id,
+                bound_at=time.time(),
+            )
+        )
         for event in self._codex.list_events(created_thread.thread_id):
             self._state.mark_event_seen(created_thread.thread_id, event.event_id)
         return created_binding
@@ -100,6 +117,14 @@ class GatewayService:
             binding_status=ACTIVE_BINDING_STATUS,
         )
         self._state.create_binding(recreated_binding)
+        self._state.upsert_topic_lifecycle(
+            TopicLifecycle(
+                codex_thread_id=recreated_binding.codex_thread_id,
+                chat_id=recreated_binding.chat_id,
+                message_thread_id=recreated_binding.message_thread_id,
+                bound_at=time.time(),
+            )
+        )
         self._state.delete_outbound_messages(codex_thread_id)
         latest_assistant_event_id = _latest_assistant_event_id(self._codex.list_events(codex_thread_id))
         if latest_assistant_event_id is not None:
