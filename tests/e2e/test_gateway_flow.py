@@ -503,6 +503,85 @@ def test_gateway_flow_gateway_screenshot_sends_photo(tmp_path) -> None:
     ]
 
 
+def test_gateway_flow_gateway_panes_reports_project_threads(tmp_path) -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex._threads["thread-2"] = CodexThread(
+        thread_id="thread-2",
+        title="thread-2",
+        status="running",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+    )
+    codex._threads["thread-3"] = CodexThread(
+        thread_id="thread-3",
+        title="thread-3",
+        status="idle",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+    )
+    codex._threads["thread-4"] = CodexThread(
+        thread_id="thread-4",
+        title="other-project-thread",
+        status="idle",
+        cwd="/Users/kangmo/sacle/src/other-project",
+    )
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway panes",
+    )
+    daemon.poll_telegram_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "`/panes` is not available in Codex App mode.\n\n"
+            "Current topic thread:\n"
+            "- `thread-1` in `gateway-project`\n\n"
+            "Loaded threads in this project:\n"
+            "- `thread-1` (this topic, idle)\n"
+            "- `thread-2` (running)\n"
+            "- `thread-3` (idle)\n\n"
+            "Use `/gateway threads` for a full list, `/gateway screenshot` for a capture, or `/gateway live` for a live view.",
+            None,
+        )
+    ]
+
+
 def test_gateway_flow_live_view_persists_and_edits_same_message(tmp_path) -> None:
     first_capture = tmp_path / "live-1.png"
     second_capture = tmp_path / "live-2.png"

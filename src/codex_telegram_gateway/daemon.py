@@ -73,6 +73,10 @@ from codex_telegram_gateway.notification_modes import (
     parse_verbose_callback,
     should_emit_notification,
 )
+from codex_telegram_gateway.panes_compat import (
+    project_threads_for_panes,
+    render_panes_compatibility,
+)
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
 from codex_telegram_gateway.recall_command import (
     history_entry_label,
@@ -3872,6 +3876,31 @@ class GatewayDaemon:
                 )
             return
 
+        if command_name == "panes":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            thread = self._codex.read_thread(binding.codex_thread_id)
+            project_id = binding.project_id or thread.cwd or ""
+            project_name = Path(project_id).name or project_id or "-"
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                render_panes_compatibility(
+                    bound_thread=thread,
+                    project_name=project_name,
+                    project_threads=project_threads_for_panes(
+                        bound_thread=thread,
+                        loaded_threads=self._codex.list_loaded_threads(),
+                    ),
+                ),
+            )
+            return
+
         if command_name == "live":
             if binding is None:
                 self._telegram.send_message(
@@ -4616,6 +4645,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("screenshot", "Capture the current Codex App window for this thread"),
+    _BotCommand("panes", "Show the Codex App thread summary for tmux-style pane compatibility"),
     _BotCommand("live", "Start or refresh a live Codex App window feed"),
     _BotCommand("send", "Browse project files and send one back to Telegram"),
     _BotCommand("verbose", "Change supplemental Telegram notification mode"),
