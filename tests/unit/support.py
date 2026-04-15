@@ -14,6 +14,7 @@ from codex_telegram_gateway.models import (
     ResumeViewState,
     SendViewState,
     StatusBubbleViewState,
+    ToolbarViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -50,6 +51,7 @@ class DummyState:
         self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
         self.voice_prompt_views: dict[tuple[int, int], VoicePromptViewState] = {}
         self.status_bubble_views: dict[tuple[int, int], StatusBubbleViewState] = {}
+        self.toolbar_views: dict[tuple[int, int], ToolbarViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
@@ -367,6 +369,16 @@ class DummyState:
 
     def delete_status_bubble_view(self, chat_id: int, message_thread_id: int) -> None:
         self.status_bubble_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_toolbar_view(self, toolbar_view: ToolbarViewState) -> ToolbarViewState:
+        self.toolbar_views[(toolbar_view.chat_id, toolbar_view.message_thread_id)] = toolbar_view
+        return toolbar_view
+
+    def get_toolbar_view(self, chat_id: int, message_thread_id: int) -> ToolbarViewState | None:
+        return self.toolbar_views.get((chat_id, message_thread_id))
+
+    def delete_toolbar_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.toolbar_views.pop((chat_id, message_thread_id), None)
 
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
         self.send_views[(send_view.chat_id, send_view.message_thread_id)] = send_view

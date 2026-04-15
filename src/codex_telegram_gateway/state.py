@@ -16,6 +16,7 @@ from codex_telegram_gateway.models import (
     ResumeViewState,
     SendViewState,
     StatusBubbleViewState,
+    ToolbarViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -199,6 +200,15 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 codex_thread_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS toolbar_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT,
+                project_id TEXT,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1392,6 +1402,70 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM status_bubble_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_toolbar_view(
+        self,
+        toolbar_view: ToolbarViewState,
+    ) -> ToolbarViewState:
+        self._connection.execute(
+            """
+            INSERT INTO toolbar_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_id
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                project_id = excluded.project_id
+            """,
+            (
+                toolbar_view.chat_id,
+                toolbar_view.message_thread_id,
+                toolbar_view.message_id,
+                toolbar_view.codex_thread_id,
+                toolbar_view.project_id,
+            ),
+        )
+        self._connection.commit()
+        return toolbar_view
+
+    def get_toolbar_view(self, chat_id: int, message_thread_id: int) -> ToolbarViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                project_id
+            FROM toolbar_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return ToolbarViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            project_id=row["project_id"],
+        )
+
+    def delete_toolbar_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM toolbar_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

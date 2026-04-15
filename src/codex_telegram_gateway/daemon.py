@@ -43,6 +43,7 @@ from codex_telegram_gateway.models import (
     SendViewState,
     StatusBubbleViewState,
     StartedTurn,
+    ToolbarViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -122,6 +123,12 @@ from codex_telegram_gateway.topic_lifecycle import (
     should_probe_topics,
     should_prune_state,
 )
+from codex_telegram_gateway.toolbar import (
+    build_toolbar_markup,
+    load_toolbar_config,
+    parse_toolbar_callback,
+    render_toolbar_text,
+)
 
 _UNSET = object()
 
@@ -147,6 +154,7 @@ class GatewayDaemon:
         self._telegram = telegram
         self._codex = codex
         self._transcriber = transcriber if transcriber is not None else build_transcription_provider(config)
+        self._toolbar_config = load_toolbar_config(config.toolbar_config_path)
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
         self._topic_status_disabled_chats: set[int] = set()
@@ -1439,6 +1447,7 @@ class GatewayDaemon:
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
         self._state.delete_voice_prompt_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
+        self._state.delete_toolbar_view(binding.chat_id, binding.message_thread_id)
         self._status_bubble_renders.pop((binding.chat_id, binding.message_thread_id), None)
         return True
 
@@ -1637,6 +1646,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_VOICE_PREFIX):
             self._handle_voice_callback(update)
+            return
+        if data.startswith(_CALLBACK_TOOLBAR_PREFIX):
+            self._handle_toolbar_callback(update)
             return
         if data.startswith(_CALLBACK_QUEUE_PREFIX):
             self._handle_queue_callback(update)
@@ -2891,6 +2903,170 @@ class GatewayDaemon:
             )
         )
 
+    def _show_toolbar(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        message_id: int | None = None,
+    ) -> None:
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        topic_project = self._state.get_topic_project(chat_id, message_thread_id)
+        project_id = topic_project.project_id if topic_project is not None else None
+        codex_thread_id: str | None = None
+        if binding is not None:
+            thread = self._codex.read_thread(binding.codex_thread_id)
+            project_id = binding.project_id or thread.cwd or project_id
+            codex_thread_id = binding.codex_thread_id
+        text = render_toolbar_text(
+            project_id=project_id,
+            codex_thread_id=codex_thread_id,
+        )
+        reply_markup = build_toolbar_markup(
+            self._toolbar_config,
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            project_id=project_id,
+        )
+        existing_view = self._state.get_toolbar_view(chat_id, message_thread_id)
+        target_message_id = message_id or (existing_view.message_id if existing_view is not None else None)
+        try:
+            if target_message_id is None:
+                target_message_id = self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            else:
+                self._telegram.edit_message_text(
+                    chat_id,
+                    target_message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+        except Exception:
+            target_message_id = self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                text,
+                reply_markup=reply_markup,
+            )
+
+        self._state.upsert_toolbar_view(
+            ToolbarViewState(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                message_id=target_message_id,
+                codex_thread_id=codex_thread_id,
+                project_id=project_id,
+            )
+        )
+
+    def _handle_toolbar_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        action_name = parse_toolbar_callback(str(update["data"]))
+        if action_name is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown toolbar action.")
+            return
+
+        toolbar_view = self._state.get_toolbar_view(chat_id, message_thread_id)
+        if toolbar_view is None or toolbar_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This toolbar is stale.")
+            return
+
+        action = self._toolbar_config.actions.get(action_name)
+        if action is None:
+            self._telegram.answer_callback_query(callback_query_id, "This toolbar action is unavailable.")
+            return
+
+        if action.action_type == "builtin":
+            if action.payload == "dismiss":
+                self._state.delete_toolbar_view(chat_id, message_thread_id)
+                self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+                self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
+                return
+            if action.payload == "refresh":
+                self._show_toolbar(chat_id, message_thread_id, message_id=message_id)
+                self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+                return
+            self._telegram.answer_callback_query(callback_query_id, "Unknown toolbar action.")
+            return
+
+        if action.action_type == "gateway_command":
+            parsed_command = _parse_command(f"/gateway {action.payload}")
+            if parsed_command is None:
+                self._telegram.answer_callback_query(callback_query_id, "Invalid toolbar command.")
+                return
+            self._handle_command(
+                update,
+                command_name=parsed_command[0],
+                command_args=parsed_command[1],
+            )
+            self._telegram.answer_callback_query(callback_query_id, f"Ran {parsed_command[0]}.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is not None and binding.binding_status != ACTIVE_BINDING_STATUS:
+            if self._is_primary_binding(binding):
+                self._offer_restore_prompt(binding)
+            self._telegram.answer_callback_query(callback_query_id, "This topic needs restore first.")
+            return
+
+        if action.action_type == "thread_text":
+            if binding is None:
+                topic_project = self._state.get_topic_project(chat_id, message_thread_id)
+                self._open_project_picker(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    topic_name=topic_project.topic_name if topic_project else None,
+                    pending_update_id=int(update["update_id"]),
+                    pending_user_id=int(update["from_user_id"]),
+                    pending_text=action.payload,
+                )
+                self._telegram.answer_callback_query(callback_query_id, "Choose a project.")
+                return
+            self._enqueue_bound_inbound(
+                binding,
+                telegram_update_id=int(update["update_id"]),
+                from_user_id=int(update["from_user_id"]),
+                text=action.payload,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Queued.")
+            return
+
+        if action.action_type == "steer_template":
+            if binding is None:
+                self._telegram.answer_callback_query(callback_query_id, "No active Codex thread in this topic.")
+                return
+            pending_turn = self._state.get_pending_turn(binding.codex_thread_id)
+            if pending_turn is None:
+                self._telegram.answer_callback_query(callback_query_id, "Codex is not answering right now.")
+                return
+            self._send_typing_if_due(chat_id, message_thread_id, force=True)
+            try:
+                self._codex.steer_turn(
+                    StartedTurn(
+                        thread_id=binding.codex_thread_id,
+                        text=action.payload,
+                    ),
+                    expected_turn_id=pending_turn.turn_id,
+                    on_progress=lambda: self._send_typing_if_due(chat_id, message_thread_id),
+                )
+            except Exception as exc:
+                self._telegram.answer_callback_query(
+                    callback_query_id,
+                    _steer_callback_text(exc),
+                )
+                return
+            self._telegram.answer_callback_query(callback_query_id, "Steered.")
+            return
+
+        self._telegram.answer_callback_query(callback_query_id, "Unknown toolbar action.")
+
     def _handle_command(
         self,
         update: dict[str, object],
@@ -3049,6 +3225,10 @@ class GatewayDaemon:
                 _sync_report_text(audit),
                 reply_markup=_sync_report_markup(audit),
             )
+            return
+
+        if command_name == "toolbar":
+            self._show_toolbar(chat_id, message_thread_id)
             return
 
         if command_name == "create_thread":
@@ -3747,6 +3927,7 @@ _CALLBACK_RECALL_PREFIX = "gw:recall:"
 _CALLBACK_SEND_PREFIX = "gw:send:"
 _CALLBACK_PROMPT_PREFIX = "gw:prompt:"
 _CALLBACK_VOICE_PREFIX = "gw:voice:"
+_CALLBACK_TOOLBAR_PREFIX = "gw:toolbar:"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
 _CALLBACK_RESPONSE_PREFIX = "gw:resp:"
@@ -3783,6 +3964,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("project", "Choose or switch the Codex project for this topic"),
     _BotCommand("status", "Show the current topic binding and thread status"),
     _BotCommand("sync", "Audit bindings and recover deleted topics"),
+    _BotCommand("toolbar", "Show or refresh the topic action bar"),
     _BotCommand("help", "Show available gateway commands", aliases=("commands",)),
 )
 _COMMAND_ALIASES: dict[str, str] = {

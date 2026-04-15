@@ -14,6 +14,7 @@ from codex_telegram_gateway.models import (
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
+    ToolbarViewState,
     VoicePromptViewState,
 )
 from codex_telegram_gateway.state import SqliteGatewayState
@@ -232,6 +233,25 @@ def test_sqlite_state_persists_status_bubble_view(tmp_path) -> None:
     state.delete_status_bubble_view(-100100, 77)
 
     assert state.get_status_bubble_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_toolbar_view(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    toolbar_view = ToolbarViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=21,
+        codex_thread_id="thread-1",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+
+    state.upsert_toolbar_view(toolbar_view)
+
+    assert state.get_toolbar_view(-100100, 77) == toolbar_view
+
+    state.delete_toolbar_view(-100100, 77)
+
+    assert state.get_toolbar_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_voice_prompt_view(tmp_path) -> None:

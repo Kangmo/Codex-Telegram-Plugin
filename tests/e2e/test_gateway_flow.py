@@ -15,6 +15,7 @@ from codex_telegram_gateway.models import (
 from codex_telegram_gateway.recovery import CALLBACK_RESTORE_CONTINUE
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
+from codex_telegram_gateway.toolbar import CALLBACK_TOOLBAR_PREFIX
 
 
 class StaticTranscriptionProvider:
@@ -258,6 +259,126 @@ def non_bubble_edited_messages(
         for message in telegram.edited_messages
         if not message[2].startswith("Topic status\n\n")
     ]
+
+
+def test_gateway_flow_toolbar_override_persists_across_restart(tmp_path) -> None:
+    toolbar_config_path = tmp_path / "toolbar.toml"
+    toolbar_config_path.write_text(
+        "\n".join(
+            [
+                '[actions.status]',
+                'emoji = "📍"',
+                'text = "Status"',
+                'type = "gateway_command"',
+                'payload = "status"',
+                "",
+                "[actions.dismiss]",
+                'emoji = "✖"',
+                'text = "Close"',
+                'type = "builtin"',
+                'payload = "dismiss"',
+                "",
+                "[layout]",
+                'style = "emoji_text"',
+                'buttons = [["status", "dismiss"]]',
+                "",
+                '[topics."-100100:77"]',
+                'style = "text"',
+                'buttons = [["status"], ["dismiss"]]',
+            ]
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+        toolbar_config_path=toolbar_config_path,
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    first_daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway toolbar",
+    )
+    first_daemon.poll_telegram_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Topic toolbar\n\nProject: `gateway-project`\nThread id: `thread-1`",
+            {
+                "inline_keyboard": [
+                    [{"text": "Status", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}status"}],
+                    [{"text": "Close", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}dismiss"}],
+                ]
+            },
+        )
+    ]
+
+    reopened_state = SqliteGatewayState(config.state_database_path)
+    toolbar_view = reopened_state.get_toolbar_view(-100100, 77)
+    assert toolbar_view is not None
+    assert toolbar_view.message_id == 1
+
+    second_daemon = GatewayDaemon(
+        config=config,
+        state=reopened_state,
+        telegram=telegram,
+        codex=codex,
+    )
+    telegram.clear_sent_messages()
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway toolbar",
+    )
+    second_daemon.poll_telegram_once()
+
+    assert non_bubble_sent_messages(telegram) == []
+    assert non_bubble_edited_messages(telegram)[-1] == (
+        -100100,
+        1,
+        "Topic toolbar\n\nProject: `gateway-project`\nThread id: `thread-1`",
+        {
+            "inline_keyboard": [
+                [{"text": "Status", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}status"}],
+                [{"text": "Close", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}dismiss"}],
+            ]
+        },
+    )
 
 
 class FakeCodexBridge:

@@ -186,6 +186,7 @@
 - FP-08 `/unbind`
 - FP-09 `/restore`
 - FP-11 `/send`
+- FP-12 `/toolbar`
 - FP-13 `/verbose`
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
@@ -540,3 +541,40 @@
   - `src/codex_telegram_gateway/recall_command.py`: `33/36 = 91.7%`
   - `src/codex_telegram_gateway/daemon.py` changed executable lines: `21/24 = 87.5%`
   - `TOTAL`: `54/60 = 90.0%`
+
+### FP-12 verification
+- Branch and merge:
+  - feature branch `feature/fp-12-toolbar-configurable-action-bar`
+  - feature commit pending until this feature is committed
+  - merge commit on `main` pending until this feature is merged
+- Re-reviewed `ccgram` toolbar sources before implementation:
+  - `/tmp/ccgram/src/ccgram/toolbar_config.py`
+  - `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
+  - `/tmp/ccgram/tests/ccgram/handlers/test_toolbar.py`
+- Added `toolbar.py` as a pure configuration/rendering module with:
+  - TOML-backed action and layout loading
+  - built-in default toolbar actions
+  - project and topic override resolution
+  - callback parsing and inline keyboard rendering
+- Added persisted `ToolbarViewState` so `/gateway toolbar` refreshes the existing toolbar message in place and survives daemon restart.
+- `GatewayDaemon` now supports:
+  - `/gateway toolbar`
+  - toolbar callbacks for gateway commands
+  - toolbar callbacks that enqueue bound-thread text
+  - toolbar callbacks that explicitly steer an active Codex turn
+  - toolbar refresh and dismiss actions
+- Implementation decisions locked during FP-12:
+  - toolbar config path defaults to `.codex-telegram/toolbar.toml` and is overrideable via `CODEX_TELEGRAM_TOOLBAR_CONFIG`
+  - topic override precedence is higher than project override precedence
+  - toolbar actions reuse existing gateway code paths instead of inventing a second command executor
+  - malformed toolbar config is treated as a real configuration error rather than silently downgraded behavior
+- Proofread fixes before sign-off:
+  - corrected the toolbar status callback test to assert against raw sent messages instead of the helper that intentionally filters `Topic status` text
+  - verified the feature under `.venv/bin/pytest` after the shell initially picked Anaconda Python 3.9 instead of the repo’s required Python 3.11
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_toolbar.py tests/unit/test_config.py tests/unit/test_state.py tests/unit/test_daemon.py -k 'toolbar or toolbar_config_path'` -> `12 passed`
+  - `.venv/bin/pytest tests/e2e/test_gateway_flow.py -k toolbar_override_persists_across_restart` -> `1 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest` -> `336 passed`
+- Feature-specific module coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.toolbar --cov-report=term-missing tests/unit/test_toolbar.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_toolbar_sends_and_refreshes_persisted_view tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_status_callback_routes_to_gateway_command tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_thread_text_callback_enqueues_bound_inbound tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_steer_callback_steers_active_turn tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_dismiss_callback_clears_persisted_view tests/e2e/test_gateway_flow.py::test_gateway_flow_toolbar_override_persists_across_restart` -> `src/codex_telegram_gateway/toolbar.py 88%`

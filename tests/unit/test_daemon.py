@@ -14,6 +14,7 @@ from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_PAGE_PREFIX,
     CALLBACK_RESUME_PICK_PREFIX,
 )
+from codex_telegram_gateway.toolbar import CALLBACK_TOOLBAR_PREFIX
 from pathlib import Path
 from codex_telegram_gateway.telegram_api import TelegramApiError, TelegramRetryAfterError
 
@@ -34,6 +35,7 @@ from codex_telegram_gateway.models import (
     SendViewState,
     StatusBubbleViewState,
     StartedTurn,
+    ToolbarViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -78,6 +80,43 @@ def make_config(**overrides) -> GatewayConfig:
         sync_mode="assistant_plus_alerts",
         **overrides,
     )
+
+
+def write_toolbar_config(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                '[actions.status]',
+                'emoji = "📍"',
+                'text = "Status"',
+                'type = "gateway_command"',
+                'payload = "status"',
+                "",
+                "[actions.compact]",
+                'emoji = "🧹"',
+                'text = "Compact"',
+                'type = "thread_text"',
+                'payload = "/compact"',
+                "",
+                "[actions.steer]",
+                'emoji = "🧭"',
+                'text = "Steer"',
+                'type = "steer_template"',
+                'payload = "Focus on the last user request and continue."',
+                "",
+                "[actions.dismiss]",
+                'emoji = "✖"',
+                'text = "Close"',
+                'type = "builtin"',
+                'payload = "dismiss"',
+                "",
+                "[layout]",
+                'style = "text"',
+                'buttons = [["status", "compact"], ["steer", "dismiss"]]',
+            ]
+        )
+    )
+    return path
 
 
 def non_bubble_sent_messages(telegram: DummyTelegramClient) -> list[tuple[int, int, str, dict[str, object] | None]]:
@@ -1265,6 +1304,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway project - Choose or switch the Codex project for this topic\n"
                 "/gateway status - Show the current topic binding and thread status\n"
                 "/gateway sync - Audit bindings and recover deleted topics\n"
+                "/gateway toolbar - Show or refresh the topic action bar\n"
             "/gateway help - Show available gateway commands\n\n"
             "Telegram menu commands:\n"
             "/gateway - Gateway control commands and status\n"
@@ -1274,6 +1314,305 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             None,
         )
     ]
+
+
+def test_poll_telegram_once_gateway_toolbar_sends_and_refreshes_persisted_view(tmp_path) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway toolbar",
+    )
+    toolbar_config_path = write_toolbar_config(tmp_path / "toolbar.toml")
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(toolbar_config_path=toolbar_config_path),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Topic toolbar\n\nProject: `gateway-project`\nThread id: `thread-1`",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Status", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}status"},
+                        {"text": "Compact", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}compact"},
+                    ],
+                    [
+                        {"text": "Steer", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}steer"},
+                        {"text": "Close", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}dismiss"},
+                    ],
+                ]
+            },
+        )
+    ]
+    assert state.get_toolbar_view(-100100, 77) == ToolbarViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway toolbar",
+    )
+    daemon.poll_telegram_once()
+
+    assert non_bubble_edited_messages(telegram)[-1] == (
+        -100100,
+        1,
+        "Topic toolbar\n\nProject: `gateway-project`\nThread id: `thread-1`",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "Status", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}status"},
+                    {"text": "Compact", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}compact"},
+                ],
+                [
+                    {"text": "Steer", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}steer"},
+                    {"text": "Close", "callback_data": f"{CALLBACK_TOOLBAR_PREFIX}dismiss"},
+                ],
+            ]
+        },
+    )
+
+
+def test_poll_telegram_once_toolbar_status_callback_routes_to_gateway_command(tmp_path) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    toolbar_config_path = write_toolbar_config(tmp_path / "toolbar.toml")
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(toolbar_config_path=toolbar_config_path),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    state.upsert_toolbar_view(
+        ToolbarViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-toolbar-status",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_TOOLBAR_PREFIX}status",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Topic status\n\n"
+            "Project: `gateway-project`\n"
+            "Thread title: `thread-1`\n"
+            "Thread id: `thread-1`\n"
+            "Topic id: `77`\n"
+            "Notification mode: `all`\n"
+            "Codex status: `idle`",
+            None,
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-toolbar-status", "Ran status.")]
+
+
+def test_poll_telegram_once_toolbar_thread_text_callback_enqueues_bound_inbound(tmp_path) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    toolbar_config_path = write_toolbar_config(tmp_path / "toolbar.toml")
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(toolbar_config_path=toolbar_config_path),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    state.upsert_toolbar_view(
+        ToolbarViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-toolbar-compact",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_TOOLBAR_PREFIX}compact",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=1,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="/compact",
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-toolbar-compact", "Queued.")]
+
+
+def test_poll_telegram_once_toolbar_steer_callback_steers_active_turn(tmp_path) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-9",
+        )
+    )
+    telegram = DummyTelegramClient()
+    toolbar_config_path = write_toolbar_config(tmp_path / "toolbar.toml")
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(toolbar_config_path=toolbar_config_path),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    state.upsert_toolbar_view(
+        ToolbarViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-toolbar-steer",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_TOOLBAR_PREFIX}steer",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.steered_turns == [
+        (
+            "turn-9",
+            StartedTurn(
+                thread_id="thread-1",
+                text="Focus on the last user request and continue.",
+            ),
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-toolbar-steer", "Steered.")]
+
+
+def test_poll_telegram_once_toolbar_dismiss_callback_clears_persisted_view(tmp_path) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    toolbar_config_path = write_toolbar_config(tmp_path / "toolbar.toml")
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(toolbar_config_path=toolbar_config_path),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    state.upsert_toolbar_view(
+        ToolbarViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-toolbar-dismiss",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_TOOLBAR_PREFIX}dismiss",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_toolbar_view(-100100, 77) is None
+    assert telegram.edited_reply_markups == [(-100100, 9, None)]
+    assert telegram.answered_callback_queries == [("cb-toolbar-dismiss", "Dismissed.")]
 
 
 def test_poll_telegram_once_gateway_verbose_opens_notification_mode_picker() -> None:

@@ -43,7 +43,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-09 | `/restore` and richer recovery flows | P0 | Adapted | Partial today |
 | FP-10 | `/upgrade` | P2 | Adapted | Not critical |
 | FP-11 | `/send` file browser/upload | P0 | Native | Implemented |
-| FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Missing |
+| FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Implemented |
 | FP-13 | `/verbose` and notification modes | P0 | Native | Implemented |
 | FP-14 | `/screenshot` | P1 | Adapted | Missing |
 | FP-15 | `/panes` compatibility | P2 | Compatibility only | Codex App has no pane model |
@@ -122,9 +122,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-12: `/toolbar` Configurable Action Bar
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-13: `/verbose` and Notification Modes
 - [x] Implemented
@@ -1192,6 +1192,69 @@ Expose a compact keyboard of high-frequency actions similar to `ccgram`’s prov
   - toolbar actions route to the correct gateway or Codex flow
 - E2E:
   - topic-specific toolbar override is rendered and remains stable across restart
+
+**Implementation notes**
+
+- Reviewed `ccgram` toolbar configuration and callback handling again before coding:
+  - `/tmp/ccgram/src/ccgram/toolbar_config.py`
+  - `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
+  - `/tmp/ccgram/tests/ccgram/handlers/test_toolbar.py`
+- Added a new pure `toolbar.py` module with:
+  - declarative TOML loading
+  - built-in default actions and default layout
+  - project-level and topic-level layout overrides
+  - callback encoding/decoding and text/markup rendering helpers
+- Adapted `ccgram`’s tmux-oriented action model into Codex-App-native action kinds:
+  - `gateway_command`
+  - `thread_text`
+  - `steer_template`
+  - `builtin` (`refresh`, `dismiss`)
+- Added `ToolbarViewState` plus SQLite persistence so `/gateway toolbar` edits the existing toolbar message in place and keeps working across daemon restart.
+- Wired `/gateway toolbar` into `GatewayDaemon`, including:
+  - toolbar message rendering for bound and unbound topics
+  - callback routing for gateway command buttons
+  - queueing pass-through text into the bound topic
+  - explicit steering of the active Codex turn from template buttons
+  - dismiss/refresh handling
+- Added missing-topic cleanup for toolbar state so deleted Telegram topics do not leave stale toolbar view records behind.
+
+**Implementation decisions**
+
+- Kept the toolbar config local and fail-fast:
+  - default path is `.codex-telegram/toolbar.toml`
+  - `CODEX_TELEGRAM_TOOLBAR_CONFIG` overrides it
+  - missing config file falls back to built-in defaults
+  - malformed config is treated as a coding/config error rather than silently degraded runtime behavior
+- Used per-topic override precedence ahead of per-project overrides so a user can customize one Telegram topic without changing the whole project.
+- Kept toolbar rendering stateless apart from the persisted Telegram message id; command execution still flows through the existing gateway code paths instead of adding a second control plane.
+- Left unbound topics eligible for toolbar rendering so the action bar can be refreshed in place after bind/unbind cycles.
+
+**Proof reading notes**
+
+- Performed line-by-line review on:
+  - `src/codex_telegram_gateway/toolbar.py`
+  - `src/codex_telegram_gateway/daemon.py`
+  - `src/codex_telegram_gateway/state.py`
+  - `src/codex_telegram_gateway/models.py`
+  - `src/codex_telegram_gateway/config.py`
+  - `src/codex_telegram_gateway/ports.py`
+  - `tests/unit/test_toolbar.py`
+  - `tests/unit/test_state.py`
+  - `tests/unit/test_daemon.py`
+  - `tests/e2e/test_gateway_flow.py`
+- Defect found and fixed during proof reading:
+  - the first toolbar status callback test asserted through `non_bubble_sent_messages(...)`, which intentionally strips any message beginning with `Topic status`; the implementation was correct, so the test was fixed to assert against the raw sent-message list
+- Verified the feature under the repo’s Python 3.11 environment after the shell initially resolved to Anaconda Python 3.9, which is incompatible with the project’s `str | None` syntax.
+
+**Verification**
+
+- Focused toolbar verification:
+  - `.venv/bin/pytest tests/unit/test_toolbar.py tests/unit/test_config.py tests/unit/test_state.py tests/unit/test_daemon.py -k 'toolbar or toolbar_config_path'` -> `12 passed`
+  - `.venv/bin/pytest tests/e2e/test_gateway_flow.py -k toolbar_override_persists_across_restart` -> `1 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest` -> `336 passed`
+- Feature-specific coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.toolbar --cov-report=term-missing tests/unit/test_toolbar.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_toolbar_sends_and_refreshes_persisted_view tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_status_callback_routes_to_gateway_command tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_thread_text_callback_enqueues_bound_inbound tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_steer_callback_steers_active_turn tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_dismiss_callback_clears_persisted_view tests/e2e/test_gateway_flow.py::test_gateway_flow_toolbar_override_persists_across_restart` -> `toolbar.py 88%`
 
 ### FP-13: `/verbose` and Notification Modes
 

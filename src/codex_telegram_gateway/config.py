@@ -19,6 +19,7 @@ class GatewayConfig:
     lifecycle_autoclose_after_seconds: float = 0.0
     lifecycle_prune_interval_seconds: float = 300.0
     state_database_path: Path = Path(".codex-telegram/gateway.db")
+    toolbar_config_path: Path = Path(".codex-telegram/toolbar.toml")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
     voice_transcription_provider: str = ""
     voice_transcription_api_key: str = ""
@@ -51,6 +52,9 @@ class GatewayConfig:
         )
         state_database_path = Path(
             env.get("CODEX_TELEGRAM_STATE_DB", ".codex-telegram/gateway.db")
+        )
+        toolbar_config_path = Path(
+            env.get("CODEX_TELEGRAM_TOOLBAR_CONFIG", ".codex-telegram/toolbar.toml")
         )
         sync_mode = env.get("TELEGRAM_SYNC_MODE", "assistant_plus_alerts")
         topic_status_emoji_enabled = _env_bool(
@@ -100,6 +104,7 @@ class GatewayConfig:
             lifecycle_autoclose_after_seconds=lifecycle_autoclose_after_seconds,
             lifecycle_prune_interval_seconds=lifecycle_prune_interval_seconds,
             state_database_path=state_database_path,
+            toolbar_config_path=toolbar_config_path,
             voice_transcription_provider=voice_transcription_provider,
             voice_transcription_api_key=voice_transcription_api_key,
             voice_transcription_base_url=voice_transcription_base_url,
