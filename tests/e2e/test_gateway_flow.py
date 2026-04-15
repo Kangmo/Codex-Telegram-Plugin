@@ -1,6 +1,13 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon
-from codex_telegram_gateway.models import CodexEvent, CodexProject, CodexThread, StartedTurn, TurnResult
+from codex_telegram_gateway.models import (
+    CodexEvent,
+    CodexHistoryEntry,
+    CodexProject,
+    CodexThread,
+    StartedTurn,
+    TurnResult,
+)
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 
@@ -123,6 +130,7 @@ class FakeCodexBridge:
         self.current_thread_id = thread.thread_id
         self._threads = {thread.thread_id: thread}
         self._events: dict[str, list[CodexEvent]] = {thread.thread_id: []}
+        self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
         self.started_turns: list[StartedTurn] = []
         self.ensured_projects: list[str] = []
         self.inspect_results: dict[tuple[str, str], TurnResult] = {}
@@ -153,6 +161,9 @@ class FakeCodexBridge:
 
     def list_events(self, thread_id: str) -> list[CodexEvent]:
         return list(self._events[thread_id])
+
+    def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
+        return list(self._history_entries[thread_id])
 
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)

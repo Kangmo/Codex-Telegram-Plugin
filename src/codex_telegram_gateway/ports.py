@@ -4,8 +4,10 @@ from typing import Protocol
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
+    CodexHistoryEntry,
     CodexProject,
     CodexThread,
+    HistoryViewState,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -94,6 +96,9 @@ class CodexBridge(Protocol):
         ...
 
     def list_events(self, thread_id: str) -> list[CodexEvent]:
+        ...
+
+    def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         ...
 
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
@@ -238,6 +243,15 @@ class GatewayState(Protocol):
         *,
         limit: int = 20,
     ) -> list[TopicHistoryEntry]:
+        ...
+
+    def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
+        ...
+
+    def get_history_view(self, chat_id: int, message_thread_id: int) -> HistoryViewState | None:
+        ...
+
+    def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:

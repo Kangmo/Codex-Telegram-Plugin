@@ -6,6 +6,7 @@ from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
     CodexProject,
+    HistoryViewState,
     InboundMessage,
     OutboundMessage,
     PendingTurn,
@@ -136,6 +137,15 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 text TEXT NOT NULL,
                 local_image_paths_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS history_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                page_index INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, message_thread_id)
             );
 
             CREATE TABLE IF NOT EXISTS topic_lifecycles (
@@ -834,6 +844,67 @@ class SqliteGatewayState:
             )
             for row in rows
         ]
+
+    def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
+        self._connection.execute(
+            """
+            INSERT INTO history_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                page_index
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                page_index = excluded.page_index
+            """,
+            (
+                history_view.chat_id,
+                history_view.message_thread_id,
+                history_view.message_id,
+                history_view.codex_thread_id,
+                history_view.page_index,
+            ),
+        )
+        self._connection.commit()
+        return history_view
+
+    def get_history_view(self, chat_id: int, message_thread_id: int) -> HistoryViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                page_index
+            FROM history_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return HistoryViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            page_index=row["page_index"],
+        )
+
+    def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM history_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self._connection.execute(
