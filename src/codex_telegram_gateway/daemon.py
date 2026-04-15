@@ -36,6 +36,12 @@ from codex_telegram_gateway.service import (
     GatewayService,
     format_topic_name,
 )
+from codex_telegram_gateway.sessions_dashboard import (
+    SessionsDashboardEntry,
+    build_sessions_dashboard,
+    parse_sessions_callback,
+    render_unbind_confirmation,
+)
 from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_CANCEL,
     CALLBACK_RESUME_PAGE_PREFIX,
@@ -1289,23 +1295,96 @@ class GatewayDaemon:
         callback_query_id = str(update["callback_query_id"])
         chat_id = int(update["chat_id"])
         message_id = int(update["message_id"])
-        data = str(update["data"])
-
-        if data == _CALLBACK_SESSIONS_DISMISS:
-            self._telegram.edit_message_reply_markup(chat_id, message_id, None)
-            self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
-            return
-        if data != _CALLBACK_SESSIONS_REFRESH:
+        parsed_callback = parse_sessions_callback(str(update["data"]))
+        if parsed_callback is None:
             self._telegram.answer_callback_query(callback_query_id, "Unknown sessions action.")
             return
 
-        self._telegram.edit_message_text(
-            chat_id,
-            message_id,
-            self._bindings_dashboard_text(),
-            reply_markup=_sessions_dashboard_markup(),
-        )
-        self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+        action = str(parsed_callback["action"])
+        page_index = int(parsed_callback["page_index"])
+        target_chat_id = parsed_callback["chat_id"]
+        target_message_thread_id = parsed_callback["message_thread_id"]
+
+        if action == "dismiss":
+            self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+            self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
+            return
+
+        if action == "page":
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, f"Page {page_index + 1}.")
+            return
+
+        if action == "unbind_cancel":
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, "Cancelled.")
+            return
+
+        if action == "refresh" and target_chat_id is None:
+            self._audit_sync_state()
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+            return
+
+        assert target_chat_id is not None and target_message_thread_id is not None
+        binding = self._binding_by_topic(int(target_chat_id), int(target_message_thread_id))
+        if binding is None or not self._is_primary_binding(binding):
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
+            return
+
+        if action == "refresh":
+            self._audit_sync_state()
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, "Refreshed.")
+            return
+
+        if action == "new":
+            self._start_new_thread(
+                binding.chat_id,
+                binding.message_thread_id,
+                binding,
+                thread_title=DEFAULT_NEW_THREAD_TITLE,
+            )
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, "Started a new thread.")
+            return
+
+        if action == "unbind":
+            dashboard_entry = self._session_dashboard_entry_for_binding(binding)
+            text, reply_markup = render_unbind_confirmation(
+                dashboard_entry,
+                page_index=page_index,
+            )
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=reply_markup,
+            )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+
+        if action == "unbind_confirm":
+            self._unbind_topic(binding)
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, "Unbound.")
+            return
+
+        if action == "restore":
+            callback_text = self._restore_binding_from_dashboard(binding)
+            if callback_text == "Nothing to restore.":
+                self._telegram.answer_callback_query(callback_query_id, callback_text)
+                return
+            self._edit_sessions_dashboard_message(chat_id, message_id, page_index=page_index)
+            self._telegram.answer_callback_query(callback_query_id, callback_text)
+            return
+
+        if action == "screenshot":
+            self._telegram.answer_callback_query(
+                callback_query_id,
+                "Screenshot support is not available yet.",
+            )
+            return
 
     def _handle_history_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -1915,11 +1994,12 @@ class GatewayDaemon:
             return
 
         if command_name == "bindings":
+            text, reply_markup = self._render_sessions_dashboard(page_index=0)
             self._telegram.send_message(
                 chat_id,
                 message_thread_id,
-                self._bindings_dashboard_text(),
-                reply_markup=_sessions_dashboard_markup(),
+                text,
+                reply_markup=reply_markup,
             )
             return
 
@@ -2409,55 +2489,156 @@ class GatewayDaemon:
             unloaded_bindings=unloaded_bindings,
         )
 
-    def _bindings_dashboard_text(self) -> str:
-        bindings = self._state.list_bindings()
-        if not bindings:
-            return (
-                "Gateway bindings\n\n"
-                "No bound topics yet.\n"
-                "Open a Telegram topic and send a message, or use `/gateway create_thread` inside a bound topic."
-            )
+    def _edit_sessions_dashboard_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        page_index: int,
+    ) -> None:
+        text, reply_markup = self._render_sessions_dashboard(page_index=page_index)
+        self._telegram.edit_message_text(
+            chat_id,
+            message_id,
+            text,
+            reply_markup=reply_markup,
+        )
 
+    def _render_sessions_dashboard(self, *, page_index: int) -> tuple[str, dict[str, object]]:
+        bindings = sorted(
+            self._state.list_bindings(),
+            key=lambda item: ((item.project_id or ""), (item.topic_name or ""), item.codex_thread_id),
+        )
+        if not bindings:
+            return build_sessions_dashboard([], page_index=page_index)
+
+        return build_sessions_dashboard(
+            [self._session_dashboard_entry_for_binding(binding) for binding in bindings],
+            page_index=page_index,
+            pending_jobs=tuple(
+                f"- thread `{topic_creation_job.codex_thread_id}` -> chat `{topic_creation_job.chat_id}`"
+                for topic_creation_job in self._state.list_topic_creation_jobs()
+            ),
+        )
+
+    def _session_dashboard_entry_for_binding(self, binding: Binding) -> SessionsDashboardEntry:
         loaded_threads = {thread.thread_id: thread for thread in self._codex.list_loaded_threads()}
-        mirror_bindings_by_thread: dict[str, list[Binding]] = {}
-        for mirror_binding in self._state.list_mirror_bindings():
-            mirror_bindings_by_thread.setdefault(mirror_binding.codex_thread_id, []).append(mirror_binding)
-        lines = ["Gateway bindings", ""]
-        for binding in sorted(bindings, key=lambda item: ((item.topic_name or ""), item.codex_thread_id)):
-            thread = loaded_threads.get(binding.codex_thread_id)
-            if binding.binding_status == CLOSED_BINDING_STATUS:
-                loaded_marker = "🟡"
-            elif binding.binding_status == DELETED_BINDING_STATUS:
-                loaded_marker = "🔴"
-            else:
-                loaded_marker = "🟢" if thread is not None else "⚫"
-            project_name = Path(binding.project_id or (thread.cwd if thread else "") or "").name or "-"
-            thread_title = thread.title if thread is not None else (binding.topic_name or binding.codex_thread_id)
-            lines.append(
-                f"{loaded_marker} ({project_name}) {thread_title}\n"
-                f"topic `{binding.message_thread_id}` • thread `{binding.codex_thread_id}` • status `{binding.binding_status}`"
-            )
-            mirrors = sorted(
-                mirror_bindings_by_thread.get(binding.codex_thread_id, []),
-                key=lambda item: (item.chat_id, item.message_thread_id),
-            )
-            for mirror_binding in mirrors:
-                lines.append(
-                    f"  ↳ mirror chat `{mirror_binding.chat_id}` topic `{mirror_binding.message_thread_id}`"
-                    f" • status `{mirror_binding.binding_status}`"
+        pending_turn = self._state.get_pending_turn(binding.codex_thread_id)
+        thread = loaded_threads.get(binding.codex_thread_id)
+        topic_name = strip_topic_status_prefix(binding.topic_name or "").strip()
+        parsed_topic = _parse_topic_name(topic_name) if topic_name else None
+        project_name = (
+            Path(binding.project_id or (thread.cwd if thread else "") or "").name
+            or (parsed_topic[0] if parsed_topic else "-")
+        )
+        thread_title = thread.title if thread is not None else (parsed_topic[1] if parsed_topic else binding.codex_thread_id)
+        warning_text = self._session_dashboard_warning_text(binding, thread)
+        return SessionsDashboardEntry(
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+            topic_name=topic_name or format_topic_name(binding.project_id or (thread.cwd if thread else ""), thread_title),
+            project_name=project_name,
+            thread_title=thread_title,
+            codex_thread_id=binding.codex_thread_id,
+            thread_status=self._session_dashboard_thread_status(binding, thread, pending_turn),
+            notification_mode=binding.sync_mode,
+            mirror_count=len(self._state.list_mirror_bindings_for_thread(binding.codex_thread_id)),
+            status_icon=self._session_dashboard_status_icon(binding, thread, pending_turn),
+            warning_text=warning_text,
+            mirror_descriptions=tuple(
+                (
+                    f"mirror chat `{mirror_binding.chat_id}` "
+                    f"topic `{mirror_binding.message_thread_id}`"
                 )
-        pending_jobs = self._state.list_topic_creation_jobs()
-        if pending_jobs:
-            lines.append("")
-            lines.append("Pending mirror topic creation")
-            lines.append("")
-            for topic_creation_job in pending_jobs:
-                lines.append(
-                    f"- thread `{topic_creation_job.codex_thread_id}` -> chat `{topic_creation_job.chat_id}`"
+                for mirror_binding in sorted(
+                    self._state.list_mirror_bindings_for_thread(binding.codex_thread_id),
+                    key=lambda item: (item.chat_id, item.message_thread_id),
                 )
-        lines.append("")
-        lines.append("Use `/gateway sync` to audit bindings and recover deleted topics.")
-        return "\n".join(lines)
+            ),
+        )
+
+    @staticmethod
+    def _session_dashboard_thread_status(
+        binding: Binding,
+        thread: CodexThread | None,
+        pending_turn: PendingTurn | None,
+    ) -> str:
+        if binding.binding_status == CLOSED_BINDING_STATUS:
+            return "closed"
+        if binding.binding_status == DELETED_BINDING_STATUS:
+            return "deleted"
+        if pending_turn is not None and pending_turn.waiting_for_approval:
+            return "approval"
+        if pending_turn is not None:
+            return "running"
+        if thread is None:
+            return "notLoaded"
+        return thread.status
+
+    @staticmethod
+    def _session_dashboard_status_icon(
+        binding: Binding,
+        thread: CodexThread | None,
+        pending_turn: PendingTurn | None,
+    ) -> str:
+        if binding.binding_status == DELETED_BINDING_STATUS:
+            return "🔴"
+        if binding.binding_status == CLOSED_BINDING_STATUS:
+            return "⚫"
+        if pending_turn is not None and pending_turn.waiting_for_approval:
+            return "🟠"
+        if thread is None:
+            return "⚪"
+        return "🟢"
+
+    @staticmethod
+    def _session_dashboard_warning_text(
+        binding: Binding,
+        thread: CodexThread | None,
+    ) -> str | None:
+        if binding.binding_status == CLOSED_BINDING_STATUS:
+            return "Topic was closed in Telegram."
+        if binding.binding_status == DELETED_BINDING_STATUS:
+            return "Telegram topic is missing and can be recreated."
+        if thread is None:
+            return "Codex thread is not loaded in the app."
+        return None
+
+    def _restore_binding_from_dashboard(self, binding: Binding) -> str:
+        issue_kind = self._restore_issue_for_binding(binding)
+        if issue_kind is None:
+            return "Nothing to restore."
+
+        if issue_kind == RESTORE_ISSUE_CLOSED:
+            thread = self._codex.read_thread(binding.codex_thread_id)
+            topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
+            try:
+                self._telegram.edit_forum_topic(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    topic_name,
+                )
+            except Exception as exc:
+                if not is_topic_edit_permission_error(exc):
+                    if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                        return "This topic is no longer reachable."
+                    raise
+            restored_binding = self._save_binding(
+                replace(
+                    binding,
+                    topic_name=topic_name,
+                    binding_status=ACTIVE_BINDING_STATUS,
+                )
+            )
+            self._touch_topic_lifecycle(restored_binding.codex_thread_id, completed_at=None)
+            self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
+            return "Restored."
+
+        if issue_kind == RESTORE_ISSUE_DELETED:
+            self._service.recreate_topic(binding.codex_thread_id)
+            return "Recreated."
+
+        return "Nothing to restore."
 
 
 _CALLBACK_PROJECT_PREFIX = "tp:prj:"
@@ -2474,8 +2655,6 @@ _CALLBACK_SYNC_PREFIX = "gw:sync:"
 _CALLBACK_SYNC_FIX = f"{_CALLBACK_SYNC_PREFIX}fix"
 _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
-_CALLBACK_SESSIONS_REFRESH = f"{_CALLBACK_SESSIONS_PREFIX}refresh"
-_CALLBACK_SESSIONS_DISMISS = f"{_CALLBACK_SESSIONS_PREFIX}dismiss"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
 _CALLBACK_RESPONSE_PREFIX = "gw:resp:"
@@ -2570,17 +2749,6 @@ def _sync_report_markup(audit: _SyncAudit) -> dict[str, object] | None:
             [
                 {"text": f"🔧 Fix {audit.fixable_count}", "callback_data": _CALLBACK_SYNC_FIX},
                 {"text": "Dismiss", "callback_data": _CALLBACK_SYNC_DISMISS},
-            ]
-        ]
-    }
-
-
-def _sessions_dashboard_markup() -> dict[str, object]:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "Refresh", "callback_data": _CALLBACK_SESSIONS_REFRESH},
-                {"text": "Dismiss", "callback_data": _CALLBACK_SESSIONS_DISMISS},
             ]
         ]
     }

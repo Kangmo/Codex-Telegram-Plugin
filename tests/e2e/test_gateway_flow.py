@@ -578,3 +578,107 @@ def test_command_menu_sync_persists_observed_passthrough_commands_across_restart
         ),
     ]
     assert restarted_telegram.registered_command_sets == []
+
+
+def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> None:
+    database_path = tmp_path / "gateway.db"
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Dashboard thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state = SqliteGatewayState(database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Dashboard thread",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway bindings",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Gateway sessions\n"
+        "Page 1/1 • 1 binding\n\n"
+        "1. 🟢 `(gateway-project) Dashboard thread`\n"
+        "project `gateway-project` • thread `Dashboard thread`\n"
+        "topic `77` • id `thread-1`\n"
+        "status `idle` • notify `assistant_plus_alerts`",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                    {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                    {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                    {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                    {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                ],
+                [
+                    {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
+                    {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
+                ],
+            ]
+        },
+    )
+
+    codex.rename_thread("thread-1", "Renamed live thread")
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-dashboard-refresh",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sessions:refresh:0",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Gateway sessions\n"
+        "Page 1/1 • 1 binding\n\n"
+        "1. 🟢 `(gateway-project) Dashboard thread`\n"
+        "project `gateway-project` • thread `Renamed live thread`\n"
+        "topic `77` • id `thread-1`\n"
+        "status `idle` • notify `assistant_plus_alerts`",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "↻", "callback_data": "gw:sessions:refresh:0:-100100:77"},
+                    {"text": "➕", "callback_data": "gw:sessions:new:0:-100100:77"},
+                    {"text": "✂", "callback_data": "gw:sessions:unbind:0:-100100:77"},
+                    {"text": "📸", "callback_data": "gw:sessions:screenshot:0:-100100:77"},
+                    {"text": "♻", "callback_data": "gw:sessions:restore:0:-100100:77"},
+                ],
+                [
+                    {"text": "Refresh", "callback_data": "gw:sessions:refresh:0"},
+                    {"text": "Dismiss", "callback_data": "gw:sessions:dismiss"},
+                ],
+            ]
+        },
+    )

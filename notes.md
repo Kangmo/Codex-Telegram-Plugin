@@ -183,6 +183,10 @@
 - FP-05 Multi-chat fanout and Telegram flood-control backoff
 - FP-06 `/history`
 - FP-07 `/resume`
+- FP-08 `/unbind`
+- FP-09 `/restore`
+- FP-17 Command/menu sync
+- FP-18 Full sessions dashboard
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -280,3 +284,17 @@
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_config.py tests/unit/test_commands_catalog.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -q` -> `111 passed`
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `161 passed`
 - Feature-specific changed-statement coverage for tracked source diff is 95/108 = 88.0%.
+
+### FP-18 verification
+- Replaced the lightweight bindings dashboard with a paginated sessions dashboard backed by a dedicated `sessions_dashboard.py` renderer/parser module.
+- The dashboard now shows topic title, project, current thread title, ids, status, notification mode, recovery warnings, mirror details, and pending mirror topic-creation jobs.
+- Added per-session actions for refresh, new thread, unbind with confirmation, restore, screenshot compatibility, and page navigation.
+- Direct dashboard actions intentionally route by persisted topic identity (`chat_id + message_thread_id`) rather than mutable topic titles.
+- Proofread cleanup removed obsolete pre-FP-18 session-dashboard constants/helpers and simplified unreachable callback branches already ruled out by the parser.
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_sessions_dashboard.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "sessions_dashboard or bindings_shows_dashboard or lists_mirrors_and_pending_jobs or status_icons_and_warnings"` -> `16 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `175 passed`
+- Feature-specific coverage for tracked FP-18 source ranges:
+  - `daemon.py` FP-18 ranges: `133/146 = 91.1%`
+  - `sessions_dashboard.py`: `77/84 = 91.7%`
