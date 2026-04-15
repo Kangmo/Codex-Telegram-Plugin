@@ -1964,8 +1964,8 @@ Bring over the most useful operator actions from `ccgram` where Codex App suppor
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp23.json -q` plus diff-based changed-line audit including new source files -> `188/199 = 94.5%`
 - Branch and merge:
   - feature branch `feature/fp-23-remote-control-actions`
-  - feature commit `<pending>`
-  - merge commit on `main` `<pending>`
+  - feature commit `97657cf`
+  - merge commit on `main` `2dc886d`
 
 ## Media and Content Parity
 

@@ -647,8 +647,8 @@
 ### FP-23 verification
 - Branch and merge:
   - feature branch `feature/fp-23-remote-control-actions`
-  - feature commit `<pending>`
-  - merge commit on `main` `<pending>`
+  - feature commit `97657cf`
+  - merge commit on `main` `2dc886d`
 - Re-reviewed `ccgram` remote-control sources before implementation:
   - `/tmp/ccgram-review/src/ccgram/handlers/status_bubble.py`
   - `/tmp/ccgram-review/src/ccgram/handlers/callback_data.py`
