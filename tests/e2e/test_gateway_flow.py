@@ -17,6 +17,18 @@ from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 
 
+class StaticTranscriptionProvider:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def transcribe(self, audio_path):
+        del audio_path
+        return __import__("codex_telegram_gateway.voice_ingest", fromlist=["TranscriptionResult"]).TranscriptionResult(
+            text=self.text,
+            language="en",
+        )
+
+
 class FakeTelegramClient:
     """In-memory Telegram bot stub used by the end-to-end contract."""
 
@@ -1247,4 +1259,67 @@ def test_gateway_flow_sends_artifact_events_back_to_telegram(tmp_path) -> None:
     ]
     assert telegram.sent_photos == [
         (-100100, binding.message_thread_id, str(artifact_path), "Artifact: artifacts/diagram.png")
+    ]
+
+
+def test_gateway_flow_transcribes_voice_and_routes_confirmed_text_to_codex(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    voice_path = tmp_path / ".ccgram-uploads" / "voice.ogg"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"ogg-bytes")
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Voice flow",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    service = GatewayService(config=config, state=state, telegram=telegram, codex=codex)
+    binding = service.link_current_thread()
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        transcriber=StaticTranscriptionProvider("Please continue with the deployment."),
+    )
+
+    telegram._updates.append(
+        {
+            "kind": "voice_message",
+            "update_id": 1,
+            "chat_id": -100100,
+            "message_thread_id": binding.message_thread_id,
+            "from_user_id": 111,
+            "file_path": str(voice_path),
+        }
+    )
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-voice-send",
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        message_id=1,
+        from_user_id=111,
+        data="gw:voice:send",
+    )
+
+    daemon.poll_telegram_once()
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-1",
+            text="Please continue with the deployment.",
+            local_image_paths=(),
+        )
     ]

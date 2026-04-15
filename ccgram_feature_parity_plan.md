@@ -57,7 +57,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
 | FP-24 | General file intake and unsupported-content UX | P0 | Native | Implemented |
 | FP-25 | Outbound media/file delivery | P0 | Native | Implemented |
-| FP-26 | Voice transcription flow | P1 | Native | Missing |
+| FP-26 | Voice transcription flow | P1 | Native | Implemented |
 | FP-27 | Inline query support | P2 | Native | Missing |
 | FP-28 | Inter-agent messaging/mailbox | P3 | Separate subsystem | Not recommended for near-term parity |
 | FP-29 | Shell/NL-to-command mode | P3 | Separate subsystem | Not recommended for this plugin |
@@ -192,9 +192,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-26: Voice Transcription Flow
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-27: Inline Query Support
 - [ ] Implemented
@@ -1884,29 +1884,98 @@ Match `ccgram`’s voice-message workflow with confirm/discard behavior.
 
 **Dev design**
 
-- Transcribe voice notes using a pluggable provider:
-  - local Whisper
-  - API-based transcription
-- Show inline keyboard:
-  - send
-  - discard
-  - optionally edit text before send in a future iteration
+- Normalize Telegram voice notes into a dedicated `voice_message` update kind instead of routing them through the generic unsupported-media path.
+- Keep transcription pluggable with an explicit provider boundary:
+  - OpenAI-compatible HTTP providers for `openai` and `groq`
+  - config-driven defaults for base URL, model, API key, and optional language
+- Persist one active voice-confirmation widget per topic so callback routing survives daemon restart and cannot drift across threads.
+- Reuse the existing queue and project-picker flows:
+  - bound topic: confirmed transcript becomes a normal queued inbound Codex message
+  - unbound topic: confirmed transcript opens the existing project picker with `pending_text`
 
 **Implementation plan**
 
-1. Add `voice_ingest.py` and `voice_callbacks.py`.
-2. Define `TranscriptionProvider` interface.
-3. Save pending transcript state by topic/message id.
-4. On confirm, send transcript into Codex as a normal queued user message.
+1. Add `voice_ingest.py`:
+   - `TranscriptionProvider`
+   - `TranscriptionResult`
+   - OpenAI-compatible multipart transcription client
+   - voice prompt rendering and callback parsing helpers
+2. Extend gateway config, normalized models, and persistence:
+   - add voice-transcription env vars to `GatewayConfig`
+   - add `VoicePromptViewState`
+   - persist voice prompt state in SQLite and the state protocol
+3. Extend `telegram_api.py` voice intake:
+   - download Telegram voice files into `.ccgram-uploads`
+   - generate stable `.ogg` filenames
+   - emit `voice_message` updates with local file paths
+4. Wire `daemon.py` voice handling:
+   - transcribe on receipt
+   - show confirm/discard widget
+   - on confirm, queue transcript or open the project picker
+   - on discard, clear the widget state cleanly
+5. Clear voice prompt state anywhere topic/thread ownership changes:
+   - resume/rebind
+   - bind-to-project
+   - new-thread creation
+   - unbind
+   - deleted/missing Telegram topic handling
 
 **Test automation plan**
 
 - Unit:
-  - transcript persistence and callback flow
+  - voice prompt rendering and callback parsing
+  - provider construction defaults and unknown-provider rejection
+  - OpenAI-compatible multipart request generation and transcript parsing
+  - SQLite voice-prompt persistence
+  - Telegram voice download normalization
+  - daemon confirm/discard and bound/unbound callback routing
 - Integration:
-  - fake transcriber returns text and Telegram callback sends it to Codex
+  - fake transcriber returns a transcript and the daemon routes the confirmed text into the existing inbound queue
 - E2E:
-  - send a short voice note, confirm send, verify thread receives transcript text
+  - send a voice update into a topic, confirm the transcription widget, and verify the resulting transcript reaches the Codex thread
+
+### FP-26 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-26-voice-transcription-flow`
+- Reviewed `ccgram` voice-handling references before coding the parity path:
+  - `src/ccgram/handlers/voice_handler.py`
+  - `src/ccgram/handlers/voice_callbacks.py`
+  - `src/ccgram/whisper/base.py`
+  - `src/ccgram/whisper/__init__.py`
+- Added `voice_ingest.py` so the voice-note parity path has one focused module for:
+  - provider selection
+  - OpenAI-compatible multipart uploads
+  - confirm/discard widget rendering
+  - callback parsing
+- `TelegramBotClient.get_updates()` now downloads Telegram voice notes into `.ccgram-uploads` and emits dedicated `voice_message` updates instead of folding them into unsupported-media notices.
+- `GatewayDaemon` now:
+  - transcribes inbound voice notes through an injected or config-built transcriber
+  - sends a confirm/discard widget into the same Telegram topic
+  - persists one `VoicePromptViewState` per topic
+  - routes confirmed transcripts either into the bound Codex thread queue or into the existing project-picker flow for unbound topics
+- Implementation decisions locked during FP-26:
+  - the gateway does not auto-submit transcripts; it matches `ccgram`’s explicit user-confirmation model
+  - provider support is intentionally narrow for now:
+    - `openai`
+    - `groq`
+    - other providers fail fast instead of silently degrading
+  - unbound-topic voice notes intentionally reuse the existing project picker instead of introducing a second binding UX
+  - only one active voice prompt is kept per topic to avoid stale callback routing
+- Proofread fixes before sign-off:
+  - stale voice prompt state is now cleared on resume, project rebind, new-thread creation, unbind, and deleted-topic cleanup so a transcript cannot land in the wrong Codex thread after topic ownership changes
+  - voice download routing now runs before the generic attachment/unsupported path so voice notes are not silently swallowed by the broader media normalization logic
+  - the multipart transcription request now writes explicit `Authorization` and `Content-Type` headers onto the `urllib` request object so the upload contract is stable and testable
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_voice_ingest.py tests/unit/test_config.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `210 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `306 passed`
+- Feature-specific module coverage report:
+  - `src/codex_telegram_gateway/voice_ingest.py`: `64/72 = 88.9%`
+  - `src/codex_telegram_gateway/config.py`: `95/103 = 92.2%`
+  - `src/codex_telegram_gateway/state.py`: `366/379 = 96.6%`
+  - `src/codex_telegram_gateway/models.py`: `158/158 = 100.0%`
+  - targeted changed-module set total: `2658/3199 = 83.1%`
 
 ### FP-27: Inline Query Support
 

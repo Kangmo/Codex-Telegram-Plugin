@@ -22,4 +22,4 @@ Produce a feature-by-feature parity plan for the missing `ccgram` Telegram gatew
 ## Errors Encountered
 
 ## Status
-**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-09, FP-11, FP-13, FP-17, FP-18, FP-19, FP-20, FP-21, FP-24, and FP-25 are complete and merged to `main`. The next highest-priority unfinished feature is FP-26 voice transcription flow.
+**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-09, FP-11, FP-13, FP-17, FP-18, FP-19, FP-20, FP-21, FP-24, FP-25, and FP-26 are complete. The next highest-priority unfinished feature is FP-27 inline query support.

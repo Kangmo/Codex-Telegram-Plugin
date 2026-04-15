@@ -20,6 +20,7 @@ from codex_telegram_gateway.models import (
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
+    VoicePromptViewState,
 )
 
 
@@ -179,6 +180,17 @@ class SqliteGatewayState:
                 codex_thread_id TEXT NOT NULL,
                 prompt_id TEXT NOT NULL,
                 prompt_kind TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS voice_prompt_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                source_update_id INTEGER NOT NULL,
+                from_user_id INTEGER NOT NULL,
+                transcript_text TEXT NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1247,6 +1259,80 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM interactive_prompt_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_voice_prompt_view(
+        self,
+        voice_prompt_view: VoicePromptViewState,
+    ) -> VoicePromptViewState:
+        self._connection.execute(
+            """
+            INSERT INTO voice_prompt_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                source_update_id,
+                from_user_id,
+                transcript_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                source_update_id = excluded.source_update_id,
+                from_user_id = excluded.from_user_id,
+                transcript_text = excluded.transcript_text
+            """,
+            (
+                voice_prompt_view.chat_id,
+                voice_prompt_view.message_thread_id,
+                voice_prompt_view.message_id,
+                voice_prompt_view.codex_thread_id,
+                voice_prompt_view.source_update_id,
+                voice_prompt_view.from_user_id,
+                voice_prompt_view.transcript_text,
+            ),
+        )
+        self._connection.commit()
+        return voice_prompt_view
+
+    def get_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> VoicePromptViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                source_update_id,
+                from_user_id,
+                transcript_text
+            FROM voice_prompt_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return VoicePromptViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            source_update_id=row["source_update_id"],
+            from_user_id=row["from_user_id"],
+            transcript_text=row["transcript_text"],
+        )
+
+    def delete_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM voice_prompt_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

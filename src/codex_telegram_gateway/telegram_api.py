@@ -153,6 +153,22 @@ class TelegramBotClient:
             text = message.get("text")
             caption = message.get("caption")
             local_image_paths = self._extract_local_image_paths(message)
+            if not local_image_paths:
+                saved_voice = self._extract_saved_voice(message)
+                if saved_voice is not None:
+                    if not isinstance(sender, dict):
+                        continue
+                    updates.append(
+                        {
+                            "kind": "voice_message",
+                            "update_id": int(update["update_id"]),
+                            "chat_id": int(chat["id"]),
+                            "message_thread_id": message_thread_id,
+                            "from_user_id": int(sender["id"]),
+                            "file_path": saved_voice.file_path,
+                        }
+                    )
+                    continue
             attachment_prompt = ""
             if not local_image_paths:
                 saved_attachment = self._extract_saved_attachment(message)
@@ -447,6 +463,25 @@ class TelegramBotClient:
 
         return None
 
+    def _extract_saved_voice(self, message: dict[str, object]) -> SavedAttachment | None:
+        voice = message.get("voice")
+        if not isinstance(voice, dict):
+            return None
+        file_id = voice.get("file_id")
+        if not isinstance(file_id, str):
+            return None
+        file_name = _sanitize_filename(_generated_voice_name(voice))
+        saved_path = self._download_to_uploads(
+            file_id=file_id,
+            file_name=file_name,
+            file_size=_as_int(voice.get("file_size")),
+        )
+        return SavedAttachment(
+            file_path=str(saved_path),
+            media_kind="voice",
+            original_file_name=file_name,
+        )
+
     def _download_generic_attachment(
         self,
         payload: dict[str, object],
@@ -710,11 +745,15 @@ def _generated_attachment_name(prefix: str, payload: dict[str, object]) -> str:
     return f"{prefix}_{timestamp}_{unique_id}{suffix}"
 
 
+def _generated_voice_name(payload: dict[str, object]) -> str:
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    unique_id = str(payload.get("file_unique_id") or payload.get("file_id") or "voice")[:8]
+    return f"voice_{timestamp}_{unique_id}.ogg"
+
+
 def _unsupported_content_kind(message: dict[str, object]) -> str | None:
     if isinstance(message.get("sticker"), dict):
         return "sticker"
-    if isinstance(message.get("voice"), dict):
-        return "voice"
     if any(
         key in message
         for key in (

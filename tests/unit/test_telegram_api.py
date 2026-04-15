@@ -184,6 +184,40 @@ def test_get_updates_returns_unsupported_message_for_sticker() -> None:
     ]
 
 
+def test_get_updates_downloads_voice_and_returns_voice_message(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 8,
+                "message": {
+                    "message_id": 106,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "voice": {
+                        "file_id": "voice-1",
+                        "file_unique_id": "voice-unique-1",
+                        "mime_type": "audio/ogg",
+                        "file_size": 2048,
+                    },
+                },
+            }
+        ]
+    )
+
+    updates = client.get_updates()
+
+    assert len(updates) == 1
+    assert updates[0]["kind"] == "voice_message"
+    assert updates[0]["update_id"] == 8
+    assert updates[0]["chat_id"] == -100100
+    assert updates[0]["message_thread_id"] == 77
+    assert updates[0]["from_user_id"] == 111
+    assert str(updates[0]["file_path"]).startswith(f"{tmp_path}/.ccgram-uploads/voice_")
+    assert str(updates[0]["file_path"]).endswith(".ogg")
+
+
 def test_get_updates_skips_unsupported_message_without_sender() -> None:
     client = StubTelegramBotClient(
         [
@@ -293,7 +327,7 @@ def test_document_media_kind_generated_name_and_unsupported_kind_helpers() -> No
     assert generated_name.startswith("video_")
     assert generated_name.endswith("_unique-v.mp4")
 
-    assert _unsupported_content_kind({"voice": {"file_id": "voice-1"}}) == "voice"
+    assert _unsupported_content_kind({"voice": {"file_id": "voice-1"}}) is None
     assert _unsupported_content_kind({"animation": {}}) == "generic"
     assert _unsupported_content_kind({"text": "hello"}) is None
 
