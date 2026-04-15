@@ -328,8 +328,8 @@ Code review notes:
 Branch and status:
 
 - Feature branch: `feature/fp-08-unbind`
-- Feature commit: to be filled after branch commit
-- Merge commit on `main`: to be filled after merge
+- Feature commit: `f7a8d9e`
+- Merge commit on `main`: `4ded88a`
 
 Implementation decisions:
 
