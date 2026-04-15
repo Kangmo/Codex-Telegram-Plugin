@@ -1743,6 +1743,30 @@ class GatewayDaemon:
             self._open_resume_picker(binding)
             return
 
+        if command_name == "unbind":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            if not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
+            mirror_count = self._unbind_topic(binding)
+            thread = self._codex.read_thread(binding.codex_thread_id)
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                _unbind_message_text(
+                    thread_title=thread.title,
+                    codex_thread_id=binding.codex_thread_id,
+                    mirror_count=mirror_count,
+                ),
+            )
+            return
+
         if command_name == "bindings":
             self._telegram.send_message(
                 chat_id,
@@ -1926,6 +1950,74 @@ class GatewayDaemon:
             ),
         )
         return True
+
+    def _unbind_topic(self, binding: Binding) -> int:
+        mirror_bindings = self._state.list_mirror_bindings_for_thread(binding.codex_thread_id)
+        for target in [binding, *mirror_bindings]:
+            unbound_topic_name = self._unbound_topic_name(target)
+            try:
+                if unbound_topic_name:
+                    self._telegram.edit_forum_topic(
+                        target.chat_id,
+                        target.message_thread_id,
+                        unbound_topic_name,
+                    )
+            except Exception as exc:
+                if not (
+                    is_missing_topic_error(exc)
+                    or is_topic_edit_permission_error(exc)
+                ):
+                    raise
+            self._state.upsert_topic_project(
+                TopicProject(
+                    chat_id=target.chat_id,
+                    message_thread_id=target.message_thread_id,
+                    topic_name=unbound_topic_name,
+                    project_id=None,
+                    picker_message_id=None,
+                )
+            )
+            self._state.set_topic_project_last_seen(
+                target.chat_id,
+                target.message_thread_id,
+                time.time(),
+            )
+            self._state.delete_history_view(target.chat_id, target.message_thread_id)
+            self._state.delete_resume_view(target.chat_id, target.message_thread_id)
+            self._state.delete_topic_history(target.chat_id, target.message_thread_id)
+            self._clear_typing_state(target.chat_id, target.message_thread_id)
+            self._clear_topic_status_override(target.chat_id, target.message_thread_id)
+
+        self._state.delete_pending_turn(binding.codex_thread_id)
+        self._state.delete_pending_inbound_for_thread(binding.codex_thread_id)
+        self._state.delete_topic_lifecycle(binding.codex_thread_id)
+        self._state.delete_outbound_messages(binding.codex_thread_id)
+        for mirror_binding in mirror_bindings:
+            self._state.delete_mirror_outbound_messages(
+                binding.codex_thread_id,
+                chat_id=mirror_binding.chat_id,
+            )
+            self._state.delete_mirror_binding(
+                binding.codex_thread_id,
+                chat_id=mirror_binding.chat_id,
+            )
+        for topic_creation_job in self._state.list_topic_creation_jobs():
+            if topic_creation_job.codex_thread_id != binding.codex_thread_id:
+                continue
+            self._state.delete_topic_creation_job(
+                topic_creation_job.codex_thread_id,
+                topic_creation_job.chat_id,
+            )
+        self._state.delete_binding(binding.codex_thread_id)
+        return len(mirror_bindings)
+
+    def _unbound_topic_name(self, binding: Binding) -> str | None:
+        topic_name = strip_topic_status_prefix(binding.topic_name or "").strip()
+        if topic_name:
+            return topic_name
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        fallback_name = format_topic_name(binding.project_id or thread.cwd, thread.title).strip()
+        return fallback_name or None
 
     def _topic_name_for_command(self, chat_id: int, message_thread_id: int) -> str | None:
         binding = self._binding_by_topic(chat_id, message_thread_id)
@@ -2195,6 +2287,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("threads", "List loaded Codex App threads"),
     _BotCommand("history", "Show paginated history for this Codex thread"),
     _BotCommand("resume", "Resume another Codex thread from this project"),
+    _BotCommand("unbind", "Detach this Telegram topic from its Codex thread"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),
@@ -2423,6 +2516,29 @@ def _turn_status_text(terminal_status: str) -> str:
 
 def _mirror_control_text() -> str:
     return "Mirror topics can chat with Codex, but project and thread controls stay in the primary topic."
+
+
+def _unbind_message_text(
+    *,
+    thread_title: str,
+    codex_thread_id: str,
+    mirror_count: int,
+) -> str:
+    lines = [
+        "✂ Unbound this topic from Codex thread.",
+        "",
+        f"Thread title: `{thread_title}`",
+        f"Thread id: `{codex_thread_id}`",
+    ]
+    if mirror_count > 0:
+        lines.append(
+            f"Detached `{mirror_count}` mirror topic(s) for the same Codex thread."
+        )
+    lines.append("The Codex thread is still available in Codex App.")
+    lines.append(
+        "Send a message in this topic to choose a project and create or bind a new thread."
+    )
+    return "\n".join(lines)
 
 
 def _is_terminal_turn_status(status: str) -> bool:

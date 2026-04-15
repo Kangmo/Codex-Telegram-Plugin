@@ -231,3 +231,16 @@
 - Fixed one real implementation gap during testing: rebinding to a `notLoaded` thread now explicitly calls `thread/resume`, so outbound sync can continue on the resumed thread.
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `135 passed`
 - Feature-specific changed-statement coverage versus `main` is 115/139 = 82.7%.
+
+### FP-08 verification
+- Added `/gateway unbind` as a real detach flow rather than overloading `closed` or `deleted` binding status.
+- Added persistence helpers to delete primary bindings, mirror bindings, pending inbound queue items for a thread, and topic history rows.
+- Unbind now clears pending turn state, outbound message mappings, topic-scoped history/resume views, topic recall history, and pending mirror-creation jobs for the detached thread.
+- Unbind leaves the Codex thread alive, strips topic-status prefixes, and returns the topic to unbound project-picker mode on the next inbound message.
+- Mirror topics explicitly reject `/gateway unbind`; when a primary topic is unbound, its mirrors are detached too because the current sync loop is primary-binding anchored.
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_state.py -q` -> `14 passed`
+- Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `139 passed`
+- Feature-specific changed-statement coverage for source diff is 58/67 = 86.6%.

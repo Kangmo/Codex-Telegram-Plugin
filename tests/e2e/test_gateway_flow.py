@@ -351,3 +351,63 @@ def test_gateway_flow_end_to_end_with_photo_message(tmp_path) -> None:
         )
     ]
     assert state.get_pending_turn("thread-1") is not None
+
+
+def test_gateway_unbind_flow_returns_topic_to_project_picker(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Investigate gateway cleanup",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+
+    service = GatewayService(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    binding = service.link_current_thread()
+    telegram.clear_sent_messages()
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        from_user_id=111,
+        text="/gateway unbind",
+    )
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_topic(-100100, binding.message_thread_id) is None
+    assert state.get_topic_project(-100100, binding.message_thread_id) is not None
+    assert telegram.sent_messages[-1][2].startswith("✂ Unbound this topic from Codex thread.")
+
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        from_user_id=111,
+        text="Bind this somewhere else.",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1][2].startswith("Select Codex Project")
+    assert state.get_topic_project(-100100, binding.message_thread_id) is not None

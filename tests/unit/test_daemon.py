@@ -1,5 +1,6 @@
+import pytest
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.daemon import GatewayDaemon, _parse_topic_name
+from codex_telegram_gateway.daemon import GatewayDaemon, _mirror_control_text, _parse_topic_name
 from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
 from codex_telegram_gateway.resume_command import (
     CALLBACK_RESUME_CANCEL,
@@ -19,6 +20,7 @@ from codex_telegram_gateway.models import (
     DELETED_BINDING_STATUS,
     HistoryViewState,
     InboundMessage,
+    OutboundMessage,
     PendingTurn,
     ResumeViewState,
     StartedTurn,
@@ -44,12 +46,13 @@ def make_binding(*, binding_status: str = ACTIVE_BINDING_STATUS) -> Binding:
     )
 
 
-def make_config() -> GatewayConfig:
+def make_config(**overrides) -> GatewayConfig:
     return GatewayConfig(
         telegram_bot_token="token",
         telegram_allowed_user_ids={111},
         telegram_default_chat_id=-100100,
         sync_mode="assistant_plus_alerts",
+        **overrides,
     )
 
 
@@ -1210,6 +1213,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway threads - List loaded Codex App threads\n"
             "/gateway history - Show paginated history for this Codex thread\n"
             "/gateway resume - Resume another Codex thread from this project\n"
+            "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
             "/gateway bindings - List Codex thread to Telegram topic bindings\n"
             "/gateway create_thread - Create a new Codex thread in this topic\n"
             "/gateway project - Choose or switch the Codex project for this topic\n"
@@ -1221,6 +1225,204 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             None,
         )
     ]
+
+
+def test_poll_telegram_once_gateway_unbind_detaches_primary_and_mirror_topics() -> None:
+    state = DummyState()
+    primary = make_binding()
+    mirror = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100200,
+        message_thread_id=88,
+        topic_name="🟢 (gateway-project) thread-1",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    state.create_binding(primary)
+    state.upsert_mirror_binding(mirror)
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=9,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="queued before unbind",
+        )
+    )
+    state.record_topic_history(-100100, 77, text="recent primary message")
+    state.record_topic_history(-100200, 88, text="recent mirror message")
+    state.upsert_history_view(
+        HistoryViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=41,
+            codex_thread_id="thread-1",
+            page_index=0,
+        )
+    )
+    state.upsert_resume_view(
+        ResumeViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=42,
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            page_index=0,
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    state.upsert_outbound_message(
+        OutboundMessage(
+            codex_thread_id="thread-1",
+            event_id="event-1",
+            telegram_message_ids=(101,),
+            text="assistant output",
+        )
+    )
+    state.upsert_mirror_outbound_message(
+        OutboundMessage(
+            codex_thread_id="thread-1",
+            event_id="event-1",
+            telegram_message_ids=(202,),
+            text="assistant output",
+        ),
+        chat_id=-100200,
+        message_thread_id=88,
+    )
+    state.upsert_topic_creation_job(
+        TopicCreationJob(
+            codex_thread_id="thread-1",
+            chat_id=-100300,
+            topic_name="(gateway-project) thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway unbind",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(telegram_mirror_chat_ids=(-100200,)),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_topic(-100100, 77) is None
+    with pytest.raises(KeyError):
+        state.get_binding_by_thread("thread-1")
+    assert state.list_mirror_bindings_for_thread("thread-1") == []
+    assert state.pending_inbound_count() == 0
+    assert state.get_pending_turn("thread-1") is None
+    assert state.get_outbound_message("thread-1", "event-1") is None
+    assert state.get_mirror_outbound_message(
+        "thread-1",
+        "event-1",
+        chat_id=-100200,
+        message_thread_id=88,
+    ) is None
+    assert state.list_topic_creation_jobs() == []
+    assert state.get_history_view(-100100, 77) is None
+    assert state.get_resume_view(-100100, 77) is None
+    assert state.list_topic_history(-100100, 77) == []
+    assert state.list_topic_history(-100200, 88) == []
+    assert state.get_topic_project(-100100, 77) == TopicProject(
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="(gateway-project) thread-1",
+        project_id=None,
+        picker_message_id=None,
+    )
+    assert state.get_topic_project(-100200, 88) == TopicProject(
+        chat_id=-100200,
+        message_thread_id=88,
+        topic_name="(gateway-project) thread-1",
+        project_id=None,
+        picker_message_id=None,
+    )
+    assert state.get_topic_project_last_seen(-100100, 77) is not None
+    assert state.get_topic_project_last_seen(-100200, 88) is not None
+    assert telegram.edited_topics == [
+        (-100100, 77, "(gateway-project) thread-1"),
+        (-100200, 88, "(gateway-project) thread-1"),
+    ]
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "✂ Unbound this topic from Codex thread.\n\n"
+            "Thread title: `thread-1`\n"
+            "Thread id: `thread-1`\n"
+            "Detached `1` mirror topic(s) for the same Codex thread.\n"
+            "The Codex thread is still available in Codex App.\n"
+            "Send a message in this topic to choose a project and create or bind a new thread.",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_unbind_rejects_mirror_topic_controls() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            message_thread_id=88,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100200,
+        message_thread_id=88,
+        from_user_id=111,
+        text="/gateway unbind",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(telegram_mirror_chat_ids=(-100200,)),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_thread("thread-1").message_thread_id == 77
+    assert state.get_mirror_binding_by_topic(-100200, 88) is not None
+    assert telegram.sent_messages == [(-100200, 88, _mirror_control_text(), None)]
 
 
 def test_poll_telegram_once_gateway_history_renders_latest_page_and_persists_view() -> None:

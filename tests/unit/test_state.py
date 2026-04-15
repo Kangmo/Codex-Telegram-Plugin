@@ -100,6 +100,75 @@ def test_sqlite_state_persists_binding_status_updates(tmp_path) -> None:
     assert state.get_binding_by_topic(-100100, 77) == closed
 
 
+def test_sqlite_state_deletes_detached_binding_runtime_state(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    primary = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100100,
+        message_thread_id=77,
+        topic_name="(gateway-project) thread-1",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    mirror = Binding(
+        codex_thread_id="thread-1",
+        chat_id=-100200,
+        message_thread_id=88,
+        topic_name="(gateway-project) thread-1",
+        sync_mode="assistant_plus_alerts",
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+    )
+    inbound = InboundMessage(
+        telegram_update_id=5,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        codex_thread_id="thread-1",
+        text="queued message",
+    )
+    outbound = OutboundMessage(
+        codex_thread_id="thread-1",
+        event_id="event-1",
+        telegram_message_ids=(10,),
+        text="assistant output",
+    )
+
+    state.create_binding(primary)
+    state.upsert_mirror_binding(mirror)
+    state.enqueue_inbound(inbound)
+    state.upsert_outbound_message(outbound)
+    state.upsert_mirror_outbound_message(outbound, chat_id=-100200, message_thread_id=88)
+    state.record_topic_history(-100100, 77, text="recent")
+    state.record_topic_history(-100200, 88, text="mirror recent")
+
+    state.delete_pending_inbound_for_thread("thread-1")
+    state.delete_outbound_messages("thread-1")
+    state.delete_mirror_outbound_messages("thread-1", chat_id=-100200)
+    state.delete_topic_history(-100100, 77)
+    state.delete_topic_history(-100200, 88)
+    state.delete_mirror_binding("thread-1", chat_id=-100200)
+    state.delete_binding("thread-1")
+
+    assert state.list_pending_inbound() == []
+    assert state.get_outbound_message("thread-1", "event-1") is None
+    assert state.get_mirror_outbound_message(
+        "thread-1",
+        "event-1",
+        chat_id=-100200,
+        message_thread_id=88,
+    ) is None
+    assert state.list_topic_history(-100100, 77) == []
+    assert state.list_topic_history(-100200, 88) == []
+    assert state.get_binding_by_topic(-100100, 77) is None
+    assert state.get_mirror_binding_by_topic(-100200, 88) is None
+    try:
+        state.get_binding_by_thread("thread-1")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("Expected deleted binding lookup to raise KeyError")
+
+
 def test_sqlite_state_persists_loaded_projects_and_topic_project_selection(tmp_path) -> None:
     state = SqliteGatewayState(tmp_path / "gateway.db")
     project = CodexProject(

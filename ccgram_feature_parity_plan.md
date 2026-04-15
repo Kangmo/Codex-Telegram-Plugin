@@ -102,9 +102,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-08: `/unbind`
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-09: `/restore` and Rich Recovery Flows
 - [ ] Implemented
@@ -210,6 +210,162 @@ Update these checkboxes as each feature lands.
 - [ ] Implemented
 - [ ] Test automation coverage more than 80%
 - [ ] Line by line proof reading for code review done
+
+## Documentation Discipline
+
+This file is the tracker of record for the full parity program. For every feature branch before merge to `main`, update this document with:
+
+- implementation decisions and any design changes from the original plan
+- automated test scope, commands run, and changed-line coverage result
+- line-by-line code review notes, including defects found and fixed during proof reading
+- branch name, commit SHA, and merge commit SHA once the feature is complete
+
+Do not treat the checkbox tracker as sufficient by itself. A feature is not considered done until the three checkboxes are complete and its implementation/test/code-review notes are written here.
+
+## Project-Wide Decisions Collected From Chat
+
+These decisions are already fixed unless a later feature explicitly supersedes them.
+
+- The gateway is for the macOS Codex App, not Codex CLI history. Thread/project discovery must come from Codex App runtime or Codex App local store, never from CLI session history.
+- Routing key is `codex_thread_id <-> (chat_id, message_thread_id)`. Topic titles are metadata only and may change at any time.
+- Bindings must persist on disk in SQLite. Topic title drift must never affect delivery routing.
+- New Telegram topic titles are canonicalized as `(<project name>) <thread title>`.
+- If a Telegram topic is created manually and receives its first message unbound, the bot must reply with a project selection flow like `ccgram`.
+- New-project selection from Telegram must support choosing an existing loaded Codex App project or browsing folders starting at the macOS user home directory. Absolute-path free-text entry is intentionally not the UX.
+- Choosing a folder from Telegram creates or exposes that project in Codex App, creates a new thread titled `untitled`, binds the topic, and renames the topic to `(<project>) untitled`.
+- When Codex later renames that thread from `untitled` to a real title, Telegram topic rename sync must follow automatically.
+- The plugin must be installable into Codex App and must use an MCP/plugin path that runs inside Codex App context.
+- On plugin startup, loaded Codex App projects/threads should sync automatically into Telegram topics.
+- Typing indicators should appear as soon as a Telegram message starts processing and continue while Codex is still answering or waiting for approval.
+- Outbound assistant text should edit the same Telegram message while the same Codex message block is growing; a new Telegram message is only sent when Codex starts a new assistant block.
+- If a user sends a message while Codex is still answering, the gateway queues it, echoes that it was queued, and offers a real `Steer` control that maps to Codex App `turn/steer`.
+- Telegram images must be ingested and delivered to Codex as real local image inputs, not reduced to a path string only.
+- Telegram bot API cannot force chat read receipts, so `vv`/read state is not a supported feature.
+- Mirror topics are conversation surfaces only. Project/thread management actions stay in the primary topic unless a later feature explicitly broadens that rule.
+- Slash commands are passed through to Codex as plain thread input unless they use the reserved `/gateway ...` namespace.
+- The gateway should adopt `ccgram` behavior where it fits the Codex App architecture, but tmux-only behaviors must be adapted or explicitly unsupported rather than emulated poorly.
+
+## Completed Feature Journal
+
+This section summarizes the work already completed before the remaining backlog items.
+
+### FP-01 to FP-05 Summary
+
+Implementation decisions:
+
+- Topic lifecycle state uses persisted `binding_status` and topic-lifecycle timestamps instead of in-memory flags.
+- Inbound Telegram topic close/reopen/edit service events are normalized in the polling layer.
+- Topic rename sync is guarded so only safe thread-title changes flow back into Codex App; malformed project-prefix edits are corrected back to the canonical format.
+- Topic emoji/status behavior is adapted to title-prefix status markers with chat-level suppression after Telegram permission failures.
+- Lifecycle sweeps cover topic probing, autoclose, unbound-topic TTL expiry, and pruning of stale topic-scoped state.
+- Multi-chat support is implemented as one primary binding plus zero or more mirror bindings with persisted topic-creation jobs and retry-after handling.
+
+Test and verification notes:
+
+- FP-02 changed-line coverage: `46/46 = 100.0%`
+- FP-03 changed-line coverage: `77/81 = 95.1%`
+- FP-04 changed-line coverage: `152/169 = 89.9%`
+- FP-05 changed-line coverage: `225/261 = 86.2%`
+
+Code review notes:
+
+- Fixed lifecycle cleanup so missing-topic probes remove topic-lifecycle rows, not only binding state.
+- Fixed reopen/new-inbound handling so `completed_at` is actually cleared when activity resumes.
+- Hardened mirror controls so mirror topics cannot run project/thread management actions intended for the primary topic.
+
+### FP-06: `/history`
+
+Branch and merge:
+
+- Feature branch: `feature/fp-06-history`
+- Feature commit: `6517676`
+- Merge commit on `main`: `2eaef9e`
+
+Implementation decisions:
+
+- History is rendered from Codex App `thread/read` items, not from terminal transcript bytes.
+- A dedicated `history_command.py` module owns pagination and rendering.
+- History-view callback context is persisted in SQLite so paging survives daemon restarts.
+
+Test and verification notes:
+
+- Full-suite verification at completion: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `123 passed`
+- Changed-line coverage: `142/166 = 85.5%`
+
+Code review notes:
+
+- Fixed history summarization to prefer concrete command failure lines over vague `failed` text.
+- Fixed pagination rendering so later pages repeat the thread header instead of losing context.
+- Corrected one test bug where a fake command output used literal `\\n` instead of a real newline.
+
+### FP-07: `/resume`
+
+Branch and merge:
+
+- Feature branch: `feature/fp-07-resume`
+- Feature commit: `a88a96f`
+- Merge commit on `main`: `fa28a34`
+
+Implementation decisions:
+
+- Resume discovery is project-scoped and uses Codex App local store data, not Telegram topic history or CLI session history.
+- The existing Telegram topic is rebound to the chosen older thread instead of creating a new topic.
+- Historical assistant events for the resumed thread are marked seen immediately to avoid replaying old content.
+- If the chosen thread is `notLoaded`, the gateway explicitly resumes it through Codex App before rebinding.
+
+Test and verification notes:
+
+- Full-suite verification at completion: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `135 passed`
+- Changed-line coverage: `115/139 = 82.7%`
+
+Code review notes:
+
+- Fixed a real gap where rebinding to a non-loaded thread updated the DB but did not actually load the thread into Codex App.
+- Improved stale-picker behavior so empty resume pages clear the existing picker instead of leaving a dangling control message.
+
+### FP-08: `/unbind`
+
+Branch and status:
+
+- Feature branch: `feature/fp-08-unbind`
+- Feature commit: to be filled after branch commit
+- Merge commit on `main`: to be filled after merge
+
+Implementation decisions:
+
+- `/gateway unbind` is implemented as a real detach, not as a fake `closed` or `deleted` lifecycle status.
+- Because the current sync loop is anchored on a primary binding, unbinding a primary topic also detaches any mirror topics for the same Codex thread instead of leaving unsupported mirror-only routing behind.
+- Unbind keeps the Codex thread alive in Codex App, but clears Telegram-side transient state for that thread:
+  - queued inbound items
+  - pending turn state
+  - outbound message mappings
+  - topic-scoped history/resume views
+  - topic recall history
+  - pending mirror topic-creation jobs
+- After unbind, the topic becomes an unbound topic again, with fresh topic-project metadata and unbound-topic activity timestamps so the normal project-picker flow can resume on the next inbound message.
+- Unbind strips status-prefix metadata from the topic name before leaving the topic idle.
+- Mirror topics reject `/gateway unbind` just like other project/thread control commands.
+
+Test and verification notes:
+
+- Red-phase tests were added first:
+  - unit tests for `/gateway unbind` cleanup behavior and mirror-control rejection
+  - end-to-end test proving that unbind returns the topic to the project-picker flow on the next message
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_state.py -q` -> `14 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `139 passed`
+- Changed-line coverage for source diff:
+  - `src/codex_telegram_gateway/daemon.py`: `46/55 = 83.6%`
+  - `src/codex_telegram_gateway/state.py`: `12/12 = 100.0%`
+  - `TOTAL`: `58/67 = 86.6%`
+
+Code review notes:
+
+- The main design risk identified during review was that removing only the primary binding would stop `sync_codex_once()` from servicing mirror topics, because the current outbound loop iterates primary bindings first. That is why FP-08 detaches mirrors together with the primary topic.
+- The proofread pass also confirmed that seen-event state should stay intact during unbind so rebinding the same Codex thread later does not replay old assistant history into a fresh topic unexpectedly.
 
 ## Shared Architecture Changes
 
