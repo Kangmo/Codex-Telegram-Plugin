@@ -10,6 +10,7 @@ from codex_telegram_gateway.models import (
     PendingTurn,
     RestoreViewState,
     ResumeViewState,
+    SendViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -42,6 +43,7 @@ class DummyState:
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
+        self.send_views: dict[tuple[int, int], SendViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
@@ -315,6 +317,16 @@ class DummyState:
     def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
         self.restore_views.pop((chat_id, message_thread_id), None)
 
+    def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
+        self.send_views[(send_view.chat_id, send_view.message_thread_id)] = send_view
+        return send_view
+
+    def get_send_view(self, chat_id: int, message_thread_id: int) -> SendViewState | None:
+        return self.send_views.get((chat_id, message_thread_id))
+
+    def delete_send_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.send_views.pop((chat_id, message_thread_id), None)
+
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self.pending_turns[pending_turn.codex_thread_id] = pending_turn
         return pending_turn
@@ -387,6 +399,8 @@ class DummyTelegramClient:
         self.dead_topics: set[tuple[int, int]] = set()
         self.created_topics: list[tuple[int, str]] = []
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
+        self.sent_documents: list[tuple[int, int, str, str | None]] = []
+        self.sent_photos: list[tuple[int, int, str, str | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.answered_callback_queries: list[tuple[str, str | None]] = []
         self.edited_reply_markups: list[tuple[int, int, dict[str, object] | None]] = []
@@ -543,6 +557,32 @@ class DummyTelegramClient:
 
     def send_chat_action(self, chat_id: int, message_thread_id: int, action: str) -> None:
         self.sent_chat_actions.append((chat_id, message_thread_id, action))
+
+    def send_document_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.sent_documents.append((chat_id, message_thread_id, str(file_path), caption))
+        return message_id
+
+    def send_photo_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.sent_photos.append((chat_id, message_thread_id, str(file_path), caption))
+        return message_id
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         self.answered_callback_queries.append((callback_query_id, text))

@@ -173,6 +173,21 @@ class RestoreViewState:
 
 
 @dataclass(frozen=True)
+class SendViewState:
+    """Persisted Telegram send-browser context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+    project_root: str
+    current_relative_path: str = "."
+    page_index: int = 0
+    query: str | None = None
+    selected_relative_path: str | None = None
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 

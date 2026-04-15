@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 from codex_telegram_gateway.models import (
@@ -13,6 +14,7 @@ from codex_telegram_gateway.models import (
     PendingTurn,
     RestoreViewState,
     ResumeViewState,
+    SendViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -44,6 +46,26 @@ class TelegramClient(Protocol):
         ...
 
     def send_chat_action(self, chat_id: int, message_thread_id: int, action: str) -> None:
+        ...
+
+    def send_document_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        ...
+
+    def send_photo_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> int:
         ...
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
@@ -315,6 +337,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_restore_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_send_view(self, send_view: SendViewState) -> SendViewState:
+        ...
+
+    def get_send_view(self, chat_id: int, message_thread_id: int) -> SendViewState | None:
+        ...
+
+    def delete_send_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:

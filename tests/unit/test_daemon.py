@@ -30,6 +30,7 @@ from codex_telegram_gateway.models import (
     PendingTurn,
     RestoreViewState,
     ResumeViewState,
+    SendViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -1220,13 +1221,14 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway threads - List loaded Codex App threads\n"
             "/gateway history - Show paginated history for this Codex thread\n"
             "/gateway resume - Resume another Codex thread from this project\n"
-            "/gateway restore - Show recovery options for this topic\n"
-            "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
-            "/gateway bindings - List Codex thread to Telegram topic bindings\n"
-            "/gateway create_thread - Create a new Codex thread in this topic\n"
-            "/gateway project - Choose or switch the Codex project for this topic\n"
-            "/gateway status - Show the current topic binding and thread status\n"
-            "/gateway sync - Audit bindings and recover deleted topics\n"
+                "/gateway restore - Show recovery options for this topic\n"
+                "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
+                "/gateway bindings - List Codex thread to Telegram topic bindings\n"
+                "/gateway create_thread - Create a new Codex thread in this topic\n"
+                "/gateway send - Browse project files and send one back to Telegram\n"
+                "/gateway project - Choose or switch the Codex project for this topic\n"
+                "/gateway status - Show the current topic binding and thread status\n"
+                "/gateway sync - Audit bindings and recover deleted topics\n"
             "/gateway help - Show available gateway commands\n\n"
             "Telegram menu commands:\n"
             "/gateway - Gateway control commands and status\n"
@@ -1279,6 +1281,24 @@ def test_poll_telegram_once_gateway_unbind_detaches_primary_and_mirror_topics() 
             message_id=42,
             project_id="/Users/kangmo/sacle/src/gateway-project",
             page_index=0,
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=43,
+            codex_thread_id="thread-1",
+            project_root="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100200,
+            message_thread_id=88,
+            message_id=44,
+            codex_thread_id="thread-1",
+            project_root="/Users/kangmo/sacle/src/gateway-project",
         )
     )
     state.upsert_pending_turn(
@@ -1356,6 +1376,8 @@ def test_poll_telegram_once_gateway_unbind_detaches_primary_and_mirror_topics() 
     assert state.list_topic_creation_jobs() == []
     assert state.get_history_view(-100100, 77) is None
     assert state.get_resume_view(-100100, 77) is None
+    assert state.get_send_view(-100100, 77) is None
+    assert state.get_send_view(-100200, 88) is None
     assert state.list_topic_history(-100100, 77) == []
     assert state.list_topic_history(-100200, 88) == []
     assert state.get_topic_project(-100100, 77) == TopicProject(
@@ -2911,6 +2933,15 @@ def test_poll_telegram_once_sessions_dashboard_new_thread_rebinds_target_topic()
     state = DummyState()
     binding = make_binding()
     state.create_binding(binding)
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
     telegram = DummyTelegramClient()
     telegram.push_update(
         update_id=1,
@@ -2957,6 +2988,7 @@ def test_poll_telegram_once_sessions_dashboard_new_thread_rebinds_target_topic()
         "Started a new Codex thread in gateway-project.\nThread id: `thread-2`",
         None,
     )
+    assert state.get_send_view(-100100, 77) is None
     assert "1. 🟢 `(gateway-project) untitled`" in telegram.edited_messages[-1][2]
     assert "id `thread-2`" in telegram.edited_messages[-1][2]
     assert telegram.answered_callback_queries[-1] == ("cb-new", "Started a new thread.")
@@ -3244,6 +3276,935 @@ def test_poll_telegram_once_sessions_dashboard_screenshot_reports_unavailable() 
         "cb-shot",
         "Screenshot support is not available yet.",
     )
+
+
+def test_poll_telegram_once_gateway_send_opens_project_root_browser(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Send file from `gateway-project`\n\nCurrent: `.`\nTap a folder to enter or a file to preview.",
+        {
+            "inline_keyboard": [
+                [{"text": "📁 docs", "callback_data": "gw:send:enter:0"}],
+                [{"text": "📄 notes.txt", "callback_data": "gw:send:preview:1"}],
+                [
+                    {"text": "Root", "callback_data": "gw:send:root"},
+                    {"text": "Cancel", "callback_data": "gw:send:cancel"},
+                ],
+            ]
+        },
+    )
+    assert state.get_send_view(-100100, 77) is not None
+
+
+def test_poll_telegram_once_gateway_send_exact_path_sends_document(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    file_path = project_root / "notes.txt"
+    file_path.write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send notes.txt",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1][2] == (
+        "Send file from `gateway-project`\n\n"
+        "Path: `notes.txt`\n"
+        "Type: `text/plain`\n"
+        f"Size: `{file_path.stat().st_size} B`\n\n"
+        "Choose how to send this file."
+    )
+
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-send-doc",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:doc",
+    )
+    daemon.poll_telegram_once()
+
+    assert Path(telegram.sent_documents[-1][2]).name == "notes.txt"
+    assert telegram.sent_documents[-1][3] == "notes.txt"
+    assert telegram.answered_callback_queries[-1] == ("cb-send-doc", "Sent as document.")
+    assert state.get_send_view(-100100, 77) is None
+
+
+def test_poll_telegram_once_gateway_send_browse_and_send_photo(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    image_path = project_root / "images" / "diagram.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-enter-images",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:enter:0",
+    )
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-preview-image",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:preview:0",
+    )
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=4,
+        callback_query_id="cb-send-photo",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:photo",
+    )
+    daemon.poll_telegram_once()
+
+    assert Path(telegram.sent_photos[-1][2]).name == "diagram.png"
+    assert telegram.sent_photos[-1][3] == "images/diagram.png"
+    assert telegram.answered_callback_queries[-1] == ("cb-send-photo", "Sent as photo.")
+
+
+def test_poll_telegram_once_gateway_send_rejects_stale_send_view(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    (project_root / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-stale-send",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=999,
+        from_user_id=111,
+        data="gw:send:doc",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-stale-send", "This send browser is stale.")
+
+
+def test_poll_telegram_once_gateway_send_rejects_unknown_callback_payload(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-unknown",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:broken:1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-send-unknown", "Unknown send action.")
+
+
+def test_poll_telegram_once_gateway_send_rejects_when_binding_no_longer_matches_view(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-2",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-2",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-mismatch",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:cancel",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-2",
+            title="thread-2",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-send-mismatch", "This send browser is stale.")
+    assert state.get_send_view(-100100, 77) is None
+
+
+def test_poll_telegram_once_gateway_send_cancel_clears_browser_state(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-cancel",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:cancel",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_reply_markups == [(-100100, 15, None)]
+    assert telegram.answered_callback_queries[-1] == ("cb-send-cancel", "Cancelled.")
+    assert state.get_send_view(-100100, 77) is None
+
+
+def test_poll_telegram_once_gateway_send_root_reopens_project_root_listing(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+            current_relative_path="docs",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-root",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:root",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1][2] == (
+        "Send file from `gateway-project`\n\nCurrent: `.`\nTap a folder to enter or a file to preview."
+    )
+    assert telegram.answered_callback_queries[-1] == ("cb-send-root", None)
+    assert state.get_send_view(-100100, 77).current_relative_path == "."
+
+
+def test_poll_telegram_once_gateway_send_back_from_preview_restores_listing(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+            current_relative_path="docs",
+            selected_relative_path="docs/notes.txt",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-back-preview",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:back",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert "Current: `docs`" in telegram.edited_messages[-1][2]
+    assert telegram.answered_callback_queries[-1] == ("cb-send-back-preview", None)
+    assert state.get_send_view(-100100, 77).selected_relative_path is None
+
+
+def test_poll_telegram_once_gateway_send_back_from_directory_goes_to_parent(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+            current_relative_path="docs",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-back-dir",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:back",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1][2].startswith("Send file from `gateway-project`\n\nCurrent: `.`")
+    assert telegram.answered_callback_queries[-1] == ("cb-send-back-dir", None)
+    assert state.get_send_view(-100100, 77).current_relative_path == "."
+
+
+def test_poll_telegram_once_gateway_send_page_callback_updates_listing(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    for index in range(8):
+        (project_root / f"file-{index}.txt").write_text(str(index))
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-page",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data="gw:send:page:1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages[-1][3] == {
+        "inline_keyboard": [
+            [{"text": "📄 file-6.txt", "callback_data": "gw:send:preview:0"}],
+            [{"text": "📄 file-7.txt", "callback_data": "gw:send:preview:1"}],
+            [{"text": "Prev", "callback_data": "gw:send:page:0"}],
+            [
+                {"text": "Root", "callback_data": "gw:send:root"},
+                {"text": "Cancel", "callback_data": "gw:send:cancel"},
+            ],
+        ]
+    }
+    assert telegram.answered_callback_queries[-1] == ("cb-send-page", None)
+    assert state.get_send_view(-100100, 77).page_index == 1
+
+
+@pytest.mark.parametrize(
+    ("callback_data", "selected_relative_path", "expected_text"),
+    [
+        ("gw:send:enter:9", None, "This send browser is stale."),
+        ("gw:send:enter:1", None, "That entry is not a folder."),
+        ("gw:send:preview:9", None, "This send browser is stale."),
+        ("gw:send:doc", None, "This send browser is stale."),
+        ("gw:send:photo", "notes.txt", "This file cannot be sent as a photo."),
+    ],
+)
+def test_poll_telegram_once_gateway_send_rejects_invalid_selection_callbacks(
+    tmp_path,
+    callback_data: str,
+    selected_relative_path: str | None,
+    expected_text: str,
+) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "nested.txt").write_text("nested")
+    (project_root / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    state.upsert_send_view(
+        SendViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=15,
+            codex_thread_id="thread-1",
+            project_root=str(project_root),
+            selected_relative_path=selected_relative_path,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-send-invalid",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=15,
+        from_user_id=111,
+        data=callback_data,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-send-invalid", expected_text)
+
+
+def test_poll_telegram_once_gateway_send_rejects_unbound_topic() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "This topic is not bound to any Codex thread.",
+        None,
+    )
+
+
+def test_poll_telegram_once_gateway_send_rejects_mirror_topic_controls(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    state = DummyState()
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (-100100, 77, _mirror_control_text(), None)
+
+
+def test_poll_telegram_once_gateway_send_reports_missing_project_path() -> None:
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=None,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=None,
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "This topic is bound, but the Codex project path is missing.",
+        None,
+    )
+
+
+def test_poll_telegram_once_gateway_send_uses_thread_cwd_for_directory_queries(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=None,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send docs",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1][2].startswith("Send file from `gateway-project`\n\nCurrent: `docs`")
+    assert state.get_send_view(-100100, 77).current_relative_path == "docs"
+
+
+def test_poll_telegram_once_gateway_send_searches_when_query_is_not_a_safe_path(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    (project_root / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send ../secret",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+
+    assert "Search: `../secret`" in telegram.sent_messages[-1][2]
+    assert state.get_send_view(-100100, 77).query == "../secret"
+
+
+def test_show_send_preview_requires_selected_path(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=DummyState(),
+        telegram=DummyTelegramClient(),
+        codex=DummyCodexBridge(
+            CodexThread(
+                thread_id="thread-1",
+                title="thread-1",
+                status="idle",
+                cwd=str(project_root),
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="selected_relative_path is required"):
+        daemon._show_send_preview(
+            SendViewState(
+                chat_id=-100100,
+                message_thread_id=77,
+                message_id=15,
+                codex_thread_id="thread-1",
+                project_root=str(project_root),
+            )
+        )
+
+
+def test_poll_telegram_once_gateway_send_rejects_directory_preview_callback(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    (project_root / "docs").mkdir(parents=True)
+    (project_root / "docs" / "notes.txt").write_text("notes")
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(config=make_config(), state=state, telegram=telegram, codex=codex)
+
+    daemon.poll_telegram_once()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-send-preview-dir",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:preview:0",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-send-preview-dir", "That entry is not a file.")
 
 
 def test_sessions_dashboard_entry_uses_status_icons_and_warnings_for_binding_state() -> None:

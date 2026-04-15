@@ -1,4 +1,8 @@
+import io
 from pathlib import Path
+from urllib import error
+
+import pytest
 
 from codex_telegram_gateway.telegram_api import (
     TelegramApiError,
@@ -32,9 +36,40 @@ class RecordingTelegramBotClient(TelegramBotClient):
     def __init__(self) -> None:
         super().__init__("test-token")
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.multipart_calls: list[tuple[str, dict[str, object], str, Path]] = []
 
     def _call(self, method: str, payload: dict[str, object]) -> dict[str, object] | list[object]:
         self.calls.append((method, payload))
+        return {}
+
+    def _call_multipart(
+        self,
+        method: str,
+        payload: dict[str, object],
+        *,
+        file_field_name: str,
+        file_path: Path,
+    ) -> dict[str, object] | list[object]:
+        self.multipart_calls.append((method, payload, file_field_name, file_path))
+        return {"message_id": 42}
+
+
+class BrokenMultipartTelegramBotClient(TelegramBotClient):
+    def __init__(self) -> None:
+        super().__init__("test-token")
+
+    def _call(self, method: str, payload: dict[str, object]) -> dict[str, object] | list[object]:
+        raise AssertionError(f"Unexpected Telegram API method: {method} {payload}")
+
+    def _call_multipart(
+        self,
+        method: str,
+        payload: dict[str, object],
+        *,
+        file_field_name: str,
+        file_path: Path,
+    ) -> dict[str, object] | list[object]:
+        del method, payload, file_field_name, file_path
         return {}
 
 
@@ -172,6 +207,188 @@ def test_close_forum_topic_calls_telegram_api() -> None:
             },
         )
     ]
+
+
+def test_send_document_file_calls_telegram_api_with_multipart_upload(tmp_path) -> None:
+    client = RecordingTelegramBotClient()
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+
+    message_id = client.send_document_file(-100100, 77, file_path, caption="notes.txt")
+
+    assert message_id == 42
+    assert client.multipart_calls == [
+        (
+            "sendDocument",
+            {
+                "chat_id": -100100,
+                "message_thread_id": 77,
+                "caption": "notes.txt",
+            },
+            "document",
+            file_path,
+        )
+    ]
+
+
+def test_send_photo_file_calls_telegram_api_with_multipart_upload(tmp_path) -> None:
+    client = RecordingTelegramBotClient()
+    file_path = tmp_path / "diagram.png"
+    file_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    message_id = client.send_photo_file(-100100, 77, file_path, caption="images/diagram.png")
+
+    assert message_id == 42
+    assert client.multipart_calls == [
+        (
+            "sendPhoto",
+            {
+                "chat_id": -100100,
+                "message_thread_id": 77,
+                "caption": "images/diagram.png",
+            },
+            "photo",
+            file_path,
+        )
+    ]
+
+
+def test_send_document_file_rejects_multipart_responses_without_message_id(tmp_path) -> None:
+    client = BrokenMultipartTelegramBotClient()
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+
+    with pytest.raises(TelegramApiError, match="Unexpected sendDocument response"):
+        client.send_document_file(-100100, 77, file_path)
+
+
+def test_send_photo_file_rejects_multipart_responses_without_message_id(tmp_path) -> None:
+    client = BrokenMultipartTelegramBotClient()
+    file_path = tmp_path / "diagram.png"
+    file_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    with pytest.raises(TelegramApiError, match="Unexpected sendPhoto response"):
+        client.send_photo_file(-100100, 77, file_path)
+
+
+def test_call_multipart_upload_encodes_body_and_returns_result(tmp_path, monkeypatch) -> None:
+    client = TelegramBotClient("test-token")
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": true, "result": {"message_id": 55}}'
+
+    def fake_urlopen(req, timeout: int):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = req.data
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("codex_telegram_gateway.telegram_api.request.urlopen", fake_urlopen)
+
+    result = client._call_multipart(
+        "sendDocument",
+        {"chat_id": -100100, "message_thread_id": 77, "caption": "notes.txt"},
+        file_field_name="document",
+        file_path=file_path,
+    )
+
+    assert result == {"message_id": 55}
+    assert captured["url"] == "https://api.telegram.org/bottest-token/sendDocument"
+    assert captured["timeout"] == 30
+    assert "multipart/form-data; boundary=codex-telegram-" in captured["headers"]["Content-type"]
+    assert b'name="chat_id"' in captured["body"]
+    assert b"-100100" in captured["body"]
+    assert b'name="document"; filename="notes.txt"' in captured["body"]
+    assert b"notes" in captured["body"]
+
+
+def test_call_multipart_raises_api_error_when_telegram_returns_unsuccessful_result(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = TelegramBotClient("test-token")
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": false, "description": "bad request"}'
+
+    monkeypatch.setattr(
+        "codex_telegram_gateway.telegram_api.request.urlopen",
+        lambda req, timeout: FakeResponse(),
+    )
+
+    with pytest.raises(TelegramApiError, match="Telegram API error for sendDocument"):
+        client._call_multipart(
+            "sendDocument",
+            {"chat_id": -100100, "message_thread_id": 77},
+            file_field_name="document",
+            file_path=file_path,
+        )
+
+
+def test_call_multipart_raises_http_error_for_non_json_body(tmp_path, monkeypatch) -> None:
+    client = TelegramBotClient("test-token")
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+
+    def fake_urlopen(req, timeout: int):
+        del req, timeout
+        raise error.HTTPError(
+            url="https://api.telegram.org/bottest-token/sendDocument",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(b"not-json"),
+        )
+
+    monkeypatch.setattr("codex_telegram_gateway.telegram_api.request.urlopen", fake_urlopen)
+
+    with pytest.raises(TelegramApiError, match="Telegram HTTP error for sendDocument: not-json"):
+        client._call_multipart(
+            "sendDocument",
+            {"chat_id": -100100, "message_thread_id": 77},
+            file_field_name="document",
+            file_path=file_path,
+        )
+
+
+def test_call_multipart_raises_request_error_on_url_failure(tmp_path, monkeypatch) -> None:
+    client = TelegramBotClient("test-token")
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("notes")
+
+    def fake_urlopen(req, timeout: int):
+        del req, timeout
+        raise error.URLError("offline")
+
+    monkeypatch.setattr("codex_telegram_gateway.telegram_api.request.urlopen", fake_urlopen)
+
+    with pytest.raises(TelegramApiError, match="Telegram request failed for sendDocument"):
+        client._call_multipart(
+            "sendDocument",
+            {"chat_id": -100100, "message_thread_id": 77},
+            file_field_name="document",
+            file_path=file_path,
+        )
 
 
 def test_raise_api_error_returns_retry_after_error_for_flood_control() -> None:

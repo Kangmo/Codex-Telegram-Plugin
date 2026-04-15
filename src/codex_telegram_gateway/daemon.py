@@ -23,6 +23,7 @@ from codex_telegram_gateway.models import (
     PendingTurn,
     RestoreViewState,
     ResumeViewState,
+    SendViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -49,6 +50,16 @@ from codex_telegram_gateway.resume_command import (
     parse_resume_page_callback,
     parse_resume_pick_callback,
     render_resume_picker,
+)
+from codex_telegram_gateway.send_callbacks import parse_send_callback
+from codex_telegram_gateway.send_command import (
+    build_send_browser_page,
+    build_send_preview_page,
+)
+from codex_telegram_gateway.send_security import (
+    build_send_preview,
+    browse_project_files,
+    search_project_files,
 )
 from codex_telegram_gateway.recovery import (
     CALLBACK_RESTORE_CANCEL,
@@ -1053,6 +1064,9 @@ class GatewayDaemon:
         if data.startswith(_CALLBACK_SESSIONS_PREFIX):
             self._handle_sessions_callback(update)
             return
+        if data.startswith(_CALLBACK_SEND_PREFIX):
+            self._handle_send_callback(update)
+            return
         if data.startswith(_CALLBACK_QUEUE_PREFIX):
             self._handle_queue_callback(update)
             return
@@ -1735,6 +1749,328 @@ class GatewayDaemon:
 
         self._telegram.answer_callback_query(callback_query_id, "Unknown response action.")
 
+    def _handle_send_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        parsed_callback = parse_send_callback(str(update["data"]))
+        send_view = self._state.get_send_view(chat_id, message_thread_id)
+        if parsed_callback is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown send action.")
+            return
+        if send_view is None or send_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This send browser is stale.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None or not self._is_primary_binding(binding) or binding.codex_thread_id != send_view.codex_thread_id:
+            self._state.delete_send_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "This send browser is stale.")
+            return
+
+        action = str(parsed_callback["action"])
+        index = parsed_callback["index"]
+        if action == "cancel":
+            self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+            self._state.delete_send_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "Cancelled.")
+            return
+        if action == "root":
+            self._show_send_browser(
+                SendViewState(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    message_id=message_id,
+                    codex_thread_id=send_view.codex_thread_id,
+                    project_root=send_view.project_root,
+                )
+            )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+        if action == "back":
+            if send_view.selected_relative_path is not None:
+                self._show_send_browser(
+                    SendViewState(
+                        chat_id=chat_id,
+                        message_thread_id=message_thread_id,
+                        message_id=message_id,
+                        codex_thread_id=send_view.codex_thread_id,
+                        project_root=send_view.project_root,
+                        current_relative_path=send_view.current_relative_path,
+                        page_index=send_view.page_index,
+                        query=send_view.query,
+                    )
+                )
+            else:
+                current_path = Path(send_view.current_relative_path)
+                parent_path = "." if current_path in {Path("."), Path("")} else str(current_path.parent)
+                self._show_send_browser(
+                    SendViewState(
+                        chat_id=chat_id,
+                        message_thread_id=message_thread_id,
+                        message_id=message_id,
+                        codex_thread_id=send_view.codex_thread_id,
+                        project_root=send_view.project_root,
+                        current_relative_path=parent_path if parent_path else ".",
+                    )
+                )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+        if action == "page":
+            self._show_send_browser(
+                SendViewState(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    message_id=message_id,
+                    codex_thread_id=send_view.codex_thread_id,
+                    project_root=send_view.project_root,
+                    current_relative_path=send_view.current_relative_path,
+                    page_index=int(index or 0),
+                    query=send_view.query,
+                )
+            )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+
+        listing = self._send_listing_for_view(send_view)
+        if action == "enter":
+            if index is None or index < 0 or index >= len(listing.entries):
+                self._telegram.answer_callback_query(callback_query_id, "This send browser is stale.")
+                return
+            entry = listing.entries[int(index)]
+            if not entry.is_dir:
+                self._telegram.answer_callback_query(callback_query_id, "That entry is not a folder.")
+                return
+            self._show_send_browser(
+                SendViewState(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    message_id=message_id,
+                    codex_thread_id=send_view.codex_thread_id,
+                    project_root=send_view.project_root,
+                    current_relative_path=entry.relative_path,
+                )
+            )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+        if action == "preview":
+            if index is None or index < 0 or index >= len(listing.entries):
+                self._telegram.answer_callback_query(callback_query_id, "This send browser is stale.")
+                return
+            entry = listing.entries[int(index)]
+            if entry.is_dir:
+                self._telegram.answer_callback_query(callback_query_id, "That entry is not a file.")
+                return
+            self._show_send_preview(
+                SendViewState(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    message_id=message_id,
+                    codex_thread_id=send_view.codex_thread_id,
+                    project_root=send_view.project_root,
+                    current_relative_path=send_view.current_relative_path,
+                    page_index=send_view.page_index,
+                    query=send_view.query,
+                    selected_relative_path=entry.relative_path,
+                )
+            )
+            self._telegram.answer_callback_query(callback_query_id)
+            return
+        if action in {"doc", "photo"}:
+            if send_view.selected_relative_path is None:
+                self._telegram.answer_callback_query(callback_query_id, "This send browser is stale.")
+                return
+            preview = build_send_preview(send_view.project_root, send_view.selected_relative_path)
+            file_path = Path(send_view.project_root) / preview.relative_path
+            if action == "photo":
+                if not preview.send_as_photo:
+                    self._telegram.answer_callback_query(callback_query_id, "This file cannot be sent as a photo.")
+                    return
+                self._telegram.send_photo_file(
+                    chat_id,
+                    message_thread_id,
+                    file_path,
+                    caption=preview.relative_path,
+                )
+                callback_text = "Sent as photo."
+            else:
+                self._telegram.send_document_file(
+                    chat_id,
+                    message_thread_id,
+                    file_path,
+                    caption=preview.relative_path,
+                )
+                callback_text = "Sent as document."
+            self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+            self._state.delete_send_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, callback_text)
+            return
+
+        self._telegram.answer_callback_query(callback_query_id, "Unknown send action.")
+
+    def _send_project_root(self, binding: Binding) -> str | None:
+        if binding.project_id:
+            return binding.project_id
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        return thread.cwd or None
+
+    def _send_listing_for_view(self, send_view: SendViewState):
+        if send_view.query:
+            return search_project_files(
+                send_view.project_root,
+                send_view.query,
+                page_index=send_view.page_index,
+                page_size=6,
+            )
+        return browse_project_files(
+            send_view.project_root,
+            current_relative_path=send_view.current_relative_path,
+            page_index=send_view.page_index,
+            page_size=6,
+        )
+
+    def _show_send_browser(self, send_view: SendViewState) -> None:
+        listing = self._send_listing_for_view(send_view)
+        project_name = Path(send_view.project_root).name or send_view.project_root
+        text, reply_markup = build_send_browser_page(
+            project_name=project_name,
+            listing=listing,
+        )
+        self._telegram.edit_message_text(
+            send_view.chat_id,
+            send_view.message_id,
+            text,
+            reply_markup=reply_markup,
+        )
+        self._state.upsert_send_view(
+            SendViewState(
+                chat_id=send_view.chat_id,
+                message_thread_id=send_view.message_thread_id,
+                message_id=send_view.message_id,
+                codex_thread_id=send_view.codex_thread_id,
+                project_root=send_view.project_root,
+                current_relative_path=listing.current_relative_path,
+                page_index=listing.page_index,
+                query=listing.query,
+            )
+        )
+
+    def _show_send_preview(self, send_view: SendViewState) -> None:
+        if send_view.selected_relative_path is None:
+            raise ValueError("selected_relative_path is required for preview mode.")
+        preview = build_send_preview(send_view.project_root, send_view.selected_relative_path)
+        project_name = Path(send_view.project_root).name or send_view.project_root
+        text, reply_markup = build_send_preview_page(
+            project_name=project_name,
+            preview=preview,
+        )
+        self._telegram.edit_message_text(
+            send_view.chat_id,
+            send_view.message_id,
+            text,
+            reply_markup=reply_markup,
+        )
+        self._state.upsert_send_view(send_view)
+
+    def _open_send_browser(
+        self,
+        binding: Binding,
+        *,
+        query: str,
+    ) -> None:
+        project_root = self._send_project_root(binding)
+        if not project_root:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "This topic is bound, but the Codex project path is missing.",
+            )
+            return
+
+        project_root_path = Path(project_root).expanduser().resolve()
+        normalized_query = query.strip()
+        initial_view = SendViewState(
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+            message_id=0,
+            codex_thread_id=binding.codex_thread_id,
+            project_root=str(project_root_path),
+        )
+        if normalized_query:
+            candidate = (project_root_path / normalized_query).resolve()
+            try:
+                candidate.relative_to(project_root_path)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.is_dir():
+                initial_view = SendViewState(
+                    chat_id=binding.chat_id,
+                    message_thread_id=binding.message_thread_id,
+                    message_id=0,
+                    codex_thread_id=binding.codex_thread_id,
+                    project_root=str(project_root_path),
+                    current_relative_path=str(candidate.relative_to(project_root_path)).replace("\\", "/") or ".",
+                )
+                listing = self._send_listing_for_view(initial_view)
+                text, reply_markup = build_send_browser_page(
+                    project_name=project_root_path.name or str(project_root_path),
+                    listing=listing,
+                )
+                message_id = self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+                self._state.upsert_send_view(replace(initial_view, message_id=message_id, page_index=listing.page_index))
+                return
+            if candidate is not None and candidate.is_file():
+                preview = build_send_preview(
+                    project_root_path,
+                    str(candidate.relative_to(project_root_path)).replace("\\", "/"),
+                )
+                text, reply_markup = build_send_preview_page(
+                    project_name=project_root_path.name or str(project_root_path),
+                    preview=preview,
+                )
+                message_id = self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+                self._state.upsert_send_view(
+                    replace(
+                        initial_view,
+                        message_id=message_id,
+                        selected_relative_path=preview.relative_path,
+                    )
+                )
+                return
+            initial_view = replace(initial_view, query=normalized_query)
+
+        listing = self._send_listing_for_view(initial_view)
+        text, reply_markup = build_send_browser_page(
+            project_name=project_root_path.name or str(project_root_path),
+            listing=listing,
+        )
+        message_id = self._telegram.send_message(
+            binding.chat_id,
+            binding.message_thread_id,
+            text,
+            reply_markup=reply_markup,
+        )
+        self._state.upsert_send_view(
+            replace(
+                initial_view,
+                message_id=message_id,
+                page_index=listing.page_index,
+                current_relative_path=listing.current_relative_path,
+                query=listing.query,
+            )
+        )
+
     def _show_project_picker(self, topic_project: TopicProject) -> None:
         if topic_project.picker_message_id is None:
             raise ValueError("picker_message_id is required to show the project picker.")
@@ -2030,6 +2366,20 @@ class GatewayDaemon:
                 )
             return
 
+        if command_name == "send":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            if not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
+            self._open_send_browser(binding, query=command_args)
+            return
+
         if command_name == "project":
             if binding is not None and not self._is_primary_binding(binding):
                 self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
@@ -2234,6 +2584,7 @@ class GatewayDaemon:
         )
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
+        self._state.delete_send_view(chat_id, message_thread_id)
         self._clear_typing_state(chat_id, message_thread_id)
         self._telegram.send_message(
             chat_id,
@@ -2279,6 +2630,7 @@ class GatewayDaemon:
             self._state.delete_history_view(target.chat_id, target.message_thread_id)
             self._state.delete_resume_view(target.chat_id, target.message_thread_id)
             self._state.delete_restore_view(target.chat_id, target.message_thread_id)
+            self._state.delete_send_view(target.chat_id, target.message_thread_id)
             self._state.delete_topic_history(target.chat_id, target.message_thread_id)
             self._clear_typing_state(target.chat_id, target.message_thread_id)
             self._clear_topic_status_override(target.chat_id, target.message_thread_id)
@@ -2655,6 +3007,7 @@ _CALLBACK_SYNC_PREFIX = "gw:sync:"
 _CALLBACK_SYNC_FIX = f"{_CALLBACK_SYNC_PREFIX}fix"
 _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
+_CALLBACK_SEND_PREFIX = "gw:send:"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
 _CALLBACK_RESPONSE_PREFIX = "gw:resp:"
@@ -2685,6 +3038,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("unbind", "Detach this Telegram topic from its Codex thread"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
+    _BotCommand("send", "Browse project files and send one back to Telegram"),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),
     _BotCommand("status", "Show the current topic binding and thread status"),
     _BotCommand("sync", "Audit bindings and recover deleted topics"),

@@ -25,6 +25,8 @@ class FakeTelegramClient:
         self._next_message_id = 1
         self.created_topics: list[tuple[int, str]] = []
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
+        self.sent_documents: list[tuple[int, int, str, str | None]] = []
+        self.sent_photos: list[tuple[int, int, str, str | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.registered_command_sets: list[tuple[tuple[tuple[str, str], ...], dict[str, object] | None]] = []
@@ -120,6 +122,32 @@ class FakeTelegramClient:
 
     def send_chat_action(self, chat_id: int, message_thread_id: int, action: str) -> None:
         self.sent_chat_actions.append((chat_id, message_thread_id, action))
+
+    def send_document_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.sent_documents.append((chat_id, message_thread_id, str(file_path), caption))
+        return message_id
+
+    def send_photo_file(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        file_path,
+        *,
+        caption: str | None = None,
+    ) -> int:
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.sent_photos.append((chat_id, message_thread_id, str(file_path), caption))
+        return message_id
 
     def set_my_commands(
         self,
@@ -682,3 +710,65 @@ def test_sessions_dashboard_refresh_updates_live_thread_metadata(tmp_path) -> No
             ]
         },
     )
+
+
+def test_send_flow_end_to_end_sends_project_file_to_telegram(tmp_path) -> None:
+    project_root = tmp_path / "gateway-project"
+    project_root.mkdir()
+    file_path = project_root / "notes.txt"
+    file_path.write_text("notes")
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Send flow",
+            status="idle",
+            cwd=str(project_root),
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Send flow",
+            sync_mode="assistant_plus_alerts",
+            project_id=str(project_root),
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway send notes.txt",
+    )
+    daemon.poll_telegram_once()
+
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-send-doc",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:send:doc",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_documents == [
+        (-100100, 77, str(file_path), "notes.txt"),
+    ]

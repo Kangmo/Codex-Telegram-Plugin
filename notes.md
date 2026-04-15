@@ -185,6 +185,7 @@
 - FP-07 `/resume`
 - FP-08 `/unbind`
 - FP-09 `/restore`
+- FP-11 `/send`
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 
@@ -267,6 +268,29 @@
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_recovery.py tests/unit/test_daemon.py tests/unit/test_state.py tests/e2e/test_gateway_flow.py -q` -> `103 passed`
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `155 passed`
 - Feature-specific changed-statement coverage for tracked source diff is 119/129 = 92.2%.
+
+### FP-11 verification
+- Added a dedicated send-browser stack:
+  - `send_security.py` for project-root containment, browse pagination, search, and preview metadata
+  - `send_command.py` for Telegram browser/preview rendering
+  - `send_callbacks.py` for callback parsing
+- Added persisted `SendViewState` rows in SQLite and wired them through the gateway state/port interfaces.
+- Added `/gateway send` with:
+  - root browse
+  - exact file preview
+  - exact directory open
+  - search fallback
+  - inline callbacks for page, enter, preview, back, root, cancel, send document, and send photo
+- Added multipart Telegram upload helpers for outbound local file delivery.
+- Proofread fixes:
+  - reject negative callback indexes
+  - reject directory-preview callbacks
+  - clear send-browser state during rebind and unbind flows
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_send_command.py tests/unit/test_send_security.py tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/e2e/test_gateway_flow.py` -> `163 passed`
+- Full suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `216 passed`
+- Feature-specific changed-statement coverage for tracked source diff is `197/223 = 88.3%`.
 
 ### FP-17 verification
 - Added a dedicated `commands_catalog.py` module for Telegram menu generation, sanitization, known-description mapping, and hash-based registration.
