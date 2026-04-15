@@ -470,6 +470,14 @@ Code review notes:
 - The proofread pass removed the stale static `BOT_COMMANDS` constant so there is only one source of truth for Telegram menu registration.
 - The proofread pass also kept registration failures non-fatal for chat flow: pass-through command learning should never block the actual inbound message from reaching Codex just because Telegram command registration failed.
 
+### FP-18: Full Sessions Dashboard
+
+Branch and merge:
+
+- Feature branch: `feature/fp-18-full-sessions-dashboard`
+- Feature commit: `10f8f79`
+- Merge commit on `main`: `9909e0c`
+
 ## Shared Architecture Changes
 
 These apply across many features and should be built first.
