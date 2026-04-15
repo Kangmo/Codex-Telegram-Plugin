@@ -3,6 +3,7 @@ from pathlib import Path
 from codex_telegram_gateway.telegram_api import (
     TelegramApiError,
     TelegramBotClient,
+    TelegramRetryAfterError,
     is_missing_topic_error,
     is_topic_edit_permission_error,
 )
@@ -171,3 +172,18 @@ def test_close_forum_topic_calls_telegram_api() -> None:
             },
         )
     ]
+
+
+def test_raise_api_error_returns_retry_after_error_for_flood_control() -> None:
+    try:
+        TelegramBotClient._raise_api_error(
+            "createForumTopic",
+            {
+                "ok": False,
+                "parameters": {"retry_after": 27},
+            },
+        )
+    except TelegramRetryAfterError as exc:
+        assert exc.retry_after_seconds == 27
+    else:
+        raise AssertionError("Expected TelegramRetryAfterError")

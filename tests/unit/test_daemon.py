@@ -1,6 +1,7 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon, _parse_topic_name
 from pathlib import Path
+from codex_telegram_gateway.telegram_api import TelegramRetryAfterError
 
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
@@ -12,6 +13,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
@@ -2634,3 +2636,260 @@ def test_run_lifecycle_sweeps_prunes_orphan_topic_history() -> None:
 
     assert state.list_topic_history(-100100, 77) == [TopicHistoryEntry(text="keep me")]
     assert state.list_topic_history(-100100, 88) == []
+
+
+def test_sync_codex_once_processes_mirror_topic_creation_jobs() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_topic_creation_job(
+        TopicCreationJob(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            topic_name="(gateway-project) thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            telegram_mirror_chat_ids=(-100200,),
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    mirror_binding = state.get_mirror_binding_by_topic(-100200, 1)
+    assert mirror_binding is not None
+    assert mirror_binding.codex_thread_id == "thread-1"
+    assert state.get_topic_creation_job("thread-1", -100200) is None
+    assert telegram.created_topics == [(-100200, "(gateway-project) thread-1")]
+
+
+def test_sync_codex_once_retries_mirror_topic_creation_after_retry_after(monkeypatch) -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_topic_creation_job(
+        TopicCreationJob(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            topic_name="(gateway-project) thread-1",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            telegram_mirror_chat_ids=(-100200,),
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    monkeypatch.setattr("codex_telegram_gateway.daemon.time.time", lambda: 100.0)
+
+    def fail_create_forum_topic(chat_id: int, name: str) -> int:
+        del chat_id, name
+        raise TelegramRetryAfterError(
+            "createForumTopic",
+            27,
+            {"ok": False, "parameters": {"retry_after": 27}},
+        )
+
+    telegram.create_forum_topic = fail_create_forum_topic
+
+    daemon.sync_codex_once()
+
+    retry_job = state.get_topic_creation_job("thread-1", -100200)
+    assert retry_job is not None
+    assert retry_job.retry_after_at == 128.0
+
+
+def test_sync_codex_once_mirrors_assistant_output_to_secondary_chat() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            message_thread_id=88,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Completed the refactor.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            telegram_mirror_chat_ids=(-100200,),
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 77, "Completed the refactor.", None),
+        (-100200, 88, "Completed the refactor.", None),
+    ]
+
+
+def test_poll_telegram_once_routes_message_from_mirror_topic_to_same_thread() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            message_thread_id=88,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100200,
+        message_thread_id=88,
+        from_user_id=111,
+        text="Please continue from mirror chat.",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            telegram_mirror_chat_ids=(-100200,),
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=1,
+            chat_id=-100200,
+            message_thread_id=88,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please continue from mirror chat.",
+        )
+    ]
+
+
+def test_poll_telegram_once_gateway_bindings_dashboard_lists_mirrors_and_pending_jobs() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_mirror_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100200,
+            message_thread_id=88,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.upsert_topic_creation_job(
+        TopicCreationJob(
+            codex_thread_id="thread-2",
+            chat_id=-100300,
+            topic_name="(another-project) untitled",
+            project_id="/Users/kangmo/sacle/src/another-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway bindings",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            telegram_mirror_chat_ids=(-100200, -100300),
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert "mirror chat `-100200` topic `88`" in telegram.sent_messages[0][2]
+    assert "Pending mirror topic creation" in telegram.sent_messages[0][2]

@@ -15,6 +15,7 @@ from codex_telegram_gateway.models import (
     OutboundMessage,
     PendingTurn,
     StartedTurn,
+    TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
@@ -29,6 +30,7 @@ from codex_telegram_gateway.service import (
 from codex_telegram_gateway.telegram_api import (
     is_missing_topic_error,
     is_topic_edit_permission_error,
+    TelegramRetryAfterError,
 )
 from codex_telegram_gateway.topic_status import (
     TOPIC_STATUS_APPROVAL,
@@ -87,39 +89,45 @@ class GatewayDaemon:
     def sync_codex_once(self) -> None:
         self._sync_projects_once()
         self._sync_loaded_threads_once()
+        self._process_topic_creation_jobs()
         pending_turns_by_thread = {
             pending_turn.codex_thread_id: pending_turn
             for pending_turn in self._state.list_pending_turns()
         }
         for binding in self._state.list_bindings():
+            targets = self._targets_for_thread(binding.codex_thread_id)
             pending_turn = pending_turns_by_thread.get(binding.codex_thread_id)
             turn_result = None
             if pending_turn is not None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
             thread = self._codex.read_thread(binding.codex_thread_id)
-            if binding.binding_status != DELETED_BINDING_STATUS:
-                topic_status = self._topic_status_for_binding(binding, pending_turn, turn_result)
+            active_targets: list[Binding] = []
+            for target in targets:
+                if target.binding_status == DELETED_BINDING_STATUS:
+                    continue
+                active_targets.append(target)
+                topic_status = self._topic_status_for_binding(target, pending_turn, turn_result)
                 base_topic_name = format_topic_name(binding.project_id or thread.cwd, thread.title)
                 desired_topic_name = self._desired_topic_name(
-                    binding,
+                    target,
                     base_topic_name=base_topic_name,
                     topic_status=topic_status,
                 )
                 if not self._topic_name_matches_desired(
-                    binding,
+                    target,
                     desired_topic_name=desired_topic_name,
                     base_topic_name=base_topic_name,
                 ):
-                    binding = self._sync_topic_name(
-                        binding,
+                    target = self._sync_topic_name(
+                        target,
                         desired_topic_name=desired_topic_name,
                         base_topic_name=base_topic_name,
                     )
-                if binding.binding_status == ACTIVE_BINDING_STATUS:
+                if target.binding_status == ACTIVE_BINDING_STATUS:
                     for event in self._codex.list_events(binding.codex_thread_id):
                         active_turn_id = pending_turn.turn_id if pending_turn is not None else None
                         active_turn_result = turn_result if active_turn_id == _event_turn_id(event.event_id) else None
-                        self._sync_outbound_event(binding, event, active_turn_result=active_turn_result)
+                        self._sync_outbound_event(target, event, active_turn_result=active_turn_result)
 
             if pending_turn is None:
                 continue
@@ -127,32 +135,34 @@ class GatewayDaemon:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
 
             if turn_result.waiting_for_approval or not _is_terminal_turn_status(turn_result.status):
-                if binding.binding_status == ACTIVE_BINDING_STATUS:
-                    self._send_typing_if_due(binding.chat_id, binding.message_thread_id)
-                else:
-                    self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+                for target in active_targets:
+                    if target.binding_status == ACTIVE_BINDING_STATUS:
+                        self._send_typing_if_due(target.chat_id, target.message_thread_id)
+                    else:
+                        self._clear_typing_state(target.chat_id, target.message_thread_id)
                 continue
 
             self._state.delete_pending_turn(binding.codex_thread_id)
-            if turn_result.status == "completed":
-                self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
-            else:
-                self._set_topic_status_override(
-                    binding.chat_id,
-                    binding.message_thread_id,
-                    TOPIC_STATUS_FAILED,
-                )
-            self._clear_typing_state(binding.chat_id, binding.message_thread_id)
-            if binding.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
-                try:
-                    self._telegram.send_message(
-                        binding.chat_id,
-                        binding.message_thread_id,
-                        _turn_status_text(turn_result.status),
+            for target in active_targets:
+                if turn_result.status == "completed":
+                    self._clear_topic_status_override(target.chat_id, target.message_thread_id)
+                else:
+                    self._set_topic_status_override(
+                        target.chat_id,
+                        target.message_thread_id,
+                        TOPIC_STATUS_FAILED,
                     )
-                except Exception as exc:
-                    if not self._mark_binding_deleted_if_missing_topic(binding, exc):
-                        raise
+                self._clear_typing_state(target.chat_id, target.message_thread_id)
+                if target.binding_status == ACTIVE_BINDING_STATUS and turn_result.status != "completed":
+                    try:
+                        self._telegram.send_message(
+                            target.chat_id,
+                            target.message_thread_id,
+                            _turn_status_text(turn_result.status),
+                        )
+                    except Exception as exc:
+                        if not self._mark_binding_deleted_if_missing_topic(target, exc):
+                            raise
             if turn_result.status == "completed":
                 self._mark_topic_completed(binding.codex_thread_id)
 
@@ -187,7 +197,7 @@ class GatewayDaemon:
                 if kind == "callback_query":
                     if from_user_id not in self._config.telegram_allowed_user_ids:
                         continue
-                    if self._state.get_binding_by_topic(chat_id, message_thread_id) is None:
+                    if self._binding_by_topic(chat_id, message_thread_id) is None:
                         self._state.set_topic_project_last_seen(chat_id, message_thread_id, time.time())
                     self._handle_callback_query(update)
                     continue
@@ -201,7 +211,7 @@ class GatewayDaemon:
                 local_image_paths = _normalized_local_image_paths(update)
                 if not text and not local_image_paths:
                     continue
-                binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+                binding = self._binding_by_topic(chat_id, message_thread_id)
                 if binding is not None and binding.binding_status != ACTIVE_BINDING_STATUS:
                     continue
                 command = _parse_command(text)
@@ -276,9 +286,9 @@ class GatewayDaemon:
             return
         reply_markup = self._assistant_reply_markup(binding, active_turn_result)
 
-        outbound_message = self._state.get_outbound_message(binding.codex_thread_id, event.event_id)
+        outbound_message = self._get_outbound_message_for_target(binding, event.event_id)
         if outbound_message is None:
-            if self._state.has_seen_event(binding.codex_thread_id, event.event_id):
+            if self._has_seen_event_for_target(binding, event.event_id):
                 return
             try:
                 outbound_message = OutboundMessage(
@@ -297,9 +307,10 @@ class GatewayDaemon:
                 if self._mark_binding_deleted_if_missing_topic(binding, exc):
                     return
                 raise
-            self._state.upsert_outbound_message(outbound_message)
-            self._state.mark_event_seen(binding.codex_thread_id, event.event_id)
-            self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
+            self._upsert_outbound_message_for_target(binding, outbound_message)
+            self._mark_event_seen_for_target(binding, event.event_id)
+            if self._is_primary_binding(binding):
+                self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
             return
 
         if outbound_message.text == event.text and outbound_message.reply_markup == reply_markup:
@@ -319,7 +330,8 @@ class GatewayDaemon:
             if self._mark_binding_deleted_if_missing_topic(binding, exc):
                 return
             raise
-        self._state.upsert_outbound_message(
+        self._upsert_outbound_message_for_target(
+            binding,
             OutboundMessage(
                 codex_thread_id=outbound_message.codex_thread_id,
                 event_id=outbound_message.event_id,
@@ -328,7 +340,8 @@ class GatewayDaemon:
                 reply_markup=reply_markup,
             )
         )
-        self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
+        if self._is_primary_binding(binding):
+            self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
 
     def _sync_projects_once(self) -> None:
         for project in self._codex.list_loaded_projects():
@@ -341,6 +354,120 @@ class GatewayDaemon:
 
     def _sync_loaded_threads_once(self) -> None:
         self._service.link_loaded_threads()
+
+    def _targets_for_thread(self, codex_thread_id: str) -> list[Binding]:
+        try:
+            primary_binding = self._state.get_binding_by_thread(codex_thread_id)
+        except KeyError:
+            return self._state.list_mirror_bindings_for_thread(codex_thread_id)
+        return [primary_binding, *self._state.list_mirror_bindings_for_thread(codex_thread_id)]
+
+    def _binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        if binding is not None:
+            return binding
+        return self._state.get_mirror_binding_by_topic(chat_id, message_thread_id)
+
+    def _is_primary_binding(self, binding: Binding) -> bool:
+        try:
+            primary_binding = self._state.get_binding_by_thread(binding.codex_thread_id)
+        except KeyError:
+            return False
+        return (
+            primary_binding.chat_id == binding.chat_id
+            and primary_binding.message_thread_id == binding.message_thread_id
+        )
+
+    def _save_binding(self, binding: Binding) -> Binding:
+        if self._is_primary_binding(binding):
+            return self._state.create_binding(binding)
+        return self._state.upsert_mirror_binding(binding)
+
+    def _get_outbound_message_for_target(self, binding: Binding, event_id: str) -> OutboundMessage | None:
+        if self._is_primary_binding(binding):
+            return self._state.get_outbound_message(binding.codex_thread_id, event_id)
+        return self._state.get_mirror_outbound_message(
+            binding.codex_thread_id,
+            event_id,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+        )
+
+    def _upsert_outbound_message_for_target(self, binding: Binding, outbound_message: OutboundMessage) -> None:
+        if self._is_primary_binding(binding):
+            self._state.upsert_outbound_message(outbound_message)
+            return
+        self._state.upsert_mirror_outbound_message(
+            outbound_message,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+        )
+
+    def _has_seen_event_for_target(self, binding: Binding, event_id: str) -> bool:
+        if self._is_primary_binding(binding):
+            return self._state.has_seen_event(binding.codex_thread_id, event_id)
+        return self._state.has_mirror_seen_event(
+            binding.codex_thread_id,
+            event_id,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+        )
+
+    def _mark_event_seen_for_target(self, binding: Binding, event_id: str) -> None:
+        if self._is_primary_binding(binding):
+            self._state.mark_event_seen(binding.codex_thread_id, event_id)
+            return
+        self._state.mark_mirror_event_seen(
+            binding.codex_thread_id,
+            event_id,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+        )
+
+    def _process_topic_creation_jobs(self) -> None:
+        now = time.time()
+        for topic_creation_job in self._state.list_topic_creation_jobs():
+            if topic_creation_job.retry_after_at is not None and now < topic_creation_job.retry_after_at:
+                continue
+            thread = self._codex.read_thread(topic_creation_job.codex_thread_id)
+            topic_name = format_topic_name(
+                topic_creation_job.project_id or thread.cwd,
+                thread.title,
+            )
+            try:
+                message_thread_id = self._telegram.create_forum_topic(
+                    topic_creation_job.chat_id,
+                    topic_name,
+                )
+            except TelegramRetryAfterError as exc:
+                self._state.upsert_topic_creation_job(
+                    TopicCreationJob(
+                        codex_thread_id=topic_creation_job.codex_thread_id,
+                        chat_id=topic_creation_job.chat_id,
+                        topic_name=topic_name,
+                        project_id=topic_creation_job.project_id or thread.cwd or None,
+                        retry_after_at=now + exc.retry_after_seconds + 1,
+                    )
+                )
+                continue
+            mirror_binding = Binding(
+                codex_thread_id=topic_creation_job.codex_thread_id,
+                chat_id=topic_creation_job.chat_id,
+                message_thread_id=message_thread_id,
+                topic_name=topic_name,
+                sync_mode=self._config.sync_mode,
+                project_id=topic_creation_job.project_id or thread.cwd or None,
+                binding_status=ACTIVE_BINDING_STATUS,
+            )
+            self._state.upsert_mirror_binding(mirror_binding)
+            for event in self._codex.list_events(topic_creation_job.codex_thread_id):
+                self._state.mark_mirror_event_seen(
+                    topic_creation_job.codex_thread_id,
+                    event.event_id,
+                    chat_id=mirror_binding.chat_id,
+                    message_thread_id=mirror_binding.message_thread_id,
+                )
+            self._state.delete_topic_creation_job(topic_creation_job.codex_thread_id, topic_creation_job.chat_id)
 
     def _send_typing_if_due(self, chat_id: int, message_thread_id: int, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -439,18 +566,19 @@ class GatewayDaemon:
         self._touch_topic_lifecycle(codex_thread_id, completed_at=time.time())
 
     def _probe_topic_existence(self) -> None:
-        for binding in self._state.list_bindings():
+        for binding in [*self._state.list_bindings(), *self._state.list_mirror_bindings()]:
             if binding.binding_status == DELETED_BINDING_STATUS:
                 continue
             if self._telegram.probe_topic(binding.chat_id, binding.message_thread_id):
                 continue
-            self._state.create_binding(
+            self._save_binding(
                 replace(
                     binding,
                     binding_status=DELETED_BINDING_STATUS,
                 )
             )
-            self._state.delete_topic_lifecycle(binding.codex_thread_id)
+            if self._is_primary_binding(binding):
+                self._state.delete_topic_lifecycle(binding.codex_thread_id)
             self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
             self._clear_typing_state(binding.chat_id, binding.message_thread_id)
 
@@ -473,7 +601,7 @@ class GatewayDaemon:
                 if not self._mark_binding_deleted_if_missing_topic(binding, exc):
                     raise
                 continue
-            self._state.create_binding(
+            self._save_binding(
                 replace(
                     binding,
                     binding_status=CLOSED_BINDING_STATUS,
@@ -507,7 +635,7 @@ class GatewayDaemon:
     def _prune_stale_state(self) -> None:
         live_topics = {
             (binding.chat_id, binding.message_thread_id)
-            for binding in self._state.list_bindings()
+            for binding in [*self._state.list_bindings(), *self._state.list_mirror_bindings()]
             if binding.binding_status != DELETED_BINDING_STATUS
         }
         live_topics.update(
@@ -584,9 +712,9 @@ class GatewayDaemon:
                 self._topic_status_disabled_chats.add(binding.chat_id)
                 return binding
             if self._mark_binding_deleted_if_missing_topic(binding, exc):
-                return self._state.get_binding_by_thread(binding.codex_thread_id)
+                return self._binding_by_topic(binding.chat_id, binding.message_thread_id) or binding
             raise
-        return self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+        return self._save_binding(replace(binding, topic_name=desired_topic_name))
 
     def _topic_name_matches_desired(
         self,
@@ -708,7 +836,7 @@ class GatewayDaemon:
     def _record_topic_created(self, update: dict[str, object]) -> None:
         chat_id = int(update["chat_id"])
         message_thread_id = int(update["message_thread_id"])
-        if self._state.get_binding_by_topic(chat_id, message_thread_id) is not None:
+        if self._binding_by_topic(chat_id, message_thread_id) is not None:
             return
         existing = self._state.get_topic_project(chat_id, message_thread_id)
         self._state.upsert_topic_project(
@@ -729,13 +857,13 @@ class GatewayDaemon:
         self._state.set_topic_project_last_seen(chat_id, message_thread_id, time.time())
 
     def _handle_topic_closed(self, update: dict[str, object]) -> None:
-        binding = self._state.get_binding_by_topic(
+        binding = self._binding_by_topic(
             int(update["chat_id"]),
             int(update["message_thread_id"]),
         )
         if binding is None or binding.binding_status == CLOSED_BINDING_STATUS:
             return
-        self._state.create_binding(
+        self._save_binding(
             replace(
                 binding,
                 binding_status=CLOSED_BINDING_STATUS,
@@ -744,24 +872,24 @@ class GatewayDaemon:
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
 
     def _handle_topic_reopened(self, update: dict[str, object]) -> None:
-        binding = self._state.get_binding_by_topic(
+        binding = self._binding_by_topic(
             int(update["chat_id"]),
             int(update["message_thread_id"]),
         )
         if binding is None or binding.binding_status == ACTIVE_BINDING_STATUS:
             return
-        self._state.create_binding(
+        self._save_binding(
             replace(
                 binding,
                 binding_status=ACTIVE_BINDING_STATUS,
             )
         )
-        if self._state.get_topic_lifecycle(binding.codex_thread_id) is not None:
+        if self._is_primary_binding(binding) and self._state.get_topic_lifecycle(binding.codex_thread_id) is not None:
             self._touch_topic_lifecycle(binding.codex_thread_id, completed_at=None)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
 
     def _handle_topic_edited(self, update: dict[str, object]) -> None:
-        binding = self._state.get_binding_by_topic(
+        binding = self._binding_by_topic(
             int(update["chat_id"]),
             int(update["message_thread_id"]),
         )
@@ -786,7 +914,7 @@ class GatewayDaemon:
         canonical_name = format_topic_name(project_id, thread.title)
         new_name = strip_topic_status_prefix(raw_name)
         if new_name == canonical_name:
-            binding = self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+            binding = self._save_binding(replace(binding, topic_name=desired_topic_name))
             if raw_name != desired_topic_name:
                 self._sync_topic_name(
                     binding,
@@ -810,7 +938,7 @@ class GatewayDaemon:
                 base_topic_name=format_topic_name(project_id, renamed_thread.title),
                 topic_status=topic_status,
             )
-            self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+            self._save_binding(replace(binding, topic_name=desired_topic_name))
             if desired_topic_name != raw_name:
                 self._sync_topic_name(
                     binding,
@@ -828,13 +956,14 @@ class GatewayDaemon:
     def _mark_binding_deleted_if_missing_topic(self, binding: Binding, exc: Exception) -> bool:
         if not is_missing_topic_error(exc):
             return False
-        self._state.create_binding(
+        self._save_binding(
             replace(
                 binding,
                 binding_status=DELETED_BINDING_STATUS,
             )
         )
-        self._state.delete_topic_lifecycle(binding.codex_thread_id)
+        if self._is_primary_binding(binding):
+            self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
         return True
@@ -1156,7 +1285,7 @@ class GatewayDaemon:
             self._telegram.answer_callback_query(callback_query_id, "Invalid queued message.")
             return
 
-        binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        binding = self._binding_by_topic(chat_id, message_thread_id)
         if binding is None:
             self._telegram.edit_message_reply_markup(chat_id, message_id, None)
             self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
@@ -1212,7 +1341,7 @@ class GatewayDaemon:
             self._telegram.answer_callback_query(callback_query_id)
             return
 
-        binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        binding = self._binding_by_topic(chat_id, message_thread_id)
         if data.startswith(_CALLBACK_RESPONSE_RECALL_PREFIX):
             if binding is None:
                 self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
@@ -1238,6 +1367,9 @@ class GatewayDaemon:
             return
 
         if data == _CALLBACK_RESPONSE_NEW:
+            if binding is not None and not self._is_primary_binding(binding):
+                self._telegram.answer_callback_query(callback_query_id, _mirror_control_text())
+                return
             if self._start_new_thread(chat_id, message_thread_id, binding, thread_title=DEFAULT_NEW_THREAD_TITLE):
                 self._telegram.answer_callback_query(callback_query_id, "Started a new thread.")
             else:
@@ -1245,6 +1377,9 @@ class GatewayDaemon:
             return
 
         if data == _CALLBACK_RESPONSE_PROJECT:
+            if binding is not None and not self._is_primary_binding(binding):
+                self._telegram.answer_callback_query(callback_query_id, _mirror_control_text())
+                return
             self._open_project_picker(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
@@ -1320,7 +1455,7 @@ class GatewayDaemon:
     def _bind_topic_project(self, topic_project: TopicProject) -> None:
         if not topic_project.project_id:
             raise ValueError("project_id is required to bind a topic.")
-        existing_binding = self._state.get_binding_by_topic(
+        existing_binding = self._binding_by_topic(
             topic_project.chat_id,
             topic_project.message_thread_id,
         )
@@ -1419,7 +1554,7 @@ class GatewayDaemon:
     ) -> None:
         chat_id = int(update["chat_id"])
         message_thread_id = int(update["message_thread_id"])
-        binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        binding = self._binding_by_topic(chat_id, message_thread_id)
 
         if command_name == "help":
             self._telegram.send_message(
@@ -1481,6 +1616,9 @@ class GatewayDaemon:
             return
 
         if command_name == "create_thread":
+            if binding is not None and not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
             if not self._start_new_thread(
                 chat_id,
                 message_thread_id,
@@ -1495,6 +1633,9 @@ class GatewayDaemon:
             return
 
         if command_name == "project":
+            if binding is not None and not self._is_primary_binding(binding):
+                self._telegram.send_message(chat_id, message_thread_id, _mirror_control_text())
+                return
             self._open_project_picker(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
@@ -1540,7 +1681,7 @@ class GatewayDaemon:
         return True
 
     def _topic_name_for_command(self, chat_id: int, message_thread_id: int) -> str | None:
-        binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        binding = self._binding_by_topic(chat_id, message_thread_id)
         if binding is not None:
             return binding.topic_name
         topic_project = self._state.get_topic_project(chat_id, message_thread_id)
@@ -1634,7 +1775,7 @@ class GatewayDaemon:
 
     def _doctor_text(self, chat_id: int, message_thread_id: int) -> str:
         chat = self._telegram.get_chat(self._config.telegram_default_chat_id)
-        current_binding = self._state.get_binding_by_topic(chat_id, message_thread_id)
+        current_binding = self._binding_by_topic(chat_id, message_thread_id)
         loaded_projects = self._codex.list_loaded_projects()
         loaded_threads = self._codex.list_loaded_threads()
         binding_line = (
@@ -1724,6 +1865,9 @@ class GatewayDaemon:
             )
 
         loaded_threads = {thread.thread_id: thread for thread in self._codex.list_loaded_threads()}
+        mirror_bindings_by_thread: dict[str, list[Binding]] = {}
+        for mirror_binding in self._state.list_mirror_bindings():
+            mirror_bindings_by_thread.setdefault(mirror_binding.codex_thread_id, []).append(mirror_binding)
         lines = ["Gateway bindings", ""]
         for binding in sorted(bindings, key=lambda item: ((item.topic_name or ""), item.codex_thread_id)):
             thread = loaded_threads.get(binding.codex_thread_id)
@@ -1739,6 +1883,24 @@ class GatewayDaemon:
                 f"{loaded_marker} ({project_name}) {thread_title}\n"
                 f"topic `{binding.message_thread_id}` • thread `{binding.codex_thread_id}` • status `{binding.binding_status}`"
             )
+            mirrors = sorted(
+                mirror_bindings_by_thread.get(binding.codex_thread_id, []),
+                key=lambda item: (item.chat_id, item.message_thread_id),
+            )
+            for mirror_binding in mirrors:
+                lines.append(
+                    f"  ↳ mirror chat `{mirror_binding.chat_id}` topic `{mirror_binding.message_thread_id}`"
+                    f" • status `{mirror_binding.binding_status}`"
+                )
+        pending_jobs = self._state.list_topic_creation_jobs()
+        if pending_jobs:
+            lines.append("")
+            lines.append("Pending mirror topic creation")
+            lines.append("")
+            for topic_creation_job in pending_jobs:
+                lines.append(
+                    f"- thread `{topic_creation_job.codex_thread_id}` -> chat `{topic_creation_job.chat_id}`"
+                )
         lines.append("")
         lines.append("Use `/gateway sync` to audit bindings and recover deleted topics.")
         return "\n".join(lines)
@@ -2008,6 +2170,10 @@ def _turn_status_text(terminal_status: str) -> str:
     if terminal_status == "failed":
         return "Codex started processing your message, but the turn failed before a final answer was produced."
     return f"Codex turn ended with status `{terminal_status}` before a final answer was produced."
+
+
+def _mirror_control_text() -> str:
+    return "Mirror topics can chat with Codex, but project and thread controls stay in the primary topic."
 
 
 def _is_terminal_turn_status(status: str) -> bool:

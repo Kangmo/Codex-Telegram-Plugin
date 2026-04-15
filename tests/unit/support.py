@@ -6,6 +6,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -20,15 +21,20 @@ class DummyState:
     def __init__(self) -> None:
         self.bindings_by_thread: dict[str, Binding] = {}
         self.bindings_by_topic: dict[tuple[int, int], Binding] = {}
+        self.mirror_bindings_by_thread_chat: dict[tuple[str, int], Binding] = {}
+        self.mirror_bindings_by_topic: dict[tuple[int, int], Binding] = {}
         self.projects: dict[str, CodexProject] = {}
         self.topic_projects: dict[tuple[int, int], TopicProject] = {}
         self.seen_events: set[tuple[str, str]] = set()
+        self.mirror_seen_events: set[tuple[str, int, int, str]] = set()
         self.outbound_messages: dict[tuple[str, str], OutboundMessage] = {}
+        self.mirror_outbound_messages: dict[tuple[str, int, int, str], OutboundMessage] = {}
         self.inbound_messages: list[InboundMessage] = []
         self.pending_turns: dict[str, PendingTurn] = {}
         self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
+        self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
 
     def create_binding(self, binding: Binding) -> Binding:
@@ -53,6 +59,30 @@ class DummyState:
 
     def list_bindings(self) -> list[Binding]:
         return list(self.bindings_by_thread.values())
+
+    def upsert_mirror_binding(self, binding: Binding) -> Binding:
+        existing = self.mirror_bindings_by_thread_chat.get((binding.codex_thread_id, binding.chat_id))
+        if existing is not None:
+            self.mirror_bindings_by_topic.pop((existing.chat_id, existing.message_thread_id), None)
+        existing_by_topic = self.mirror_bindings_by_topic.get((binding.chat_id, binding.message_thread_id))
+        if existing_by_topic is not None:
+            self.mirror_bindings_by_thread_chat.pop((existing_by_topic.codex_thread_id, existing_by_topic.chat_id), None)
+        self.mirror_bindings_by_thread_chat[(binding.codex_thread_id, binding.chat_id)] = binding
+        self.mirror_bindings_by_topic[(binding.chat_id, binding.message_thread_id)] = binding
+        return binding
+
+    def list_mirror_bindings(self) -> list[Binding]:
+        return list(self.mirror_bindings_by_thread_chat.values())
+
+    def list_mirror_bindings_for_thread(self, codex_thread_id: str) -> list[Binding]:
+        return [
+            binding
+            for (thread_id, _chat_id), binding in self.mirror_bindings_by_thread_chat.items()
+            if thread_id == codex_thread_id
+        ]
+
+    def get_mirror_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        return self.mirror_bindings_by_topic.get((chat_id, message_thread_id))
 
     def upsert_project(self, project: CodexProject) -> CodexProject:
         self.projects[project.project_id] = project
@@ -82,6 +112,36 @@ class DummyState:
 
     def delete_seen_event(self, codex_thread_id: str, event_id: str) -> None:
         self.seen_events.discard((codex_thread_id, event_id))
+
+    def mark_mirror_event_seen(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        self.mirror_seen_events.add((codex_thread_id, chat_id, message_thread_id, event_id))
+
+    def has_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> bool:
+        return (codex_thread_id, chat_id, message_thread_id, event_id) in self.mirror_seen_events
+
+    def delete_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        self.mirror_seen_events.discard((codex_thread_id, chat_id, message_thread_id, event_id))
 
     def enqueue_inbound(self, inbound_message: InboundMessage) -> None:
         self.inbound_messages.append(inbound_message)
@@ -117,6 +177,35 @@ class DummyState:
             key: value
             for key, value in self.outbound_messages.items()
             if key[0] != codex_thread_id
+        }
+
+    def upsert_mirror_outbound_message(
+        self,
+        outbound_message: OutboundMessage,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> OutboundMessage:
+        self.mirror_outbound_messages[
+            (outbound_message.codex_thread_id, chat_id, message_thread_id, outbound_message.event_id)
+        ] = outbound_message
+        return outbound_message
+
+    def get_mirror_outbound_message(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> OutboundMessage | None:
+        return self.mirror_outbound_messages.get((codex_thread_id, chat_id, message_thread_id, event_id))
+
+    def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
+        self.mirror_outbound_messages = {
+            key: value
+            for key, value in self.mirror_outbound_messages.items()
+            if not (key[0] == codex_thread_id and key[1] == chat_id)
         }
 
     def record_topic_history(
@@ -197,6 +286,19 @@ class DummyState:
             for key, value in self.topic_history.items()
             if key in live_topics
         }
+
+    def upsert_topic_creation_job(self, topic_creation_job: TopicCreationJob) -> TopicCreationJob:
+        self.topic_creation_jobs[(topic_creation_job.codex_thread_id, topic_creation_job.chat_id)] = topic_creation_job
+        return topic_creation_job
+
+    def get_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> TopicCreationJob | None:
+        return self.topic_creation_jobs.get((codex_thread_id, chat_id))
+
+    def list_topic_creation_jobs(self) -> list[TopicCreationJob]:
+        return list(self.topic_creation_jobs.values())
+
+    def delete_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> None:
+        self.topic_creation_jobs.pop((codex_thread_id, chat_id), None)
 
 
 class DummyTelegramClient:

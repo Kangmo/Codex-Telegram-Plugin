@@ -9,6 +9,16 @@ class TelegramApiError(RuntimeError):
     """Raised when the Telegram Bot API returns an error response."""
 
 
+class TelegramRetryAfterError(TelegramApiError):
+    """Raised when Telegram requests a retry-after cooldown."""
+
+    def __init__(self, method: str, retry_after_seconds: int, payload: dict[str, object]) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            f"Telegram API error for {method}: retry after {retry_after_seconds}s: {payload}"
+        )
+
+
 _UPLOAD_DIR_NAME = ".ccgram-uploads"
 _MAX_FILE_SIZE = 50 * 1024 * 1024
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
@@ -369,13 +379,24 @@ class TelegramBotClient:
                 data = json.loads(response.read().decode())
         except error.HTTPError as exc:
             body = exc.read().decode()
-            raise TelegramApiError(f"Telegram HTTP error for {method}: {body}") from exc
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                raise TelegramApiError(f"Telegram HTTP error for {method}: {body}") from exc
+            self._raise_api_error(method, data)
         except error.URLError as exc:
             raise TelegramApiError(f"Telegram request failed for {method}: {exc}") from exc
 
         if not data.get("ok"):
-            raise TelegramApiError(f"Telegram API error for {method}: {data}")
+            self._raise_api_error(method, data)
         return data["result"]
+
+    @staticmethod
+    def _raise_api_error(method: str, data: dict[str, object]) -> None:
+        retry_after_seconds = _retry_after_seconds(data)
+        if retry_after_seconds is not None:
+            raise TelegramRetryAfterError(method, retry_after_seconds, data)
+        raise TelegramApiError(f"Telegram API error for {method}: {data}")
 
 
 def _split_message(text: str, limit: int = 4000) -> list[str]:
@@ -429,6 +450,16 @@ def _generate_photo_filename(file_unique_id: str) -> str:
 def _as_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
+    return None
+
+
+def _retry_after_seconds(data: dict[str, object]) -> int | None:
+    parameters = data.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    retry_after = parameters.get("retry_after")
+    if isinstance(retry_after, int):
+        return max(1, retry_after)
     return None
 
 

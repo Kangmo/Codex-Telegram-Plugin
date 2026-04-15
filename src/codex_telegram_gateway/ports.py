@@ -9,6 +9,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -138,6 +139,18 @@ class GatewayState(Protocol):
     def get_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
         ...
 
+    def upsert_mirror_binding(self, binding: Binding) -> Binding:
+        ...
+
+    def list_mirror_bindings(self) -> list[Binding]:
+        ...
+
+    def list_mirror_bindings_for_thread(self, codex_thread_id: str) -> list[Binding]:
+        ...
+
+    def get_mirror_binding_by_topic(self, chat_id: int, message_thread_id: int) -> Binding | None:
+        ...
+
     def upsert_project(self, project: CodexProject) -> CodexProject:
         ...
 
@@ -192,6 +205,22 @@ class GatewayState(Protocol):
     def delete_outbound_messages(self, codex_thread_id: str) -> None:
         ...
 
+    def upsert_mirror_outbound_message(self, outbound_message: OutboundMessage, *, chat_id: int, message_thread_id: int) -> OutboundMessage:
+        ...
+
+    def get_mirror_outbound_message(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> OutboundMessage | None:
+        ...
+
+    def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
+        ...
+
     def record_topic_history(
         self,
         chat_id: int,
@@ -223,6 +252,36 @@ class GatewayState(Protocol):
     def delete_pending_turn(self, codex_thread_id: str) -> None:
         ...
 
+    def mark_mirror_event_seen(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        ...
+
+    def has_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> bool:
+        ...
+
+    def delete_mirror_seen_event(
+        self,
+        codex_thread_id: str,
+        event_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> None:
+        ...
+
     def upsert_topic_lifecycle(self, topic_lifecycle: TopicLifecycle) -> TopicLifecycle:
         ...
 
@@ -248,4 +307,16 @@ class GatewayState(Protocol):
         ...
 
     def prune_orphan_topic_history(self, live_topics: set[tuple[int, int]]) -> None:
+        ...
+
+    def upsert_topic_creation_job(self, topic_creation_job: TopicCreationJob) -> TopicCreationJob:
+        ...
+
+    def get_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> TopicCreationJob | None:
+        ...
+
+    def list_topic_creation_jobs(self) -> list[TopicCreationJob]:
+        ...
+
+    def delete_topic_creation_job(self, codex_thread_id: str, chat_id: int) -> None:
         ...

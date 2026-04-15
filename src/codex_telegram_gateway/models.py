@@ -119,6 +119,17 @@ class TopicLifecycle:
 
 
 @dataclass(frozen=True)
+class TopicCreationJob:
+    """Pending mirror-topic creation work with persisted retry timing."""
+
+    codex_thread_id: str
+    chat_id: int
+    topic_name: str
+    project_id: str | None = None
+    retry_after_at: float | None = None
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """Authorized inbound Telegram content bound to one Codex thread."""
 

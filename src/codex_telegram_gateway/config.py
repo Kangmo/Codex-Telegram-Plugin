@@ -11,6 +11,7 @@ class GatewayConfig:
     telegram_allowed_user_ids: set[int]
     telegram_default_chat_id: int
     sync_mode: str
+    telegram_mirror_chat_ids: tuple[int, ...] = ()
     telegram_topic_status_emoji_enabled: bool = True
     lifecycle_probe_interval_seconds: float = 60.0
     lifecycle_unbound_ttl_seconds: float = 1800.0
@@ -33,6 +34,11 @@ class GatewayConfig:
             if raw_user_id.strip()
         }
         chat_id = int(_require_env(env, "TELEGRAM_DEFAULT_CHAT_ID"))
+        mirror_chat_ids = tuple(
+            int(raw_chat_id.strip())
+            for raw_chat_id in env.get("TELEGRAM_MIRROR_CHAT_IDS", "").split(",")
+            if raw_chat_id.strip()
+        )
         state_database_path = Path(
             env.get("CODEX_TELEGRAM_STATE_DB", ".codex-telegram/gateway.db")
         )
@@ -66,6 +72,11 @@ class GatewayConfig:
             telegram_bot_token=bot_token,
             telegram_allowed_user_ids=allowed_user_ids,
             telegram_default_chat_id=chat_id,
+            telegram_mirror_chat_ids=tuple(
+                configured_chat_id
+                for configured_chat_id in mirror_chat_ids
+                if configured_chat_id != chat_id
+            ),
             sync_mode=sync_mode,
             telegram_topic_status_emoji_enabled=topic_status_emoji_enabled,
             lifecycle_probe_interval_seconds=lifecycle_probe_interval_seconds,
@@ -78,6 +89,17 @@ class GatewayConfig:
     @property
     def sync_lock_path(self) -> Path:
         return self.state_database_path.with_name("telegram-sync.lock")
+
+    @property
+    def telegram_target_chat_ids(self) -> tuple[int, ...]:
+        seen_chat_ids: set[int] = set()
+        ordered_chat_ids: list[int] = []
+        for chat_id in (self.telegram_default_chat_id, *self.telegram_mirror_chat_ids):
+            if chat_id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(chat_id)
+            ordered_chat_ids.append(chat_id)
+        return tuple(ordered_chat_ids)
 
 
 def _require_env(env: dict[str, str], name: str) -> str:
