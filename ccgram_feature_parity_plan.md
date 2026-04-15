@@ -58,7 +58,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-24 | General file intake and unsupported-content UX | P0 | Native | Implemented |
 | FP-25 | Outbound media/file delivery | P0 | Native | Implemented |
 | FP-26 | Voice transcription flow | P1 | Native | Implemented |
-| FP-27 | Inline query support | P2 | Native | Missing |
+| FP-27 | Inline query support | P2 | Native | Implemented |
 | FP-28 | Inter-agent messaging/mailbox | P3 | Separate subsystem | Not recommended for near-term parity |
 | FP-29 | Shell/NL-to-command mode | P3 | Separate subsystem | Not recommended for this plugin |
 
@@ -197,9 +197,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-27: Inline Query Support
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-28: Inter-Agent Messaging/Mailbox
 - [ ] Implemented
@@ -1983,31 +1983,79 @@ Match `ccgram`’s voice-message workflow with confirm/discard behavior.
 
 **Parity target**
 
-Allow Telegram inline query usage for quick inserts like bindings, recent projects, or commands.
+Support Telegram inline-query insertion as a fast way to send prepared text back into the current chat, matching the practical `ccgram` use case behind `switch_inline_query_current_chat`.
 
 **Dev design**
 
-- Keep scope narrow:
-  - current bindings
-  - recent projects
-  - canned commands/steers
-- Do not expose raw thread history through inline query.
+- Keep the scope intentionally narrow and text-only:
+  - echo the typed inline query as a sendable result
+  - suggest matching gateway commands
+  - suggest matching observed pass-through Codex commands
+- Do not expose:
+  - raw thread history
+  - project ids or filesystem paths
+  - direct control actions that would bypass existing topic-scoped callbacks
 
 **Implementation plan**
 
-1. Add inline query handler module.
-2. Add result builders for:
-   - project insert
-   - binding insert
-   - command insert
-3. Gate by authorized user id.
+1. Add `inline_query.py` with a small result builder for:
+   - echo-text insertions
+   - gateway command suggestions
+   - remembered pass-through command suggestions
+2. Extend the Telegram transport:
+   - request `inline_query` updates from `getUpdates`
+   - normalize inline-query updates
+   - implement `answerInlineQuery`
+3. Route inline queries through the daemon:
+   - gate by authorized user id
+   - answer with personal, no-cache results
+4. Reuse existing pass-through command learning so inline suggestions reflect the Codex commands already seen in this gateway.
 
 **Test automation plan**
 
 - Unit:
-  - query parsing and result building
+  - result building, duplicate suppression, blank/slash-only edge cases, and max-result capping
+  - Telegram inline-query normalization and `answerInlineQuery` payload encoding
+  - daemon handling for authorized and unauthorized inline queries
 - Integration:
-  - fake inline query returns expected result set
+  - fake inline query returns the expected sendable result set through the daemon
+- E2E:
+  - submit an inline query against the fake Telegram transport and verify the returned results include both the echo article and matching commands
+
+### FP-27 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-27-inline-query-support`
+- Reviewed `ccgram` inline-query references before implementation:
+  - `src/ccgram/bot.py::inline_query_handler()`
+  - `src/ccgram/handlers/command_history.py`
+- Added `inline_query.py` so inline-query behavior is isolated from the main daemon flow and stays limited to safe text-insert result generation.
+- `TelegramBotClient.get_updates()` now requests and normalizes `inline_query` updates, and the transport implements `answerInlineQuery`.
+- `GatewayDaemon` now:
+  - recognizes `inline_query` updates before topic-bound message routing
+  - gates them by the same allowed-user list as the rest of the gateway
+  - answers with personal, zero-cache results built from the current query text and remembered pass-through commands
+- Implementation decisions locked during FP-27:
+  - the feature is intentionally narrower than the original broad idea of project/binding search because Telegram inline query is best suited to safe text insertion, not stateful topic selection
+  - current parity scope is:
+    - echo typed text
+    - gateway command suggestions
+    - pass-through Codex command suggestions
+  - project picking, binding recovery, and history replay remain on the existing callback-driven topic UI instead of being duplicated in inline query results
+- Proofread fixes before sign-off:
+  - duplicate suppression prevents `/status` from appearing twice when the raw query already matches a suggested command
+  - slash-only queries now behave as a safe “show me suggestions” case instead of collapsing into an empty query
+  - malformed inline-query updates without a sender or query id are skipped cleanly during Telegram normalization
+  - unauthorized inline queries are ignored before result generation so the feature does not widen the gateway trust boundary
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_inline_query.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `192 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `316 passed`
+- Feature-specific changed-code coverage:
+  - `src/codex_telegram_gateway/inline_query.py`: `30/30 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `13/13 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `12/12 = 100.0%`
+  - `TOTAL`: `55/55 = 100.0%`
 
 ## Advanced Provider and Messaging Parity
 

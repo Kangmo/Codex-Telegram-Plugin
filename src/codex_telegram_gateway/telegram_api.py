@@ -54,13 +54,31 @@ class TelegramBotClient:
         return message_thread_id
 
     def get_updates(self, offset: int | None = None) -> list[dict[str, object]]:
-        payload: dict[str, object] = {"allowed_updates": json.dumps(["message", "callback_query"])}
+        payload: dict[str, object] = {"allowed_updates": json.dumps(["message", "callback_query", "inline_query"])}
         if offset is not None:
             payload["offset"] = offset
         result = self._call("getUpdates", payload)
 
         updates: list[dict[str, object]] = []
         for update in result:
+            inline_query = update.get("inline_query")
+            if isinstance(inline_query, dict):
+                sender = inline_query.get("from")
+                inline_query_id = inline_query.get("id")
+                if not isinstance(sender, dict):
+                    continue
+                if not isinstance(inline_query_id, str):
+                    continue
+                updates.append(
+                    {
+                        "kind": "inline_query",
+                        "update_id": int(update["update_id"]),
+                        "inline_query_id": inline_query_id,
+                        "from_user_id": int(sender["id"]),
+                        "query": str(inline_query.get("query") or ""),
+                    }
+                )
+                continue
             callback_query = update.get("callback_query")
             if isinstance(callback_query, dict):
                 callback_message = callback_query.get("message")
@@ -308,6 +326,24 @@ class TelegramBotClient:
         if text is not None:
             payload["text"] = text
         self._call("answerCallbackQuery", payload)
+
+    def answer_inline_query(
+        self,
+        inline_query_id: str,
+        results: list[dict[str, object]],
+        *,
+        cache_time: int = 0,
+        is_personal: bool = True,
+    ) -> None:
+        self._call(
+            "answerInlineQuery",
+            {
+                "inline_query_id": inline_query_id,
+                "results": json.dumps(results),
+                "cache_time": cache_time,
+                "is_personal": is_personal,
+            },
+        )
 
     def edit_message_reply_markup(
         self,

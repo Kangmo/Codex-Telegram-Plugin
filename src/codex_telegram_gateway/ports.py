@@ -75,6 +75,16 @@ class TelegramClient(Protocol):
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         ...
 
+    def answer_inline_query(
+        self,
+        inline_query_id: str,
+        results: list[dict[str, object]],
+        *,
+        cache_time: int = 0,
+        is_personal: bool = True,
+    ) -> None:
+        ...
+
     def edit_message_reply_markup(
         self,
         chat_id: int,

@@ -456,6 +456,7 @@ class DummyTelegramClient:
         self.sent_photos: list[tuple[int, int, str, str | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.answered_callback_queries: list[tuple[str, str | None]] = []
+        self.answered_inline_queries: list[tuple[str, list[dict[str, object]], int, bool]] = []
         self.edited_reply_markups: list[tuple[int, int, dict[str, object] | None]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.edited_topics: list[tuple[int, int, str]] = []
@@ -618,6 +619,24 @@ class DummyTelegramClient:
             }
         )
 
+    def push_inline_query_update(
+        self,
+        *,
+        update_id: int,
+        inline_query_id: str,
+        from_user_id: int,
+        query: str,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "inline_query",
+                "update_id": update_id,
+                "inline_query_id": inline_query_id,
+                "from_user_id": from_user_id,
+                "query": query,
+            }
+        )
+
     def send_message(
         self,
         chat_id: int,
@@ -664,6 +683,16 @@ class DummyTelegramClient:
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         self.answered_callback_queries.append((callback_query_id, text))
+
+    def answer_inline_query(
+        self,
+        inline_query_id: str,
+        results: list[dict[str, object]],
+        *,
+        cache_time: int = 0,
+        is_personal: bool = True,
+    ) -> None:
+        self.answered_inline_queries.append((inline_query_id, results, cache_time, is_personal))
 
     def edit_message_reply_markup(
         self,

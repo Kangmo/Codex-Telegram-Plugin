@@ -44,6 +44,7 @@ class FakeTelegramClient:
         self.sent_photos: list[tuple[int, int, str, str | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
+        self.answered_inline_queries: list[tuple[str, list[dict[str, object]], int, bool]] = []
         self.registered_command_sets: list[tuple[tuple[tuple[str, str], ...], dict[str, object] | None]] = []
 
     def create_forum_topic(self, chat_id: int, name: str) -> int:
@@ -93,6 +94,24 @@ class FakeTelegramClient:
                 "message_id": message_id,
                 "from_user_id": from_user_id,
                 "data": data,
+            }
+        )
+
+    def push_inline_query(
+        self,
+        *,
+        update_id: int,
+        inline_query_id: str,
+        from_user_id: int,
+        query: str,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "inline_query",
+                "update_id": update_id,
+                "inline_query_id": inline_query_id,
+                "from_user_id": from_user_id,
+                "query": query,
             }
         )
 
@@ -176,6 +195,16 @@ class FakeTelegramClient:
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         del callback_query_id, text
+
+    def answer_inline_query(
+        self,
+        inline_query_id: str,
+        results: list[dict[str, object]],
+        *,
+        cache_time: int = 0,
+        is_personal: bool = True,
+    ) -> None:
+        self.answered_inline_queries.append((inline_query_id, results, cache_time, is_personal))
 
     def edit_message_reply_markup(
         self,
@@ -1323,3 +1352,47 @@ def test_gateway_flow_transcribes_voice_and_routes_confirmed_text_to_codex(tmp_p
             local_image_paths=(),
         )
     ]
+
+
+def test_gateway_flow_answers_inline_query_with_sendable_results(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Inline query topic",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state.remember_passthrough_command("status")
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_inline_query(
+        update_id=1,
+        inline_query_id="inline-1",
+        from_user_id=111,
+        query="sta",
+    )
+    daemon.poll_telegram_once()
+
+    assert len(telegram.answered_inline_queries) == 1
+    inline_query_id, results, cache_time, is_personal = telegram.answered_inline_queries[0]
+    assert inline_query_id == "inline-1"
+    assert cache_time == 0
+    assert is_personal is True
+    inserted_texts = [result["input_message_content"]["message_text"] for result in results]
+    assert inserted_texts[0] == "sta"
+    assert "/gateway status" in inserted_texts
+    assert "/status" in inserted_texts
