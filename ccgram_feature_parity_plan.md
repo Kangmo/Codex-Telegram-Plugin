@@ -639,8 +639,8 @@ Code review notes:
 Branch and merge:
 
 - Feature branch: `feature/fp-20-dedicated-status-bubble`
-- Feature commit: `PENDING`
-- Merge commit on `main`: `PENDING`
+- Feature commit: `ff1c6b8`
+- Merge commit on `main`: `698ef7e`
 
 Implementation decisions:
 
@@ -1558,8 +1558,8 @@ Provide a single per-topic status message that updates in place instead of scatt
 
 - Branch and merge:
   - feature branch `feature/fp-20-dedicated-status-bubble`
-  - feature commit `PENDING`
-  - merge commit on `main` `PENDING`
+  - feature commit `ff1c6b8`
+  - merge commit on `main` `698ef7e`
 - Added a dedicated `status_bubble.py` renderer with a normalized `StatusBubbleSnapshot` model and a persistent `StatusBubbleViewState` SQLite row per topic.
 - The new status bubble is a separate Telegram control message from assistant reply blocks and shows:
   - project name
