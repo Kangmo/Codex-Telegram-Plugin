@@ -4878,6 +4878,135 @@ def test_poll_telegram_once_queues_photo_message_for_bound_topic(tmp_path) -> No
     ]
 
 
+def test_poll_telegram_once_queues_document_prompt_for_bound_topic() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram._updates.append(
+        {
+            "kind": "message",
+            "update_id": 4,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "text": (
+                "I've uploaded a PDF to /tmp/project/.ccgram-uploads/design-spec.pdf. "
+                "Please inspect or read it as needed."
+            ),
+            "local_image_paths": (),
+        }
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=4,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text=(
+                "I've uploaded a PDF to /tmp/project/.ccgram-uploads/design-spec.pdf. "
+                "Please inspect or read it as needed."
+            ),
+            local_image_paths=(),
+        )
+    ]
+
+
+def test_poll_telegram_once_replies_to_unsupported_media_without_queueing() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram._updates.append(
+        {
+            "kind": "unsupported_message",
+            "update_id": 5,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "notice": "⚠ Stickers are not supported yet. Use text, photos, documents, audio, or video.",
+        }
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == []
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "⚠ Stickers are not supported yet. Use text, photos, documents, audio, or video.",
+            None,
+        )
+    ]
+
+
+def test_poll_telegram_once_ignores_unsupported_media_from_unauthorized_user() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram._updates.append(
+        {
+            "kind": "unsupported_message",
+            "update_id": 6,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 999,
+            "notice": "⚠ Voice messages are not supported yet. Use text, photos, documents, audio, or video.",
+        }
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == []
+    assert telegram.sent_messages == []
+
+
 def test_poll_telegram_once_queues_message_during_active_turn_and_sends_steer_widget() -> None:
     state = DummyState()
     binding = make_binding()

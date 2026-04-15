@@ -312,6 +312,13 @@ class GatewayDaemon:
                         self._state.set_topic_project_last_seen(chat_id, message_thread_id, time.time())
                     self._handle_callback_query(update)
                     continue
+                if kind == "unsupported_message":
+                    if from_user_id not in self._config.telegram_allowed_user_ids:
+                        continue
+                    notice = str(update.get("notice") or "").strip()
+                    if notice:
+                        self._telegram.send_message(chat_id, message_thread_id, notice)
+                    continue
                 if kind != "message":
                     continue
 

@@ -55,7 +55,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Implemented |
 | FP-22 | Live view | P1 | Adapted | Missing |
 | FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
-| FP-24 | General file intake and unsupported-content UX | P0 | Native | Partial today |
+| FP-24 | General file intake and unsupported-content UX | P0 | Native | Implemented |
 | FP-25 | Outbound media/file delivery | P0 | Native | Missing |
 | FP-26 | Voice transcription flow | P1 | Native | Missing |
 | FP-27 | Inline query support | P2 | Native | Missing |
@@ -182,9 +182,9 @@ Update these checkboxes as each feature lands.
 - [ ] Line by line proof reading for code review done
 
 ### FP-24: General File Intake and Unsupported-Content UX
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-25: Outbound Media and File Delivery
 - [ ] Implemented
@@ -1734,29 +1734,63 @@ Handle more than text and images on inbound Telegram messages.
   - text files
   - PDFs
   - audio/video as saved files plus descriptive prompt text
-- Save inbound files under project-scoped upload directories.
+- Save inbound files under the gateway-local `.ccgram-uploads` directory with stable absolute paths.
 - When Codex cannot ingest a raw media type directly, submit a companion text prompt with the saved path.
 - Reply explicitly for unsupported content types instead of silently ignoring them.
+- Keep direct images on the native `local_image_paths` path so existing image delivery to Codex App does not regress.
 
 **Implementation plan**
 
-1. Generalize current image intake pipeline into `media_ingest.py`.
-2. Add MIME/type routing:
-   - direct attach
-   - file path prompt
-   - unsupported with explanation
-3. Persist attachment metadata with queued inbound messages.
-4. Add size and file-count limits per message.
+1. Add `media_ingest.py` for user-facing prompt and unsupported-media notice rendering.
+2. Extend `telegram_api.py` routing:
+   - keep photos and image-documents on `local_image_paths`
+   - download non-image documents/audio/video into `.ccgram-uploads`
+   - synthesize a descriptive text prompt that includes the saved absolute path
+   - normalize unsupported content into an explicit `unsupported_message` update
+3. Reuse the existing inbound queue shape instead of expanding the DB schema:
+   - image input remains `local_image_paths`
+   - non-image attachments become text-only inbound prompts
+4. Handle unsupported inbound media in `daemon.py` by replying immediately in-topic and skipping the Codex queue.
+5. Keep the existing Telegram download size limit and current one-media-object-per-message normalization behavior.
 
 **Test automation plan**
 
 - Unit:
-  - MIME routing decisions
-  - upload path generation
+  - media prompt text for PDF/audio/video/text/generic files
+  - unsupported notice wording for sticker, voice, and generic unsupported content
+  - Telegram MIME/type routing helpers and generated attachment naming
 - Integration:
   - PDF/document message creates queued Codex input with saved file path
+  - unsupported content produces an immediate Telegram notice without queueing
 - E2E:
-  - send supported and unsupported media types and verify user-facing response
+  - send a supported document into a bound topic and verify the saved-path prompt reaches Codex
+
+### FP-24 verification
+
+- Added `media_ingest.py` so inbound non-image attachments have one normalization layer for:
+  - saved-attachment prompt text
+  - supported media wording differences between PDF, text, audio, video, and generic documents
+  - explicit unsupported-media notices
+- `TelegramBotClient.get_updates()` now preserves the pre-existing direct image path for photos and image-documents, and adds a second inbound path for:
+  - non-image documents
+  - audio
+  - video
+  - unsupported Telegram content such as stickers, voice notes, and generic non-ingestable payloads
+- Implementation decisions locked during FP-24:
+  - Codex App currently supports native local-image inputs but not raw local document/audio/video attachments, so parity is adapted by downloading those files locally and passing an explicit absolute-path prompt to the thread
+  - attachment metadata is intentionally not persisted in a new DB table for this feature; the saved-path prompt text is the durable handoff into the existing inbound queue
+  - uploads currently land in gateway-local `.ccgram-uploads` rather than per-project storage because the gateway owns Telegram download state independently of Codex App project internals
+- Proofread decisions and fixes before sign-off:
+  - kept image handling untouched so FP-24 could not break the already-working photo flow
+  - added explicit unsupported-user notices rather than silently dropping stickers, voice notes, or other non-ingestable Telegram payloads
+  - rejected unauthorized unsupported-media updates before sending notices back to Telegram so the new UX does not widen the existing trust boundary
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_media_ingest.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `176 passed`
+- Feature-specific changed-executable coverage for FP-24 source work:
+  - `src/codex_telegram_gateway/media_ingest.py`: `25/25 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `68/68 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `7/7 = 100.0%`
+  - `TOTAL`: `100/100 = 100.0%`
 
 ### FP-25: Outbound Media and File Delivery
 

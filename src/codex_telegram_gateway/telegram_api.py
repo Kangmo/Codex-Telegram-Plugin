@@ -1,9 +1,16 @@
 import json
+import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, parse, request
 from uuid import uuid4
+
+from codex_telegram_gateway.media_ingest import (
+    SavedAttachment,
+    attachment_prompt_text,
+    unsupported_content_notice,
+)
 
 
 class TelegramApiError(RuntimeError):
@@ -146,9 +153,35 @@ class TelegramBotClient:
             text = message.get("text")
             caption = message.get("caption")
             local_image_paths = self._extract_local_image_paths(message)
+            attachment_prompt = ""
+            if not local_image_paths:
+                saved_attachment = self._extract_saved_attachment(message)
+                if saved_attachment is not None:
+                    attachment_prompt = attachment_prompt_text(
+                        saved_attachment,
+                        user_note=_sanitize_caption(caption) if isinstance(caption, str) else "",
+                    )
+                else:
+                    unsupported_kind = _unsupported_content_kind(message)
+                    if unsupported_kind is not None:
+                        if not isinstance(sender, dict):
+                            continue
+                        updates.append(
+                            {
+                                "kind": "unsupported_message",
+                                "update_id": int(update["update_id"]),
+                                "chat_id": int(chat["id"]),
+                                "message_thread_id": message_thread_id,
+                                "from_user_id": int(sender["id"]),
+                                "notice": unsupported_content_notice(unsupported_kind),
+                            }
+                        )
+                        continue
             normalized_text = text if isinstance(text, str) else ""
-            if not normalized_text and isinstance(caption, str):
+            if not normalized_text and isinstance(caption, str) and local_image_paths:
                 normalized_text = _sanitize_caption(caption)
+            if not normalized_text and attachment_prompt:
+                normalized_text = attachment_prompt
             if not normalized_text and not local_image_paths:
                 continue
             if not isinstance(sender, dict):
@@ -384,6 +417,60 @@ class TelegramBotClient:
         )
         return (str(image_path),)
 
+    def _extract_saved_attachment(self, message: dict[str, object]) -> SavedAttachment | None:
+        document = message.get("document")
+        if isinstance(document, dict) and not _is_image_document(document):
+            file_id = document.get("file_id")
+            if not isinstance(file_id, str):
+                return None
+            file_name = _sanitize_filename(
+                str(document.get("file_name") or _generated_attachment_name("document", document))
+            )
+            saved_path = self._download_to_uploads(
+                file_id=file_id,
+                file_name=file_name,
+                file_size=_as_int(document.get("file_size")),
+            )
+            return SavedAttachment(
+                file_path=str(saved_path),
+                media_kind=_document_media_kind(document),
+                original_file_name=file_name,
+            )
+
+        audio = message.get("audio")
+        if isinstance(audio, dict):
+            return self._download_generic_attachment(audio, prefix="audio", media_kind="audio")
+
+        video = message.get("video")
+        if isinstance(video, dict):
+            return self._download_generic_attachment(video, prefix="video", media_kind="video")
+
+        return None
+
+    def _download_generic_attachment(
+        self,
+        payload: dict[str, object],
+        *,
+        prefix: str,
+        media_kind: str,
+    ) -> SavedAttachment | None:
+        file_id = payload.get("file_id")
+        if not isinstance(file_id, str):
+            return None
+        file_name = _sanitize_filename(
+            str(payload.get("file_name") or _generated_attachment_name(prefix, payload))
+        )
+        saved_path = self._download_to_uploads(
+            file_id=file_id,
+            file_name=file_name,
+            file_size=_as_int(payload.get("file_size")),
+        )
+        return SavedAttachment(
+            file_path=str(saved_path),
+            media_kind=media_kind,
+            original_file_name=file_name,
+        )
+
     def _download_to_uploads(
         self,
         *,
@@ -596,6 +683,54 @@ def _is_image_document(document: dict[str, object]) -> bool:
     if not isinstance(file_name, str):
         return False
     return Path(file_name).suffix.lower() in _IMAGE_DOCUMENT_EXTENSIONS
+
+
+def _document_media_kind(document: dict[str, object]) -> str:
+    mime_type = document.get("mime_type")
+    if isinstance(mime_type, str):
+        if mime_type == "application/pdf":
+            return "pdf"
+        if mime_type.startswith("text/"):
+            return "text"
+    file_name = document.get("file_name")
+    if isinstance(file_name, str) and Path(file_name).suffix.lower() in {".txt", ".md", ".rst", ".json", ".yaml", ".yml"}:
+        return "text"
+    return "document"
+
+
+def _generated_attachment_name(prefix: str, payload: dict[str, object]) -> str:
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    unique_id = str(payload.get("file_unique_id") or payload.get("file_id") or "file")[:8]
+    mime_type = payload.get("mime_type")
+    suffix = ""
+    if isinstance(mime_type, str):
+        guessed = mimetypes.guess_extension(mime_type)
+        if isinstance(guessed, str):
+            suffix = guessed
+    return f"{prefix}_{timestamp}_{unique_id}{suffix}"
+
+
+def _unsupported_content_kind(message: dict[str, object]) -> str | None:
+    if isinstance(message.get("sticker"), dict):
+        return "sticker"
+    if isinstance(message.get("voice"), dict):
+        return "voice"
+    if any(
+        key in message
+        for key in (
+            "animation",
+            "contact",
+            "dice",
+            "game",
+            "location",
+            "poll",
+            "story",
+            "venue",
+            "video_note",
+        )
+    ):
+        return "generic"
+    return None
 
 
 def is_missing_topic_error(exc: TelegramApiError) -> bool:
