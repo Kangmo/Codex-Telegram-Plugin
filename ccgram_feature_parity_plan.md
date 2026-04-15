@@ -418,9 +418,11 @@ Code review notes:
 
 ### FP-17: Command Discovery and Telegram Menu Sync
 
-Branch and status:
+Branch and merge:
 
 - Feature branch: `feature/fp-17-command-discovery-and-telegram-menu-sync`
+- Feature commit: `65c2221`
+- Merge commit on `main`: `176d9c6`
 
 Implementation decisions:
 
