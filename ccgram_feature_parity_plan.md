@@ -47,7 +47,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-13 | `/verbose` and notification modes | P0 | Native | Implemented |
 | FP-14 | `/screenshot` | P1 | Adapted | Missing |
 | FP-15 | `/panes` compatibility | P2 | Compatibility only | Codex App has no pane model |
-| FP-16 | `/recall` top-level recall flow | P1 | Native | Partial via reply widget only |
+| FP-16 | `/recall` top-level recall flow | P1 | Native | Implemented |
 | FP-17 | Command discovery and Telegram menu sync | P0 | Adapted | Partial today |
 | FP-18 | Full sessions dashboard | P0 | Native | Partial today |
 | FP-19 | Generic interactive prompt bridge | P0 | Depends on app-server support | Implemented |
@@ -142,9 +142,9 @@ Update these checkboxes as each feature lands.
 - [ ] Line by line proof reading for code review done
 
 ### FP-16: `/recall`
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-17: Command Discovery and Telegram Menu Sync
 - [x] Implemented
@@ -1313,25 +1313,60 @@ Expose explicit command-driven recall of recent topic messages, not only reply-w
 **Dev design**
 
 - Reuse persisted `topic_history`.
-- Show recent user messages as callback buttons.
-- On selection:
-  - if turn idle, enqueue as normal user input
-  - if turn active, enqueue and show `Steer` option
+- Adapt recall by payload type:
+  - text-only entries use Telegram inline query so the user can edit before sending, matching the most useful `ccgram` behavior
+  - entries with local image attachments reuse the existing replay callback so attachments are preserved
+- Keep the top-level recall prompt stateless:
+  - no extra view-state table
+  - close action only clears reply markup
 
 **Implementation plan**
 
-1. Add `/recall` command.
-2. Build paginated recall keyboard from `topic_history`.
-3. Share callback logic with existing response-widget recall.
+1. Add `recall_command.py` for shared history-label rendering plus top-level recall prompt rendering.
+2. Add `/gateway recall` command.
+3. Reuse existing `gw:resp:recall:*` callback handling for image-bearing history entries.
+4. Reuse inline query support for text-only entries so they stay editable before resend.
 
 **Test automation plan**
 
 - Unit:
   - history label generation and truncation
+  - text-only versus image-bearing button rendering
+  - empty-history and dismiss-callback handling
 - Integration:
-  - recall during idle and active-turn states
+  - `/gateway recall` renders persisted topic history correctly
 - E2E:
-  - recall a prior message with attached image references
+  - top-level recall command renders mixed text/image history into Telegram
+
+### FP-16 verification
+
+- Branch and merge:
+  - feature branch `feature/fp-16-top-level-recall-flow`
+- Reviewed `ccgram` recall references before implementation:
+  - `src/ccgram/handlers/command_history.py`
+  - `src/ccgram/tests/handlers/test_command_history.py`
+- Added `recall_command.py` so the top-level recall flow has one shared rendering layer for:
+  - truncated history labels
+  - inline-query buttons for text-only history
+  - callback replay buttons for image-bearing history
+  - dismiss callback parsing
+- `GatewayDaemon` now exposes `/gateway recall` and renders the most recent topic history into a dedicated Telegram message instead of limiting recall to the two shortcut buttons on reply/status widgets.
+- Implementation decisions locked during FP-16:
+  - text-only recall uses inline query because it matches `ccgram` and lets operators edit before resending
+  - image-bearing recall intentionally stays on the existing callback replay path so local image attachments are preserved
+  - the feature stays stateless because topic history is already persisted and the top-level recall prompt does not need its own long-lived topic binding
+- Proofread fixes before sign-off:
+  - label truncation now preserves the image-count suffix instead of truncating it away
+  - adding `/gateway recall` to the gateway command set required reordering inline-query suggestions so pass-through commands like `/status` remain visible within the capped result set
+  - help output and command discovery text were updated to include the new recall command
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_recall_command.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "recall"` -> `7 passed, 163 deselected`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `323 passed`
+- Feature-specific changed-code coverage:
+  - `src/codex_telegram_gateway/recall_command.py`: `33/36 = 91.7%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `21/24 = 87.5%`
+  - `TOTAL`: `54/60 = 90.0%`
 
 ### FP-17: Command Discovery and Telegram Menu Sync
 

@@ -58,6 +58,11 @@ from codex_telegram_gateway.notification_modes import (
     should_emit_notification,
 )
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
+from codex_telegram_gateway.recall_command import (
+    history_entry_label,
+    parse_recall_callback,
+    render_recall_prompt,
+)
 from codex_telegram_gateway.service import (
     DEFAULT_NEW_THREAD_TITLE,
     GatewayService,
@@ -1621,6 +1626,9 @@ class GatewayDaemon:
         if data.startswith(_CALLBACK_VERBOSE_PREFIX):
             self._handle_verbose_callback(update)
             return
+        if data.startswith(_CALLBACK_RECALL_PREFIX):
+            self._handle_recall_callback(update)
+            return
         if data.startswith(_CALLBACK_SEND_PREFIX):
             self._handle_send_callback(update)
             return
@@ -2413,6 +2421,17 @@ class GatewayDaemon:
             notification_mode_button_text(updated_binding.sync_mode),
         )
 
+    def _handle_recall_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_id = int(update["message_id"])
+        action = parse_recall_callback(str(update["data"]))
+        if action != "dismiss":
+            self._telegram.answer_callback_query(callback_query_id, "Unknown recall action.")
+            return
+        self._telegram.edit_message_reply_markup(chat_id, message_id, None)
+        self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
+
     def _handle_send_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
         chat_id = int(update["chat_id"])
@@ -2923,6 +2942,24 @@ class GatewayDaemon:
                 chat_id,
                 message_thread_id,
                 self._status_text(binding, chat_id, message_thread_id),
+            )
+            return
+
+        if command_name == "recall":
+            history = self._state.list_topic_history(chat_id, message_thread_id, limit=10)
+            if not history:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "No recent topic messages yet.",
+                )
+                return
+            text, reply_markup = render_recall_prompt(history)
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                text,
+                reply_markup=reply_markup,
             )
             return
 
@@ -3706,6 +3743,7 @@ _CALLBACK_SYNC_FIX = f"{_CALLBACK_SYNC_PREFIX}fix"
 _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
 _CALLBACK_VERBOSE_PREFIX = "gw:verbose:"
+_CALLBACK_RECALL_PREFIX = "gw:recall:"
 _CALLBACK_SEND_PREFIX = "gw:send:"
 _CALLBACK_PROMPT_PREFIX = "gw:prompt:"
 _CALLBACK_VOICE_PREFIX = "gw:voice:"
@@ -3733,6 +3771,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("doctor", "Show Telegram and Codex App gateway status"),
     _BotCommand("projects", "List loaded Codex App projects"),
     _BotCommand("threads", "List loaded Codex App threads"),
+    _BotCommand("recall", "Recall recent topic messages"),
     _BotCommand("history", "Show paginated history for this Codex thread"),
     _BotCommand("resume", "Resume another Codex thread from this project"),
     _BotCommand("restore", "Show recovery options for this topic"),
@@ -4162,17 +4201,7 @@ def _response_status_label(status: str) -> str:
 
 
 def _history_entry_label(entry: TopicHistoryEntry, limit: int = 20) -> str:
-    parts: list[str] = []
-    if entry.text:
-        parts.append(" ".join(entry.text.split()))
-    if entry.local_image_paths:
-        image_count = len(entry.local_image_paths)
-        label = "image" if image_count == 1 else "images"
-        parts.append(f"[{image_count} {label}]")
-    label = " ".join(parts) or "(empty message)"
-    if len(label) <= limit:
-        return label
-    return label[: limit - 1].rstrip() + "…"
+    return history_entry_label(entry, limit=limit)
 
 
 def _latest_visible_summary(events: list) -> str | None:

@@ -1396,3 +1396,64 @@ def test_gateway_flow_answers_inline_query_with_sendable_results(tmp_path) -> No
     assert inserted_texts[0] == "sta"
     assert "/gateway status" in inserted_texts
     assert "/status" in inserted_texts
+
+
+def test_gateway_recall_command_renders_recent_topic_history(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Recall flow",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    service = GatewayService(config=config, state=state, telegram=telegram, codex=codex)
+    binding = service.link_current_thread()
+    state.record_topic_history(-100100, binding.message_thread_id, text="Please continue with the refactor.")
+    state.record_topic_history(
+        -100100,
+        binding.message_thread_id,
+        text="Please inspect the screenshots.",
+        local_image_paths=("/tmp/one.png", "/tmp/two.png"),
+    )
+    daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        from_user_id=111,
+        text="/gateway recall",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        binding.message_thread_id,
+        "Recent topic messages\n\nTap a text-only entry to edit it inline before sending, or use the image entry buttons to replay the full message with attachments.",
+        {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "↑ Please inspect the screenshots. [2 images]",
+                        "callback_data": "gw:resp:recall:0",
+                    }
+                ],
+                [
+                    {
+                        "text": "↑ Please continue with the refactor.",
+                        "switch_inline_query_current_chat": "Please continue with the refactor.",
+                    }
+                ],
+                [{"text": "Close", "callback_data": "gw:recall:dismiss"}],
+            ]
+        },
+    )
