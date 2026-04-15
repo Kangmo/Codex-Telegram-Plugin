@@ -207,6 +207,9 @@ class CodexBridge(Protocol):
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
         ...
 
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> TurnResult:
+        ...
+
     def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
         ...
 

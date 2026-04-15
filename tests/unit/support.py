@@ -800,6 +800,7 @@ class DummyCodexBridge:
         self._interactive_prompts: dict[str, InteractivePrompt] = {}
         self.started_turns: list[StartedTurn] = []
         self.steered_turns: list[tuple[str, StartedTurn]] = []
+        self.interrupted_turns: list[tuple[str, str]] = []
         self.interactive_responses: list[tuple[str, dict[str, object]]] = []
         self.created_threads: list[CodexThread] = []
         self.ensured_projects: list[str] = []
@@ -949,6 +950,12 @@ class DummyCodexBridge:
 
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
         return self.inspect_results[(thread_id, turn_id)]
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> TurnResult:
+        self.interrupted_turns.append((thread_id, turn_id))
+        result = TurnResult(turn_id=turn_id, status="interrupted")
+        self.inspect_results[(thread_id, turn_id)] = result
+        return result
 
     def set_thread_status(self, thread_id: str, status: str) -> None:
         self._threads[thread_id] = CodexThread(

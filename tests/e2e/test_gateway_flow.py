@@ -10,6 +10,7 @@ from codex_telegram_gateway.models import (
     CodexProject,
     CodexThread,
     StartedTurn,
+    TopicHistoryEntry,
     TurnResult,
 )
 from codex_telegram_gateway.recovery import CALLBACK_RESTORE_CONTINUE
@@ -603,6 +604,7 @@ class FakeCodexBridge:
         self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
         self._interactive_prompts: dict[str, InteractivePrompt] = {}
         self.started_turns: list[StartedTurn] = []
+        self.interrupted_turns: list[tuple[str, str]] = []
         self.interactive_responses: list[tuple[str, dict[str, object]]] = []
         self.ensured_projects: list[str] = []
         self.inspect_results: dict[tuple[str, str], TurnResult] = {}
@@ -701,6 +703,12 @@ class FakeCodexBridge:
 
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
         return self.inspect_results[(thread_id, turn_id)]
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> TurnResult:
+        self.interrupted_turns.append((thread_id, turn_id))
+        result = TurnResult(turn_id=turn_id, status="interrupted")
+        self.inspect_results[(thread_id, turn_id)] = result
+        return result
 
     def set_thread_status(self, thread_id: str, status: str) -> None:
         self._threads[thread_id] = CodexThread(
@@ -1500,6 +1508,126 @@ def test_status_bubble_recreated_after_message_deleted(tmp_path) -> None:
     assert recreated_bubble is not None
     assert recreated_bubble.message_id == 2
     assert telegram.sent_messages[-1][2].startswith("Topic status\n\nProject: `gateway-project`")
+
+
+def test_status_bubble_stop_interrupts_active_turn_and_exposes_retry(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Remote controls",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Remote controls",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.record_topic_history(
+        -100100,
+        77,
+        text=TopicHistoryEntry(text="Please keep going.").text,
+    )
+    state.upsert_pending_turn(
+        __import__("codex_telegram_gateway.models", fromlist=["PendingTurn"]).PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(
+        turn_id="turn-1",
+        status="in_progress",
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    bubble = state.get_status_bubble_view(-100100, 77)
+    assert bubble is not None
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Topic status\n\n"
+        "Project: `gateway-project`\n"
+        "Thread: `Remote controls`\n"
+        "State: `running`\n"
+        "Queued: `0`\n"
+        "Latest: No assistant reply yet.",
+        {
+            "inline_keyboard": [
+                [{"text": "⏳ Working", "callback_data": "gw:resp:noop"}],
+                [{"text": "↑ Please keep going.", "callback_data": "gw:resp:recall:0"}],
+                [
+                    {"text": "⏹ Stop", "callback_data": "gw:remote:interrupt:turn-1"},
+                    {"text": "▶ Continue", "callback_data": "gw:remote:continue:turn-1"},
+                ],
+                [
+                    {"text": "↺ New", "callback_data": "gw:resp:new"},
+                    {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                    {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                    {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                ],
+            ]
+        },
+    )
+
+    telegram.push_callback_query(
+        update_id=10,
+        callback_query_id="cb-stop-turn",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=bubble.message_id,
+        from_user_id=111,
+        data="gw:remote:interrupt:turn-1",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.interrupted_turns == [("thread-1", "turn-1")]
+    assert state.get_pending_turn("thread-1") is None
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        bubble.message_id,
+        "Topic status\n\n"
+        "Project: `gateway-project`\n"
+        "Thread: `Remote controls`\n"
+        "State: `failed`\n"
+        "Queued: `0`\n"
+        "Latest: No assistant reply yet.",
+        {
+            "inline_keyboard": [
+                [{"text": "⚠ Turn Failed", "callback_data": "gw:resp:noop"}],
+                [{"text": "↑ Please keep going.", "callback_data": "gw:resp:recall:0"}],
+                [{"text": "↻ Retry Last", "callback_data": "gw:remote:retry:0"}],
+                [
+                    {"text": "↺ New", "callback_data": "gw:resp:new"},
+                    {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                    {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                    {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                ],
+            ]
+        },
+    )
 
 
 def test_gateway_flow_batches_tool_progress_and_sends_one_terminal_summary(tmp_path) -> None:

@@ -151,6 +151,33 @@ def test_steer_turn_uses_active_turn_rpc_with_expected_turn_id() -> None:
     ]
 
 
+def test_interrupt_turn_uses_turn_interrupt_rpc() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        requests.append((method, params))
+        return {}
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    result = client.interrupt_turn("thread-1", "turn-1")
+
+    assert result == __import__("codex_telegram_gateway.models", fromlist=["TurnResult"]).TurnResult(
+        turn_id="turn-1",
+        status="interrupted",
+    )
+    assert requests == [
+        (
+            "turn/interrupt",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+            },
+        )
+    ]
+
+
 def test_rename_thread_uses_thread_name_set_rpc() -> None:
     client = CodexAppServerClient.__new__(CodexAppServerClient)
     requests: list[tuple[str, dict[str, object]]] = []
