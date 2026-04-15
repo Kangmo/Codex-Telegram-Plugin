@@ -1841,8 +1841,8 @@ Offer an auto-refreshing visual stream similar to `ccgram`’s live mode.
 
 - Branch and merge:
   - feature branch `feature/fp-22-live-view`
-  - feature commit pending until this feature is committed
-  - merge commit on `main` pending until this feature is merged
+  - feature commit `b31a0b8`
+  - merge commit on `main` `11f9a7d`
 - Re-reviewed `ccgram` live-view sources before implementation:
   - `/tmp/ccgram/src/ccgram/handlers/live_view.py`
   - `/tmp/ccgram/tests/ccgram/handlers/test_live_view.py`
