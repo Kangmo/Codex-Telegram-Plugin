@@ -778,8 +778,10 @@
   - diff-based changed-line audit for FP-28 source work -> `220/227 = 96.9%`
 
 ### FP-29 verification
-- Branch plan:
+- Branch and merge:
   - feature branch `feature/fp-29-shell-nl-to-command-mode`
+  - feature commit `eb85f32`
+  - merge commit on `main` `8711c72`
 - Re-reviewed `ccgram` shell sources before implementation:
   - `/tmp/ccgram-review/src/ccgram/providers/shell.py`
   - `/tmp/ccgram-review/src/ccgram/handlers/shell_commands.py`
@@ -808,7 +810,8 @@
   - `.venv/bin/pytest tests/unit/test_daemon.py -k 'gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `9 passed`
   - `.venv/bin/pytest tests/unit/test_daemon.py -k 'previous_message_is_gone or original_widget_is_gone or gateway_shell or shell_cancel or shell_callback_rejects_stale or handles_commands_without_queueing_to_codex'` -> `11 passed`
 - Full-suite verification:
-  - `.venv/bin/pytest -q` -> `433 passed`
+  - `.venv/bin/pytest -q` on the feature branch -> `433 passed`
+  - `.venv/bin/pytest -q` on `main` after merge -> `433 passed`
 - Feature-specific changed-executable coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp29.json -q` plus diff-based changed-line audit against `main` -> `234/273 = 85.7%`
   - changed executable lines by file:
