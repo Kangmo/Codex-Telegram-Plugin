@@ -1,6 +1,12 @@
 from dataclasses import dataclass
 
 
+ACTIVE_BINDING_STATUS = "active"
+CLOSED_BINDING_STATUS = "closed"
+DELETED_BINDING_STATUS = "deleted"
+ORPHANED_BINDING_STATUS = "orphaned"
+
+
 @dataclass(frozen=True)
 class Binding:
     """Maps one Codex thread id to one persisted Telegram topic id."""
@@ -11,6 +17,7 @@ class Binding:
     topic_name: str | None
     sync_mode: str
     project_id: str | None = None
+    binding_status: str = ACTIVE_BINDING_STATUS
 
 
 @dataclass(frozen=True)

@@ -231,6 +231,42 @@ class DummyTelegramClient:
             }
         )
 
+    def push_topic_closed_update(
+        self,
+        *,
+        update_id: int,
+        chat_id: int,
+        message_thread_id: int,
+        from_user_id: int,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "topic_closed",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+                "from_user_id": from_user_id,
+            }
+        )
+
+    def push_topic_reopened_update(
+        self,
+        *,
+        update_id: int,
+        chat_id: int,
+        message_thread_id: int,
+        from_user_id: int,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "topic_reopened",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+                "from_user_id": from_user_id,
+            }
+        )
+
     def push_callback_query(
         self,
         *,

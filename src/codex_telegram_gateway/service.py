@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.models import Binding
+from codex_telegram_gateway.models import ACTIVE_BINDING_STATUS, Binding
 from codex_telegram_gateway.ports import CodexBridge, GatewayState, TelegramClient
 
 
@@ -50,6 +50,7 @@ class GatewayService:
             topic_name=topic_name,
             sync_mode=self._config.sync_mode,
             project_id=thread.cwd or None,
+            binding_status=ACTIVE_BINDING_STATUS,
         )
         created_binding = self._state.create_binding(binding)
         for event in self._codex.list_events(thread_id):
@@ -77,6 +78,7 @@ class GatewayService:
             topic_name=topic_name,
             sync_mode=self._config.sync_mode,
             project_id=project_id,
+            binding_status=ACTIVE_BINDING_STATUS,
         )
         created_binding = self._state.create_binding(binding)
         for event in self._codex.list_events(created_thread.thread_id):
@@ -95,6 +97,7 @@ class GatewayService:
             topic_name=topic_name,
             sync_mode=existing_binding.sync_mode,
             project_id=existing_binding.project_id or thread.cwd or None,
+            binding_status=ACTIVE_BINDING_STATUS,
         )
         self._state.create_binding(recreated_binding)
         self._state.delete_outbound_messages(codex_thread_id)

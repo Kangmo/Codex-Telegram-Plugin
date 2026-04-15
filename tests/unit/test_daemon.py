@@ -3,9 +3,12 @@ from codex_telegram_gateway.daemon import GatewayDaemon
 from pathlib import Path
 
 from codex_telegram_gateway.models import (
+    ACTIVE_BINDING_STATUS,
     Binding,
+    CLOSED_BINDING_STATUS,
     CodexEvent,
     CodexThread,
+    DELETED_BINDING_STATUS,
     InboundMessage,
     PendingTurn,
     StartedTurn,
@@ -16,7 +19,7 @@ from codex_telegram_gateway.models import (
 from tests.unit.support import DummyCodexBridge, DummyState, DummyTelegramClient
 
 
-def make_binding() -> Binding:
+def make_binding(*, binding_status: str = ACTIVE_BINDING_STATUS) -> Binding:
     return Binding(
         codex_thread_id="thread-1",
         chat_id=-100100,
@@ -24,6 +27,7 @@ def make_binding() -> Binding:
         topic_name="(gateway-project) thread-1",
         sync_mode="assistant_plus_alerts",
         project_id="/Users/kangmo/sacle/src/gateway-project",
+        binding_status=binding_status,
     )
 
 
@@ -112,6 +116,208 @@ def test_sync_codex_once_edits_existing_message_when_same_event_grows() -> None:
     assert telegram.edited_messages == [
         (-100100, 1, "I found the first issue.\nAnd the second one.", None),
     ]
+
+
+def test_poll_telegram_once_marks_binding_closed_and_reopened_from_topic_events() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_topic_closed_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=999,
+    )
+    daemon.poll_telegram_once()
+    assert state.get_binding_by_thread("thread-1").binding_status == CLOSED_BINDING_STATUS
+
+    telegram.push_topic_reopened_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=999,
+    )
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == ACTIVE_BINDING_STATUS
+
+
+def test_sync_codex_once_skips_outbound_for_closed_binding_and_clears_terminal_pending_turn() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-10",
+            waiting_for_approval=False,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-10")] = TurnResult(
+        turn_id="turn-10",
+        status="completed",
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-10:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Hidden while topic is closed.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_messages == []
+    assert state.get_pending_turn("thread-1") is None
+    assert state.has_seen_event("thread-1", "thread-1:turn-10:item-1") is False
+
+
+def test_sync_codex_once_marks_binding_deleted_when_topic_rename_hits_missing_topic() -> None:
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) stale-title",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="fresh-title",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        del chat_id, message_thread_id, name
+        raise RuntimeError("Topic closed")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+
+    daemon.sync_codex_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
+    assert telegram.sent_messages == []
+
+
+def test_deliver_inbound_once_waits_for_closed_binding_to_reopen() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    queued_message = InboundMessage(
+        telegram_update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        codex_thread_id="thread-1",
+        text="queued until reopen",
+    )
+    state.enqueue_inbound(queued_message)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == []
+    assert state.list_pending_inbound() == [queued_message]
+
+    state.create_binding(make_binding(binding_status=ACTIVE_BINDING_STATUS))
+
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-1",
+            text="queued until reopen",
+        )
+    ]
+
+
+def test_poll_telegram_once_ignores_messages_for_closed_binding() -> None:
+    state = DummyState()
+    state.create_binding(make_binding(binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="do not route while closed",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == []
 
 
 def test_sync_codex_once_attaches_response_widget_with_recent_history() -> None:
@@ -590,7 +796,7 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
             77,
             "Gateway bindings\n\n"
             "🟢 (gateway-project) thread-1\n"
-            "topic `77` • thread `thread-1`\n\n"
+            "topic `77` • thread `thread-1` • status `active`\n\n"
             "Use `/gateway sync` to audit bindings and recover deleted topics.",
             {
                 "inline_keyboard": [
@@ -621,7 +827,7 @@ def test_poll_telegram_once_gateway_bindings_shows_dashboard_and_sessions_alias_
         1,
         "Gateway bindings\n\n"
         "🟢 (gateway-project) renamed thread\n"
-        "topic `77` • thread `thread-1`\n\n"
+        "topic `77` • thread `thread-1` • status `active`\n\n"
         "Use `/gateway sync` to audit bindings and recover deleted topics.",
         {
             "inline_keyboard": [
@@ -747,6 +953,7 @@ def test_poll_telegram_once_gateway_sync_audits_and_fix_recovers_dead_topic() ->
 
     daemon.poll_telegram_once()
 
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
     assert telegram.sent_messages == [
         (
             -100100,
@@ -781,6 +988,7 @@ def test_poll_telegram_once_gateway_sync_audits_and_fix_recovers_dead_topic() ->
 
     rebound = state.get_binding_by_thread("thread-1")
     assert rebound.message_thread_id == 1
+    assert rebound.binding_status == ACTIVE_BINDING_STATUS
     assert telegram.created_topics == [(-100100, "(gateway-project) thread-1")]
     assert telegram.edited_messages[-1] == (
         -100100,

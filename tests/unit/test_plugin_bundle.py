@@ -60,5 +60,6 @@ def test_auto_sync_loaded_threads_calls_service(monkeypatch) -> None:
             "topic_name": "(blink) Remove browser entitlement",
             "sync_mode": "assistant_plus_alerts",
             "project_id": "/Users/kangmo/projs/blink",
+            "binding_status": "active",
         }
     ]

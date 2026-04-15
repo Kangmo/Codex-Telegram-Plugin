@@ -67,9 +67,9 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 Update these checkboxes as each feature lands.
 
 ### FP-01: Topic Close/Reopen Lifecycle
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-02: Bidirectional Topic Rename Sync
 - [ ] Implemented
