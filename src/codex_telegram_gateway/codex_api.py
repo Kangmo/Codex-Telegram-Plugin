@@ -13,6 +13,7 @@ from codex_telegram_gateway.app_store import (
     thread_rollout_path,
 )
 from codex_telegram_gateway.config import GatewayConfig
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt, normalize_interactive_request
 from codex_telegram_gateway.models import (
     CodexEvent,
     CodexHistoryEntry,
@@ -49,6 +50,8 @@ class CodexAppServerClient:
             bufsize=1,
         )
         self._request_ids = count(1)
+        self._pending_interactive_prompts: dict[str, InteractivePrompt] = {}
+        self._interactive_request_ids: dict[str, object] = {}
         self._initialize()
 
     def close(self) -> None:
@@ -300,6 +303,33 @@ class CodexAppServerClient:
             waiting_for_approval=waiting_for_approval,
         )
 
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        prompts = list(self._pending_interactive_prompts.values())
+        if thread_id is None:
+            return prompts
+        return [prompt for prompt in prompts if prompt.thread_id == thread_id]
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        request_id = self._interactive_request_ids.pop(prompt_id)
+        self._pending_interactive_prompts.pop(prompt_id, None)
+        self._write_message(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": payload,
+            }
+        )
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
+        to_delete = [
+            prompt_id
+            for prompt_id, prompt in self._pending_interactive_prompts.items()
+            if prompt.thread_id == thread_id
+        ]
+        for prompt_id in to_delete:
+            self._pending_interactive_prompts.pop(prompt_id, None)
+            self._interactive_request_ids.pop(prompt_id, None)
+
     def _initialize(self) -> None:
         self._request(
             "initialize",
@@ -332,9 +362,16 @@ class CodexAppServerClient:
         )
         while True:
             message = self._read_message()
+            if "method" in message and "id" in message:
+                self._capture_server_request(message)
+                continue
             if "id" not in message:
                 continue
-            if int(message["id"]) != request_id:
+            try:
+                message_id = int(message["id"])
+            except (TypeError, ValueError):
+                continue
+            if message_id != request_id:
                 continue
             if "error" in message:
                 raise CodexAppServerError(json.dumps(message["error"], sort_keys=True))
@@ -361,6 +398,22 @@ class CodexAppServerClient:
                 f"Codex app-server closed unexpectedly. stderr={stderr_output}"
             )
         return json.loads(line)
+
+    def _capture_server_request(self, message: dict[str, object]) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            return
+        prompt_id = str(message["id"])
+        prompt = normalize_interactive_request(
+            prompt_id=prompt_id,
+            method=method,
+            params=params,
+        )
+        if prompt is None:
+            return
+        self._pending_interactive_prompts[prompt.prompt_id] = prompt
+        self._interactive_request_ids[prompt.prompt_id] = message["id"]
 
     def _wait_for_turn_completion(
         self,

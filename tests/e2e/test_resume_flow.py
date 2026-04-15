@@ -1,5 +1,6 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -118,6 +119,10 @@ class FakeCodexBridge:
         del thread_id
         return []
 
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        del thread_id
+        return []
+
     def list_resumable_threads(
         self,
         project_id: str,
@@ -169,6 +174,13 @@ class FakeCodexBridge:
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
         del thread_id, turn_id
         raise AssertionError("Not used in resume flow test")
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        del prompt_id, payload
+        raise AssertionError("Not used in resume flow test")
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
+        del thread_id
 
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)

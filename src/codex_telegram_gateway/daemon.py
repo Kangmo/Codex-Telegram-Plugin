@@ -10,6 +10,14 @@ from codex_telegram_gateway.history_command import (
     parse_history_callback,
     render_history_page,
 )
+from codex_telegram_gateway.interactive_bridge import (
+    InteractivePromptSession,
+    apply_interactive_callback,
+    apply_interactive_text_answer,
+    parse_interactive_callback,
+    render_interactive_prompt,
+    start_interactive_prompt_session,
+)
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -19,6 +27,7 @@ from codex_telegram_gateway.models import (
     DELETED_BINDING_STATUS,
     HistoryViewState,
     InboundMessage,
+    InteractivePromptViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -124,6 +133,8 @@ class GatewayDaemon:
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
         self._topic_status_disabled_chats: set[int] = set()
+        self._interactive_prompt_sessions: dict[str, InteractivePromptSession] = {}
+        self._interactive_prompt_renders: dict[str, tuple[str, dict[str, object] | None]] = {}
         self._lifecycle_timers = {
             "probe": 0.0,
             "autoclose": 0.0,
@@ -185,6 +196,8 @@ class GatewayDaemon:
             if turn_result is None:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
 
+            self._sync_interactive_prompt_for_binding(binding)
+
             if turn_result.waiting_for_approval or not _is_terminal_turn_status(turn_result.status):
                 for target in active_targets:
                     if target.binding_status == ACTIVE_BINDING_STATUS:
@@ -194,6 +207,11 @@ class GatewayDaemon:
                 continue
 
             self._state.delete_pending_turn(binding.codex_thread_id)
+            self._clear_interactive_prompt_topic(
+                binding.chat_id,
+                binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+            )
             for target in active_targets:
                 if turn_result.status == "completed":
                     self._clear_topic_status_override(target.chat_id, target.message_thread_id)
@@ -269,6 +287,12 @@ class GatewayDaemon:
                     continue
                 if binding is None:
                     self._handle_unbound_topic_message(update)
+                    continue
+                if self._handle_interactive_text_reply(
+                    binding=binding,
+                    text=text,
+                    local_image_paths=local_image_paths,
+                ):
                     continue
                 self._refresh_command_menu_for_passthrough(text)
 
@@ -902,6 +926,166 @@ class GatewayDaemon:
         history = self._state.list_topic_history(binding.chat_id, binding.message_thread_id, limit=2)
         return _response_widget_markup(status=status, history=history)
 
+    def _sync_interactive_prompt_for_binding(self, binding: Binding) -> None:
+        if not self._is_primary_binding(binding):
+            return
+        prompts = self._codex.list_pending_prompts(binding.codex_thread_id)
+        if not prompts:
+            return
+        prompt = prompts[0]
+        session = self._interactive_prompt_sessions.get(prompt.prompt_id)
+        if session is None:
+            session = start_interactive_prompt_session(prompt)
+            self._interactive_prompt_sessions[prompt.prompt_id] = session
+        text, reply_markup = render_interactive_prompt(session)
+        existing_view = self._state.get_interactive_prompt_view(binding.chat_id, binding.message_thread_id)
+        cached_render = self._interactive_prompt_renders.get(prompt.prompt_id)
+        if (
+            existing_view is not None
+            and existing_view.prompt_id == prompt.prompt_id
+            and cached_render == (text, reply_markup)
+        ):
+            return
+
+        try:
+            if existing_view is not None and existing_view.prompt_id == prompt.prompt_id:
+                message_id = existing_view.message_id
+                self._telegram.edit_message_text(
+                    binding.chat_id,
+                    message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            else:
+                if existing_view is not None:
+                    self._interactive_prompt_sessions.pop(existing_view.prompt_id, None)
+                    self._interactive_prompt_renders.pop(existing_view.prompt_id, None)
+                message_id = self._telegram.send_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+        except Exception as exc:
+            if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return
+            raise
+
+        self._interactive_prompt_renders[prompt.prompt_id] = (text, reply_markup)
+        self._state.upsert_interactive_prompt_view(
+            InteractivePromptViewState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                message_id=message_id,
+                codex_thread_id=binding.codex_thread_id,
+                prompt_id=prompt.prompt_id,
+                prompt_kind=prompt.kind,
+            )
+        )
+
+    def _apply_interactive_prompt_update(
+        self,
+        binding: Binding,
+        *,
+        prompt_id: str,
+        message_id: int,
+        update,
+    ) -> None:
+        if update.response_payload is not None:
+            self._codex.respond_interactive_prompt(prompt_id, update.response_payload)
+            self._interactive_prompt_sessions.pop(prompt_id, None)
+            self._interactive_prompt_renders.pop(prompt_id, None)
+            self._state.delete_interactive_prompt_view(binding.chat_id, binding.message_thread_id)
+            self._telegram.edit_message_text(
+                binding.chat_id,
+                message_id,
+                f"Sent your answer to Codex.\n\n{update.session.prompt.title}",
+                reply_markup=None,
+            )
+            return
+
+        text, reply_markup = render_interactive_prompt(update.session)
+        self._interactive_prompt_renders[prompt_id] = (text, reply_markup)
+        self._telegram.edit_message_text(
+            binding.chat_id,
+            message_id,
+            text,
+            reply_markup=reply_markup,
+        )
+
+    def _clear_interactive_prompt_topic(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str | None = None,
+    ) -> None:
+        prompt_view = self._state.get_interactive_prompt_view(chat_id, message_thread_id)
+        if prompt_view is not None:
+            try:
+                self._telegram.edit_message_reply_markup(chat_id, prompt_view.message_id, None)
+            except Exception:
+                pass
+            self._interactive_prompt_sessions.pop(prompt_view.prompt_id, None)
+            self._interactive_prompt_renders.pop(prompt_view.prompt_id, None)
+        self._state.delete_interactive_prompt_view(chat_id, message_thread_id)
+        if codex_thread_id:
+            self._codex.clear_pending_prompts(codex_thread_id)
+
+    def _handle_interactive_text_reply(
+        self,
+        *,
+        binding: Binding,
+        text: str,
+        local_image_paths: tuple[str, ...],
+    ) -> bool:
+        prompt_view = self._state.get_interactive_prompt_view(binding.chat_id, binding.message_thread_id)
+        if prompt_view is None:
+            return False
+        session = self._interactive_prompt_sessions.get(prompt_view.prompt_id)
+        if session is None:
+            return False
+        if session.prompt.kind != "tool_request_user_input" or not session.prompt.questions:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "Please use the prompt buttons above for this question.",
+            )
+            return True
+        current_question = session.prompt.questions[min(session.question_index, len(session.prompt.questions) - 1)]
+        if current_question.is_secret:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "This prompt must be answered from Codex App.",
+            )
+            return True
+        if current_question.options and session.awaiting_text_question_id != current_question.question_id:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "Please use the prompt buttons above for this question.",
+            )
+            return True
+        if local_image_paths:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                "This prompt expects a text reply.",
+            )
+            return True
+        try:
+            update = apply_interactive_text_answer(session, text)
+        except ValueError:
+            return False
+        self._apply_interactive_prompt_update(
+            binding,
+            prompt_id=prompt_view.prompt_id,
+            message_id=prompt_view.message_id,
+            update=update,
+        )
+        return True
+
     def _record_topic_created(self, update: dict[str, object]) -> None:
         chat_id = int(update["chat_id"])
         message_thread_id = int(update["message_thread_id"])
@@ -1091,6 +1275,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_SEND_PREFIX):
             self._handle_send_callback(update)
+            return
+        if data.startswith(_CALLBACK_PROMPT_PREFIX):
+            self._handle_interactive_prompt_callback(update)
             return
         if data.startswith(_CALLBACK_QUEUE_PREFIX):
             self._handle_queue_callback(update)
@@ -1619,6 +1806,11 @@ class GatewayDaemon:
         self._state.delete_history_view(chat_id, message_thread_id)
         self._state.delete_resume_view(chat_id, message_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
+        self._clear_interactive_prompt_topic(
+            chat_id,
+            message_thread_id,
+            codex_thread_id=previous_thread_id,
+        )
         self._clear_typing_state(chat_id, message_thread_id)
         self._clear_topic_status_override(chat_id, message_thread_id)
         self._telegram.edit_message_text(
@@ -1631,6 +1823,64 @@ class GatewayDaemon:
             reply_markup=None,
         )
         self._telegram.answer_callback_query(callback_query_id, "Resumed.")
+
+    def _handle_interactive_prompt_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        parsed_callback = parse_interactive_callback(str(update["data"]))
+        if parsed_callback is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown prompt action.")
+            return
+
+        prompt_view = self._state.get_interactive_prompt_view(chat_id, message_thread_id)
+        if (
+            prompt_view is None
+            or prompt_view.message_id != message_id
+            or prompt_view.prompt_id != str(parsed_callback["prompt_id"])
+        ):
+            self._telegram.answer_callback_query(callback_query_id, "This prompt is stale.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None or not self._is_primary_binding(binding):
+            self._state.delete_interactive_prompt_view(chat_id, message_thread_id)
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
+            return
+
+        session = self._interactive_prompt_sessions.get(prompt_view.prompt_id)
+        if session is None:
+            self._state.delete_interactive_prompt_view(chat_id, message_thread_id)
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                "This prompt expired after the gateway restarted. Continue it from Codex App.",
+                reply_markup=None,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "This prompt expired.")
+            return
+
+        try:
+            prompt_update = apply_interactive_callback(
+                session,
+                action=str(parsed_callback["action"]),
+                value=parsed_callback["value"],
+            )
+        except ValueError:
+            self._telegram.answer_callback_query(callback_query_id, "That prompt choice is no longer available.")
+            return
+
+        self._apply_interactive_prompt_update(
+            binding,
+            prompt_id=prompt_view.prompt_id,
+            message_id=prompt_view.message_id,
+            update=prompt_update,
+        )
+        self._telegram.answer_callback_query(
+            callback_query_id,
+            prompt_update.toast_text,
+        )
 
     def _handle_queue_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -2664,6 +2914,11 @@ class GatewayDaemon:
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
         self._state.delete_send_view(chat_id, message_thread_id)
+        self._clear_interactive_prompt_topic(
+            chat_id,
+            message_thread_id,
+            codex_thread_id=previous_thread_id,
+        )
         self._clear_typing_state(chat_id, message_thread_id)
         self._telegram.send_message(
             chat_id,
@@ -2710,11 +2965,16 @@ class GatewayDaemon:
             self._state.delete_resume_view(target.chat_id, target.message_thread_id)
             self._state.delete_restore_view(target.chat_id, target.message_thread_id)
             self._state.delete_send_view(target.chat_id, target.message_thread_id)
+            self._clear_interactive_prompt_topic(
+                target.chat_id,
+                target.message_thread_id,
+            )
             self._state.delete_topic_history(target.chat_id, target.message_thread_id)
             self._clear_typing_state(target.chat_id, target.message_thread_id)
             self._clear_topic_status_override(target.chat_id, target.message_thread_id)
 
         self._state.delete_pending_turn(binding.codex_thread_id)
+        self._codex.clear_pending_prompts(binding.codex_thread_id)
         self._state.delete_pending_inbound_for_thread(binding.codex_thread_id)
         self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._state.delete_outbound_messages(binding.codex_thread_id)
@@ -3090,6 +3350,7 @@ _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
 _CALLBACK_VERBOSE_PREFIX = "gw:verbose:"
 _CALLBACK_SEND_PREFIX = "gw:send:"
+_CALLBACK_PROMPT_PREFIX = "gw:prompt:"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
 _CALLBACK_RESPONSE_PREFIX = "gw:resp:"

@@ -1,6 +1,7 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon
 from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
     CodexEvent,
@@ -116,6 +117,10 @@ class FakeCodexBridge:
         assert thread_id == self._thread.thread_id
         return list(self._history_entries)
 
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        del thread_id
+        return []
+
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
         del project_id, thread_name
         raise AssertionError("Not used in history flow test")
@@ -138,6 +143,13 @@ class FakeCodexBridge:
     def inspect_turn(self, thread_id: str, turn_id: str) -> TurnResult:
         del thread_id, turn_id
         raise AssertionError("Not used in history flow test")
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        del prompt_id, payload
+        raise AssertionError("Not used in history flow test")
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
+        del thread_id
 
 
 def test_history_callback_paging_survives_daemon_restart(tmp_path) -> None:

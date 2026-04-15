@@ -1,6 +1,7 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.commands_catalog import register_bot_commands_if_changed
 from codex_telegram_gateway.daemon import GatewayDaemon
+from codex_telegram_gateway.interactive_bridge import InteractivePrompt
 from codex_telegram_gateway.models import (
     Binding,
     CLOSED_BINDING_STATUS,
@@ -195,7 +196,9 @@ class FakeCodexBridge:
         self._threads = {thread.thread_id: thread}
         self._events: dict[str, list[CodexEvent]] = {thread.thread_id: []}
         self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
+        self._interactive_prompts: dict[str, InteractivePrompt] = {}
         self.started_turns: list[StartedTurn] = []
+        self.interactive_responses: list[tuple[str, dict[str, object]]] = []
         self.ensured_projects: list[str] = []
         self.inspect_results: dict[tuple[str, str], TurnResult] = {}
 
@@ -229,8 +232,30 @@ class FakeCodexBridge:
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         return list(self._history_entries[thread_id])
 
+    def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
+        prompts = list(self._interactive_prompts.values())
+        if thread_id is None:
+            return prompts
+        return [prompt for prompt in prompts if prompt.thread_id == thread_id]
+
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)
+
+    def queue_interactive_prompt(self, prompt: InteractivePrompt | None) -> None:
+        if prompt is None:
+            return
+        self._interactive_prompts[prompt.prompt_id] = prompt
+
+    def respond_interactive_prompt(self, prompt_id: str, payload: dict[str, object]) -> None:
+        self.interactive_responses.append((prompt_id, payload))
+        self._interactive_prompts.pop(prompt_id, None)
+
+    def clear_pending_prompts(self, thread_id: str) -> None:
+        self._interactive_prompts = {
+            prompt_id: prompt
+            for prompt_id, prompt in self._interactive_prompts.items()
+            if prompt.thread_id != thread_id
+        }
 
     def replace_event(self, thread_id: str, event_id: str, text: str) -> None:
         self._events[thread_id] = [
@@ -839,4 +864,115 @@ def test_send_flow_end_to_end_sends_project_file_to_telegram(tmp_path) -> None:
 
     assert telegram.sent_documents == [
         (-100100, 77, str(file_path), "notes.txt"),
+    ]
+
+
+def test_interactive_prompt_callback_expires_after_restart(tmp_path) -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Approval flow",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Approval flow",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    state.upsert_pending_turn(
+        __import__("codex_telegram_gateway.models", fromlist=["PendingTurn"]).PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": "/tmp/project",
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon.sync_codex_once()
+
+    restarted_telegram = FakeTelegramClient()
+    restarted_codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Approval flow",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    restarted_codex.inspect_results[("thread-1", "turn-approval")] = TurnResult(
+        turn_id="turn-approval",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    restarted_daemon = GatewayDaemon(
+        config=GatewayConfig(
+            telegram_bot_token="test-token",
+            telegram_allowed_user_ids={111},
+            telegram_default_chat_id=-100100,
+            sync_mode="assistant_plus_alerts",
+        ),
+        state=SqliteGatewayState(tmp_path / "gateway.db"),
+        telegram=restarted_telegram,
+        codex=restarted_codex,
+    )
+
+    restarted_telegram.push_callback_query(
+        update_id=10,
+        callback_query_id="cb-expired",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:prompt:choose:prompt-approval:accept",
+    )
+
+    restarted_daemon.poll_telegram_once()
+
+    assert restarted_telegram.edited_messages == [
+        (
+            -100100,
+            1,
+            "This prompt expired after the gateway restarted. Continue it from Codex App.",
+            None,
+        )
     ]

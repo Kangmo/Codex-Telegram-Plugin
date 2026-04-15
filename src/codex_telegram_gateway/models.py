@@ -173,6 +173,18 @@ class RestoreViewState:
 
 
 @dataclass(frozen=True)
+class InteractivePromptViewState:
+    """Persisted Telegram interactive-prompt message context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+    prompt_id: str
+    prompt_kind: str
+
+
+@dataclass(frozen=True)
 class SendViewState:
     """Persisted Telegram send-browser context for one topic."""
 

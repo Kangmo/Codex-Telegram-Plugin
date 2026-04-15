@@ -9,6 +9,7 @@ from codex_telegram_gateway.models import (
     CodexProject,
     HistoryViewState,
     InboundMessage,
+    InteractivePromptViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -167,6 +168,16 @@ class SqliteGatewayState:
                 message_id INTEGER NOT NULL,
                 codex_thread_id TEXT NOT NULL,
                 issue_kind TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS interactive_prompt_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                prompt_id TEXT NOT NULL,
+                prompt_kind TEXT NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
 
@@ -1154,6 +1165,79 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM restore_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_interactive_prompt_view(
+        self,
+        interactive_prompt_view: InteractivePromptViewState,
+    ) -> InteractivePromptViewState:
+        self._connection.execute(
+            """
+            INSERT INTO interactive_prompt_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                prompt_id,
+                prompt_kind
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                codex_thread_id = excluded.codex_thread_id,
+                prompt_id = excluded.prompt_id,
+                prompt_kind = excluded.prompt_kind
+            """,
+            (
+                interactive_prompt_view.chat_id,
+                interactive_prompt_view.message_thread_id,
+                interactive_prompt_view.message_id,
+                interactive_prompt_view.codex_thread_id,
+                interactive_prompt_view.prompt_id,
+                interactive_prompt_view.prompt_kind,
+            ),
+        )
+        self._connection.commit()
+        return interactive_prompt_view
+
+    def get_interactive_prompt_view(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> InteractivePromptViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                codex_thread_id,
+                prompt_id,
+                prompt_kind
+            FROM interactive_prompt_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return InteractivePromptViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            codex_thread_id=row["codex_thread_id"],
+            prompt_id=row["prompt_id"],
+            prompt_kind=row["prompt_kind"],
+        )
+
+    def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM interactive_prompt_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),
