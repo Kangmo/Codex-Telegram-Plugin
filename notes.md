@@ -434,6 +434,10 @@
   - `TOTAL`: `100/100 = 100.0%`
 
 ### FP-25 verification
+- Branch and merge:
+  - feature branch `feature/fp-25-outbound-media-and-file-delivery`
+  - feature commit `cfee857`
+  - merge commit on `main` `851f48a`
 - Reviewed `ccgram`’s outbound upload references in `handlers/send_command.py::_upload_file()` and `handlers/screenshot_callbacks.py` before coding the parity path.
 - Added `artifact_detector.py` so Codex outbound text that explicitly mentions generated files expands into stable `artifact_photo` and `artifact_document` events.
 - `CodexAppServerClient.list_events()` now appends artifact events after the normal assistant/tool/completion event, and the daemon sends those files through the existing Telegram multipart helpers.
