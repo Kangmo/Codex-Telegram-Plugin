@@ -593,8 +593,8 @@ Branch and merge:
 Branch and merge:
 
 - Feature branch: `feature/fp-19-generic-interactive-prompt-bridge`
-- Feature commit: `PENDING`
-- Merge commit on `main`: `PENDING`
+- Feature commit: `c69624b`
+- Merge commit on `main`: `18e7272`
 
 Implementation decisions:
 
@@ -1436,8 +1436,8 @@ Support Telegram-side response widgets for Codex prompts that need user choice o
 
 - Branch and merge:
   - feature branch `feature/fp-19-generic-interactive-prompt-bridge`
-  - feature commit `PENDING`
-  - merge commit on `main` `PENDING`
+  - feature commit `c69624b`
+  - merge commit on `main` `18e7272`
 - Added a dedicated `interactive_bridge.py` module for:
   - app-server prompt normalization
   - Telegram prompt rendering
