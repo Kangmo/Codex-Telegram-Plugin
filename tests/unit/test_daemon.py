@@ -1,5 +1,5 @@
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.daemon import GatewayDaemon
+from codex_telegram_gateway.daemon import GatewayDaemon, _parse_topic_name
 from pathlib import Path
 
 from codex_telegram_gateway.models import (
@@ -155,6 +155,372 @@ def test_poll_telegram_once_marks_binding_closed_and_reopened_from_topic_events(
     daemon.poll_telegram_once()
 
     assert state.get_binding_by_thread("thread-1").binding_status == ACTIVE_BINDING_STATUS
+
+
+def test_poll_telegram_once_topic_rename_updates_codex_thread_title_for_authorized_user() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == [("thread-1", "renamed from telegram")]
+    assert state.get_binding_by_thread("thread-1").topic_name == "(gateway-project) renamed from telegram"
+    assert telegram.edited_topics == []
+
+
+def test_poll_telegram_once_topic_rename_restores_canonical_name_when_prefix_changes() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(wrong-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == []
+    assert telegram.edited_topics == [(-100100, 77, "(gateway-project) thread-1")]
+
+
+def test_poll_telegram_once_topic_rename_ignores_echo_for_stored_name() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project) thread-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == []
+    assert telegram.edited_topics == []
+
+
+def test_poll_telegram_once_topic_rename_ignores_missing_binding() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == []
+    assert telegram.edited_topics == []
+
+
+def test_poll_telegram_once_topic_rename_accepts_canonical_name_without_extra_work() -> None:
+    state = DummyState()
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) stale-local-name",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project) thread-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == []
+    assert state.get_binding_by_thread("thread-1").topic_name == "(gateway-project) thread-1"
+    assert telegram.edited_topics == []
+
+
+def test_poll_telegram_once_topic_rename_marks_binding_deleted_when_normalized_edit_hits_missing_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project)   rename me   ",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        del chat_id, message_thread_id, name
+        raise RuntimeError("Topic closed")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == [("thread-1", "rename me")]
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
+
+
+def test_poll_telegram_once_topic_rename_swallows_unexpected_error_when_normalizing_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project)   rename me   ",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        del chat_id, message_thread_id, name
+        raise RuntimeError("boom")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.renamed_threads == [("thread-1", "rename me")]
+    assert state.get_binding_by_thread("thread-1").topic_name == "(gateway-project) rename me"
+    assert state.get_telegram_cursor() == 2
+
+
+def test_poll_telegram_once_topic_rename_reconciles_normalized_title_back_to_telegram() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(gateway-project)   rename me   ",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    def rename_thread(thread_id: str, thread_name: str) -> CodexThread:
+        codex.renamed_threads.append((thread_id, thread_name))
+        codex.set_thread_title(thread_id, "rename me")
+        return codex.read_thread(thread_id)
+
+    codex.rename_thread = rename_thread
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_topics == [(-100100, 77, "(gateway-project) rename me")]
+
+
+def test_poll_telegram_once_topic_rename_marks_binding_deleted_when_restore_hits_missing_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(wrong-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        del chat_id, message_thread_id, name
+        raise RuntimeError("thread not found")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == DELETED_BINDING_STATUS
+
+
+def test_poll_telegram_once_topic_rename_swallows_unexpected_error_when_restoring_canonical_name() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_topic_edited_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        topic_name="(wrong-project) renamed from telegram",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    def fail_edit_forum_topic(chat_id: int, message_thread_id: int, name: str) -> None:
+        del chat_id, message_thread_id, name
+        raise RuntimeError("boom")
+
+    telegram.edit_forum_topic = fail_edit_forum_topic
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_binding_by_thread("thread-1").binding_status == ACTIVE_BINDING_STATUS
+    assert state.get_telegram_cursor() == 2
+
+
+def test_parse_topic_name_accepts_valid_names_and_rejects_invalid_or_empty_values() -> None:
+    assert _parse_topic_name("(project) thread") == ("project", "thread")
+    assert _parse_topic_name("no prefix") is None
+    assert _parse_topic_name("(project)   ") is None
 
 
 def test_sync_codex_once_skips_outbound_for_closed_binding_and_clears_terminal_pending_turn() -> None:

@@ -145,6 +145,9 @@ class GatewayDaemon:
                 if kind == "topic_reopened":
                     self._handle_topic_reopened(update)
                     continue
+                if kind == "topic_edited":
+                    self._handle_topic_edited(update)
+                    continue
                 if kind == "callback_query":
                     if from_user_id not in self._config.telegram_allowed_user_ids:
                         continue
@@ -461,6 +464,59 @@ class GatewayDaemon:
                 binding_status=ACTIVE_BINDING_STATUS,
             )
         )
+
+    def _handle_topic_edited(self, update: dict[str, object]) -> None:
+        binding = self._state.get_binding_by_topic(
+            int(update["chat_id"]),
+            int(update["message_thread_id"]),
+        )
+        if binding is None or binding.binding_status != ACTIVE_BINDING_STATUS:
+            return
+
+        new_name = str(update.get("topic_name") or "").strip()
+        if not new_name or new_name == (binding.topic_name or ""):
+            return
+
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        project_id = binding.project_id or thread.cwd
+        canonical_name = format_topic_name(project_id, thread.title)
+        if new_name == canonical_name:
+            self._state.create_binding(replace(binding, topic_name=canonical_name))
+            return
+
+        parsed_name = _parse_topic_name(new_name)
+        expected_project_name = Path(project_id).name.strip()
+        is_authorized_rename = int(update["from_user_id"]) in self._config.telegram_allowed_user_ids
+        if (
+            is_authorized_rename
+            and parsed_name is not None
+            and parsed_name[0] == expected_project_name
+            and parsed_name[1] != thread.title
+        ):
+            renamed_thread = self._codex.rename_thread(binding.codex_thread_id, parsed_name[1])
+            desired_topic_name = format_topic_name(project_id, renamed_thread.title)
+            self._state.create_binding(replace(binding, topic_name=desired_topic_name))
+            if desired_topic_name != new_name:
+                try:
+                    self._telegram.edit_forum_topic(
+                        binding.chat_id,
+                        binding.message_thread_id,
+                        desired_topic_name,
+                    )
+                except Exception as exc:
+                    if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                        raise
+            return
+
+        try:
+            self._telegram.edit_forum_topic(
+                binding.chat_id,
+                binding.message_thread_id,
+                canonical_name,
+            )
+        except Exception as exc:
+            if not self._mark_binding_deleted_if_missing_topic(binding, exc):
+                raise
 
     def _mark_binding_deleted_if_missing_topic(self, binding: Binding, exc: Exception) -> bool:
         if not is_missing_topic_error(exc):
@@ -1678,6 +1734,13 @@ def _parse_command(text: str) -> tuple[str, str] | None:
     if canonical_name is None:
         return ("help", "")
     return canonical_name, remainder.strip()
+
+
+def _parse_topic_name(topic_name: str) -> tuple[str, str] | None:
+    match = re.match(r"^\((?P<project>[^)]+)\)\s+(?P<title>.+)$", topic_name.strip())
+    if match is None:
+        return None
+    return match.group("project").strip(), match.group("title").strip()
 
 
 def _commands_text() -> str:

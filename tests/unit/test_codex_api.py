@@ -147,3 +147,41 @@ def test_steer_turn_uses_active_turn_rpc_with_expected_turn_id() -> None:
             },
         )
     ]
+
+
+def test_rename_thread_uses_thread_name_set_rpc() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        requests.append((method, params))
+        return {}
+
+    def fake_read_thread(thread_id: str) -> CodexThread:
+        return CodexThread(
+            thread_id=thread_id,
+            title="renamed thread",
+            status="idle",
+            cwd="/tmp/project",
+        )
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    client.read_thread = fake_read_thread  # type: ignore[method-assign]
+
+    renamed = client.rename_thread("thread-1", "renamed thread")
+
+    assert renamed == CodexThread(
+        thread_id="thread-1",
+        title="renamed thread",
+        status="idle",
+        cwd="/tmp/project",
+    )
+    assert requests == [
+        (
+            "thread/name/set",
+            {
+                "threadId": "thread-1",
+                "name": "renamed thread",
+            },
+        )
+    ]

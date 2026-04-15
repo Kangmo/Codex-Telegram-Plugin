@@ -102,6 +102,34 @@ def test_get_updates_normalizes_topic_closed_and_reopened_events() -> None:
     ]
 
 
+def test_get_updates_normalizes_topic_edited_events() -> None:
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 101,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "forum_topic_edited": {"name": "(gateway-project) renamed"},
+                },
+            }
+        ]
+    )
+
+    assert client.get_updates() == [
+        {
+            "kind": "topic_edited",
+            "update_id": 3,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "topic_name": "(gateway-project) renamed",
+        }
+    ]
+
+
 def test_is_missing_topic_error_matches_lifecycle_errors() -> None:
     assert is_missing_topic_error(TelegramApiError("Topic closed")) is True
     assert is_missing_topic_error(TelegramApiError("message thread not found")) is True

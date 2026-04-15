@@ -94,6 +94,9 @@ class CodexBridge(Protocol):
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
         ...
 
+    def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
+        ...
+
     def ensure_project_visible(self, project_id: str) -> None:
         ...
 
