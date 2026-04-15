@@ -459,3 +459,29 @@
   - `src/codex_telegram_gateway/daemon.py` changed executable lines: `25/25 = 100.0%`
   - `src/codex_telegram_gateway/models.py` changed executable lines: `1/1 = 100.0%`
   - `TOTAL`: `129/134 = 96.3%`
+
+### FP-26 verification
+- Branch and merge:
+  - feature branch `feature/fp-26-voice-transcription-flow`
+- Reviewed `ccgram` voice flow in `handlers/voice_handler.py`, `handlers/voice_callbacks.py`, and the `whisper/` provider layer before implementation.
+- Added `voice_ingest.py` with a pluggable transcription interface, OpenAI-compatible multipart uploads, and the confirm/discard widget helpers.
+- `TelegramBotClient.get_updates()` now downloads voice notes into `.ccgram-uploads` and emits dedicated `voice_message` updates.
+- `GatewayDaemon` now transcribes voice notes, persists `VoicePromptViewState`, and routes confirmed transcripts either into the bound Codex queue or back through the existing project picker for unbound topics.
+- Implementation decisions locked during FP-26:
+  - transcripts require explicit user confirmation before submission
+  - provider support is intentionally limited to config-backed OpenAI-compatible endpoints for now
+  - unbound-topic voice flow reuses the existing topic binding UX instead of inventing a second project-selection path
+- Proofread fixes before sign-off:
+  - voice prompt state is now cleared during resume/rebind, bind-to-project, new-thread creation, unbind, and missing-topic cleanup so stale transcript callbacks cannot route into the wrong thread
+  - voice download routing now runs before the generic unsupported-media path
+  - multipart request headers are written directly onto the `urllib` request object to keep the upload contract stable
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_voice_ingest.py tests/unit/test_config.py tests/unit/test_state.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `210 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `306 passed`
+- Feature-specific module coverage:
+  - `src/codex_telegram_gateway/voice_ingest.py`: `64/72 = 88.9%`
+  - `src/codex_telegram_gateway/config.py`: `95/103 = 92.2%`
+  - `src/codex_telegram_gateway/state.py`: `366/379 = 96.6%`
+  - `src/codex_telegram_gateway/models.py`: `158/158 = 100.0%`
+  - targeted changed-module set total: `2658/3199 = 83.1%`

@@ -24,6 +24,7 @@ from codex_telegram_gateway.models import (
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
+    VoicePromptViewState,
 )
 
 
@@ -365,6 +366,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_voice_prompt_view(self, voice_prompt_view: VoicePromptViewState) -> VoicePromptViewState:
+        ...
+
+    def get_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> VoicePromptViewState | None:
+        ...
+
+    def delete_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_status_bubble_view(

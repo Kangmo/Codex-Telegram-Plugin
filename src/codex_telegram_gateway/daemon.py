@@ -19,6 +19,12 @@ from codex_telegram_gateway.interactive_bridge import (
     start_interactive_prompt_session,
 )
 from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
+from codex_telegram_gateway.voice_ingest import (
+    TranscriptionProvider,
+    build_transcription_provider,
+    parse_voice_callback,
+    render_voice_prompt,
+)
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
@@ -41,6 +47,7 @@ from codex_telegram_gateway.models import (
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
+    VoicePromptViewState,
 )
 from codex_telegram_gateway.notification_modes import (
     build_verbose_picker,
@@ -127,11 +134,13 @@ class GatewayDaemon:
         state: GatewayState,
         telegram: TelegramClient,
         codex: CodexBridge,
+        transcriber: TranscriptionProvider | None = None,
     ) -> None:
         self._config = config
         self._state = state
         self._telegram = telegram
         self._codex = codex
+        self._transcriber = transcriber if transcriber is not None else build_transcription_provider(config)
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
         self._topic_status_disabled_chats: set[int] = set()
@@ -318,6 +327,11 @@ class GatewayDaemon:
                     notice = str(update.get("notice") or "").strip()
                     if notice:
                         self._telegram.send_message(chat_id, message_thread_id, notice)
+                    continue
+                if kind == "voice_message":
+                    if from_user_id not in self._config.telegram_allowed_user_ids:
+                        continue
+                    self._handle_voice_message(update)
                     continue
                 if kind != "message":
                     continue
@@ -1411,6 +1425,7 @@ class GatewayDaemon:
             self._state.delete_topic_lifecycle(binding.codex_thread_id)
         self._clear_topic_status_override(binding.chat_id, binding.message_thread_id)
         self._clear_typing_state(binding.chat_id, binding.message_thread_id)
+        self._state.delete_voice_prompt_view(binding.chat_id, binding.message_thread_id)
         self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
         self._status_bubble_renders.pop((binding.chat_id, binding.message_thread_id), None)
         return True
@@ -1439,6 +1454,124 @@ class GatewayDaemon:
             pending_text=text,
             pending_local_image_paths=local_image_paths,
         )
+
+    def _handle_voice_message(self, update: dict[str, object]) -> None:
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        from_user_id = int(update["from_user_id"])
+        file_path = Path(str(update.get("file_path") or "")).expanduser()
+        if not file_path.is_file():
+            self._telegram.send_message(chat_id, message_thread_id, "Failed to download the voice message.")
+            return
+        if self._transcriber is None:
+            self._telegram.send_message(
+                chat_id,
+                message_thread_id,
+                "Voice transcription is not configured. Set CODEX_TELEGRAM_WHISPER_PROVIDER to enable it.",
+            )
+            return
+
+        self._telegram.send_chat_action(chat_id, message_thread_id, "typing")
+        try:
+            result = self._transcriber.transcribe(file_path)
+        except Exception as exc:
+            self._telegram.send_message(chat_id, message_thread_id, f"Voice transcription failed: {exc}")
+            return
+
+        transcript_text = str(getattr(result, "text", "") or "").strip()
+        if not transcript_text:
+            self._telegram.send_message(chat_id, message_thread_id, "Could not transcribe the voice message.")
+            return
+
+        existing_prompt = self._state.get_voice_prompt_view(chat_id, message_thread_id)
+        if existing_prompt is not None:
+            try:
+                self._telegram.edit_message_reply_markup(chat_id, existing_prompt.message_id, None)
+            except Exception:
+                pass
+            self._state.delete_voice_prompt_view(chat_id, message_thread_id)
+
+        prompt_text, reply_markup = render_voice_prompt(transcript_text)
+        prompt_message_id = self._telegram.send_message(
+            chat_id,
+            message_thread_id,
+            prompt_text,
+            reply_markup=reply_markup,
+        )
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        self._state.upsert_voice_prompt_view(
+            VoicePromptViewState(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                message_id=prompt_message_id,
+                codex_thread_id=binding.codex_thread_id if binding is not None else "",
+                source_update_id=int(update["update_id"]),
+                from_user_id=from_user_id,
+                transcript_text=transcript_text,
+            )
+        )
+
+    def _handle_voice_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        action = parse_voice_callback(str(update["data"]))
+        if action is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown voice action.")
+            return
+
+        voice_prompt_view = self._state.get_voice_prompt_view(chat_id, message_thread_id)
+        if voice_prompt_view is None or voice_prompt_view.message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This voice prompt is stale.")
+            return
+
+        if action == "drop":
+            self._state.delete_voice_prompt_view(chat_id, message_thread_id)
+            self._telegram.edit_message_text(
+                chat_id,
+                message_id,
+                "Voice transcription discarded.",
+                reply_markup=None,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Discarded.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is not None and binding.binding_status != ACTIVE_BINDING_STATUS:
+            if self._is_primary_binding(binding):
+                self._offer_restore_prompt(binding)
+            self._telegram.answer_callback_query(callback_query_id, "This topic needs restore first.")
+            return
+
+        self._state.delete_voice_prompt_view(chat_id, message_thread_id)
+        self._telegram.edit_message_text(
+            chat_id,
+            message_id,
+            f"Voice transcription sent.\n\n{voice_prompt_view.transcript_text}",
+            reply_markup=None,
+        )
+        if binding is None:
+            topic_project = self._state.get_topic_project(chat_id, message_thread_id)
+            self._open_project_picker(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                topic_name=topic_project.topic_name if topic_project else None,
+                pending_update_id=voice_prompt_view.source_update_id,
+                pending_user_id=voice_prompt_view.from_user_id,
+                pending_text=voice_prompt_view.transcript_text,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Choose a project.")
+            return
+
+        self._enqueue_bound_inbound(
+            binding,
+            telegram_update_id=voice_prompt_view.source_update_id,
+            from_user_id=voice_prompt_view.from_user_id,
+            text=voice_prompt_view.transcript_text,
+            local_image_paths=(),
+        )
+        self._telegram.answer_callback_query(callback_query_id, "Queued.")
 
     def _handle_callback_query(self, update: dict[str, object]) -> None:
         chat_id = int(update["chat_id"])
@@ -1472,6 +1605,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_PROMPT_PREFIX):
             self._handle_interactive_prompt_callback(update)
+            return
+        if data.startswith(_CALLBACK_VOICE_PREFIX):
+            self._handle_voice_callback(update)
             return
         if data.startswith(_CALLBACK_QUEUE_PREFIX):
             self._handle_queue_callback(update)
@@ -2000,6 +2136,7 @@ class GatewayDaemon:
         self._state.delete_history_view(chat_id, message_thread_id)
         self._state.delete_resume_view(chat_id, message_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
+        self._state.delete_voice_prompt_view(chat_id, message_thread_id)
         self._clear_interactive_prompt_topic(
             chat_id,
             message_thread_id,
@@ -2636,6 +2773,7 @@ class GatewayDaemon:
             self._state.delete_pending_turn(existing_binding.codex_thread_id)
             self._clear_typing_state(existing_binding.chat_id, existing_binding.message_thread_id)
         self._state.delete_restore_view(topic_project.chat_id, topic_project.message_thread_id)
+        self._state.delete_voice_prompt_view(topic_project.chat_id, topic_project.message_thread_id)
         if topic_project.picker_message_id is not None:
             self._telegram.edit_message_reply_markup(
                 topic_project.chat_id,
@@ -3108,6 +3246,7 @@ class GatewayDaemon:
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
         self._state.delete_send_view(chat_id, message_thread_id)
+        self._state.delete_voice_prompt_view(chat_id, message_thread_id)
         self._clear_interactive_prompt_topic(
             chat_id,
             message_thread_id,
@@ -3159,6 +3298,7 @@ class GatewayDaemon:
             self._state.delete_resume_view(target.chat_id, target.message_thread_id)
             self._state.delete_restore_view(target.chat_id, target.message_thread_id)
             self._state.delete_send_view(target.chat_id, target.message_thread_id)
+            self._state.delete_voice_prompt_view(target.chat_id, target.message_thread_id)
             self._clear_interactive_prompt_topic(
                 target.chat_id,
                 target.message_thread_id,
@@ -3547,6 +3687,7 @@ _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
 _CALLBACK_VERBOSE_PREFIX = "gw:verbose:"
 _CALLBACK_SEND_PREFIX = "gw:send:"
 _CALLBACK_PROMPT_PREFIX = "gw:prompt:"
+_CALLBACK_VOICE_PREFIX = "gw:voice:"
 _CALLBACK_QUEUE_PREFIX = "gw:queue:"
 _CALLBACK_QUEUE_STEER_PREFIX = f"{_CALLBACK_QUEUE_PREFIX}steer:"
 _CALLBACK_RESPONSE_PREFIX = "gw:resp:"

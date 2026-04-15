@@ -14,6 +14,7 @@ from codex_telegram_gateway.models import (
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
+    VoicePromptViewState,
 )
 from codex_telegram_gateway.state import SqliteGatewayState
 
@@ -231,6 +232,27 @@ def test_sqlite_state_persists_status_bubble_view(tmp_path) -> None:
     state.delete_status_bubble_view(-100100, 77)
 
     assert state.get_status_bubble_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_voice_prompt_view(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    voice_prompt_view = VoicePromptViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=18,
+        codex_thread_id="thread-1",
+        source_update_id=6,
+        from_user_id=111,
+        transcript_text="Please continue with the deployment.",
+    )
+
+    state.upsert_voice_prompt_view(voice_prompt_view)
+
+    assert state.get_voice_prompt_view(-100100, 77) == voice_prompt_view
+
+    state.delete_voice_prompt_view(-100100, 77)
+
+    assert state.get_voice_prompt_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_outbound_message_blocks(tmp_path) -> None:

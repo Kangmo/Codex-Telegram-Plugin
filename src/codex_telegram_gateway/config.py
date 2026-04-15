@@ -20,6 +20,11 @@ class GatewayConfig:
     lifecycle_prune_interval_seconds: float = 300.0
     state_database_path: Path = Path(".codex-telegram/gateway.db")
     codex_app_server_command: tuple[str, ...] = ("codex", "app-server", "--listen", "stdio://")
+    voice_transcription_provider: str = ""
+    voice_transcription_api_key: str = ""
+    voice_transcription_base_url: str = ""
+    voice_transcription_model: str = ""
+    voice_transcription_language: str = ""
 
     @classmethod
     def from_env(cls, env_path: Path | None = None) -> "GatewayConfig":
@@ -73,6 +78,11 @@ class GatewayConfig:
             "TELEGRAM_LIFECYCLE_PRUNE_INTERVAL_SECONDS",
             default=300.0,
         )
+        voice_transcription_provider = env.get("CODEX_TELEGRAM_WHISPER_PROVIDER", "").strip()
+        voice_transcription_api_key = env.get("CODEX_TELEGRAM_WHISPER_API_KEY", "").strip()
+        voice_transcription_base_url = env.get("CODEX_TELEGRAM_WHISPER_BASE_URL", "").strip()
+        voice_transcription_model = env.get("CODEX_TELEGRAM_WHISPER_MODEL", "").strip()
+        voice_transcription_language = env.get("CODEX_TELEGRAM_WHISPER_LANGUAGE", "").strip()
         return cls(
             telegram_bot_token=bot_token,
             telegram_allowed_user_ids=allowed_user_ids,
@@ -90,6 +100,11 @@ class GatewayConfig:
             lifecycle_autoclose_after_seconds=lifecycle_autoclose_after_seconds,
             lifecycle_prune_interval_seconds=lifecycle_prune_interval_seconds,
             state_database_path=state_database_path,
+            voice_transcription_provider=voice_transcription_provider,
+            voice_transcription_api_key=voice_transcription_api_key,
+            voice_transcription_base_url=voice_transcription_base_url,
+            voice_transcription_model=voice_transcription_model,
+            voice_transcription_language=voice_transcription_language,
         )
 
     @property

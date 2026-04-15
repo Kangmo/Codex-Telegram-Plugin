@@ -39,9 +39,23 @@ from codex_telegram_gateway.models import (
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
+    VoicePromptViewState,
 )
 
 from tests.unit.support import DummyCodexBridge, DummyState, DummyTelegramClient
+
+
+class StaticTranscriptionProvider:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls: list[str] = []
+
+    def transcribe(self, audio_path: Path):
+        self.calls.append(str(audio_path))
+        return __import__("codex_telegram_gateway.voice_ingest", fromlist=["TranscriptionResult"]).TranscriptionResult(
+            text=self.text,
+            language="en",
+        )
 
 
 def make_binding(*, binding_status: str = ACTIVE_BINDING_STATUS) -> Binding:
@@ -4972,6 +4986,169 @@ def test_poll_telegram_once_replies_to_unsupported_media_without_queueing() -> N
     ]
 
 
+def test_poll_telegram_once_transcribes_voice_and_sends_confirmation(tmp_path) -> None:
+    voice_path = tmp_path / ".ccgram-uploads" / "voice.ogg"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"ogg-bytes")
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram._updates.append(
+        {
+            "kind": "voice_message",
+            "update_id": 7,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "file_path": str(voice_path),
+        }
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    transcriber = StaticTranscriptionProvider("Please continue with the deployment.")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        transcriber=transcriber,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert transcriber.calls == [str(voice_path)]
+    assert telegram.sent_chat_actions == [(-100100, 77, "typing")]
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Voice transcription\n\nPlease continue with the deployment.",
+            {
+                "inline_keyboard": [
+                    [{"text": "Send", "callback_data": "gw:voice:send"}],
+                    [{"text": "Discard", "callback_data": "gw:voice:drop"}],
+                ]
+            },
+        )
+    ]
+    assert state.get_voice_prompt_view(-100100, 77) == VoicePromptViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        codex_thread_id="thread-1",
+        source_update_id=7,
+        from_user_id=111,
+        transcript_text="Please continue with the deployment.",
+    )
+
+
+def test_voice_callback_send_queues_transcript_for_bound_topic() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_voice_prompt_view(
+        VoicePromptViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            source_update_id=12,
+            from_user_id=111,
+            transcript_text="Please continue with the deployment.",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=13,
+        callback_query_id="cb-voice-send",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data="gw:voice:send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=12,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Please continue with the deployment.",
+            local_image_paths=(),
+        )
+    ]
+    assert state.get_voice_prompt_view(-100100, 77) is None
+
+
+def test_voice_callback_send_opens_project_picker_for_unbound_topic() -> None:
+    state = DummyState()
+    state.upsert_voice_prompt_view(
+        VoicePromptViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="",
+            source_update_id=12,
+            from_user_id=111,
+            transcript_text="Please continue with the deployment.",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=13,
+        callback_query_id="cb-voice-send",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data="gw:voice:send",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    topic_project = state.get_topic_project(-100100, 77)
+    assert topic_project is not None
+    assert topic_project.pending_update_id == 12
+    assert topic_project.pending_user_id == 111
+    assert topic_project.pending_text == "Please continue with the deployment."
+    assert state.get_voice_prompt_view(-100100, 77) is None
 def test_poll_telegram_once_ignores_unsupported_media_from_unauthorized_user() -> None:
     state = DummyState()
     state.create_binding(make_binding())

@@ -186,6 +186,19 @@ class InteractivePromptViewState:
 
 
 @dataclass(frozen=True)
+class VoicePromptViewState:
+    """Persisted Telegram voice-transcription prompt context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str
+    source_update_id: int
+    from_user_id: int
+    transcript_text: str
+
+
+@dataclass(frozen=True)
 class StatusBubbleViewState:
     """Persisted Telegram status-bubble message context for one topic."""
 

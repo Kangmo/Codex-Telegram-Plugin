@@ -20,6 +20,7 @@ from codex_telegram_gateway.models import (
     TopicHistoryEntry,
     TopicProject,
     TurnResult,
+    VoicePromptViewState,
 )
 
 
@@ -47,6 +48,7 @@ class DummyState:
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
         self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
+        self.voice_prompt_views: dict[tuple[int, int], VoicePromptViewState] = {}
         self.status_bubble_views: dict[tuple[int, int], StatusBubbleViewState] = {}
         self.send_views: dict[tuple[int, int], SendViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
@@ -340,6 +342,16 @@ class DummyState:
 
     def delete_interactive_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
         self.interactive_prompt_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_voice_prompt_view(self, voice_prompt_view: VoicePromptViewState) -> VoicePromptViewState:
+        self.voice_prompt_views[(voice_prompt_view.chat_id, voice_prompt_view.message_thread_id)] = voice_prompt_view
+        return voice_prompt_view
+
+    def get_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> VoicePromptViewState | None:
+        return self.voice_prompt_views.get((chat_id, message_thread_id))
+
+    def delete_voice_prompt_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.voice_prompt_views.pop((chat_id, message_thread_id), None)
 
     def upsert_status_bubble_view(
         self,
