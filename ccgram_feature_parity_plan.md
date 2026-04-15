@@ -137,9 +137,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-15: `/panes` Compatibility
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-16: `/recall`
 - [x] Implemented
@@ -1434,30 +1434,48 @@ Provide a Telegram-triggered visual snapshot of the current Codex App thread.
 
 ### FP-15: `/panes` Compatibility
 
-**Parity target**
+Branch and merge:
 
-Provide a compatibility answer for a tmux-only command.
+- Feature branch: `feature/fp-15-panes-compatibility`
+- Feature commit: `503d092`
+- Merge commit on `main`: `a4c90fa`
 
-**Dev design**
+Implementation decisions:
 
-- Codex App has no pane model.
-- Implement `/panes` as a compatibility command that shows:
-  - loaded threads in the current project
-  - current bound thread
-  - explanation that pane-level controls are unsupported in app mode
+- Kept FP-15 strictly as a compatibility command. The gateway does not invent a fake pane abstraction for Codex App because there is no pane model to control or inspect.
+- Added a dedicated `panes_compat.py` helper so the adaptation logic stays isolated from the already-large daemon and can be tested directly without routing through Telegram update handling.
+- `/gateway panes` is read-only and works from any bound topic, including mirror topics, because it only summarizes the bound thread and the loaded threads in the same project.
+- The rendered output is intentionally explicit:
+  - current bound thread and project
+  - loaded threads in the same project with statuses
+  - operator guidance to use `/gateway threads`, `/gateway screenshot`, or `/gateway live` instead of expecting tmux-like pane controls
+- The gateway help snapshot was updated so `/gateway panes` is discoverable alongside the other supported compatibility commands.
 
-**Implementation plan**
+Test and verification notes:
 
-1. Add `/panes` alias to a compatibility handler.
-2. Reuse loaded-thread discovery and bindings view.
-3. Keep wording explicit so users do not expect tmux-like controls.
+- Red-phase sequence:
+  - added the end-to-end contract for `/gateway panes`
+  - added interface-only `panes_compat.py` signatures
+  - added unit tests for project-thread filtering and compatibility-text rendering
+  - confirmed the initial failures:
+    - helper unit tests failed with `NotImplementedError`
+    - the end-to-end test failed because `/gateway panes` still fell back to help
+- Focused verification:
+  - `.venv/bin/pytest -q tests/unit/test_panes_compat.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_panes_reports_project_threads tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_panes_reports_project_threads` -> `7 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` on the feature branch -> `397 passed`
+  - `.venv/bin/pytest -q` on `main` after merge -> `397 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.daemon --cov=codex_telegram_gateway.panes_compat --cov-report=json:/tmp/fp15_cov.json tests/unit/test_panes_compat.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_panes_reports_project_threads tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_panes_reports_project_threads`
+  - diff-based audit of the FP-15 source changes -> `32/34 = 94.1%`
 
-**Test automation plan**
+Code review notes:
 
-- Unit:
-  - compatibility message rendering
-- Integration:
-  - `/panes` in a bound topic shows loaded threads instead of erroring
+- The proofread pass confirmed the command remains side-effect free: it does not mutate bindings, topics, or thread state.
+- The proofread pass caught one red-phase issue in the daemon unit fixture, not in the implementation: the test originally expected a third same-project thread that the fixture had not actually created. The fixture was corrected instead of weakening the assertions.
+- The review also added explicit edge-case coverage for:
+  - unknown project roots, where the helper falls back to the bound thread only
+  - empty project-thread lists, where the compatibility message stays explicit instead of rendering a blank section
 
 ### FP-16: `/recall`
 

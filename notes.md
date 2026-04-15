@@ -185,18 +185,23 @@
 - FP-07 `/resume`
 - FP-08 `/unbind`
 - FP-09 `/restore`
+- FP-10 `/upgrade`
 - FP-11 `/send`
 - FP-12 `/toolbar`
 - FP-13 `/verbose`
 - FP-14 `/screenshot`
-- FP-22 Live view
+- FP-15 `/panes` compatibility
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 - FP-19 Interactive prompt bridge
 - FP-20 Dedicated status bubble
 - FP-21 Tool batching, failure probing, and completion summaries
+- FP-22 Live view
+- FP-23 Remote control actions
 - FP-24 General file intake and unsupported-content UX
 - FP-25 Outbound media and file delivery
+- FP-26 Voice transcription flow
+- FP-27 Inline query support
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -703,3 +708,32 @@
   - `.venv/bin/pytest -q` -> `391 passed`
 - Feature-specific changed-executable coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp10.json -q` plus diff-based changed-line audit including new source files -> `79/85 = 92.9%`
+
+### FP-15 verification
+- Branch and merge:
+  - feature branch `feature/fp-15-panes-compatibility`
+  - feature commit `503d092`
+  - merge commit on `main` `a4c90fa`
+- Re-reviewed `ccgram` pane handling before implementation:
+  - `/tmp/ccgram-review/src/ccgram/handlers/screenshot_callbacks.py`
+  - `/tmp/ccgram-review/src/ccgram/cc_commands.py`
+  - `/tmp/ccgram-review/src/ccgram/bot.py`
+- Added `panes_compat.py` for:
+  - same-project loaded-thread filtering
+  - explicit Codex-App compatibility message rendering
+- `GatewayDaemon` now handles `/gateway panes` directly and returns a project-thread summary instead of falling back to help.
+- Implementation decisions locked during FP-15:
+  - keep `/panes` compatibility-only; do not emulate tmux panes in Codex App mode
+  - keep the command read-only so it is safe for primary and mirror bindings
+  - direct operators to `/gateway threads`, `/gateway screenshot`, and `/gateway live` for the app-native equivalents
+- Proofread fixes before sign-off:
+  - updated the gateway help snapshot after adding the new subcommand
+  - corrected a daemon test fixture that expected a third same-project thread it had not actually created
+  - added explicit edge-case tests for missing project roots and empty project-thread sets
+- Focused verification:
+  - `.venv/bin/pytest -q tests/unit/test_panes_compat.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_panes_reports_project_threads tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_panes_reports_project_threads` -> `7 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `397 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.daemon --cov=codex_telegram_gateway.panes_compat --cov-report=json:/tmp/fp15_cov.json tests/unit/test_panes_compat.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_panes_reports_project_threads tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_panes_reports_project_threads`
+  - diff-based changed-line audit for FP-15 source work -> `32/34 = 94.1%`

@@ -24,4 +24,4 @@ Produce a feature-by-feature parity plan for the missing `ccgram` Telegram gatew
 - Shell defaulted to `/opt/anaconda3/bin/python` (Python 3.9), which caused false collection failures on `str | None` annotations; resolved by using the repo-local `.venv` and its Python 3.11 toolchain.
 
 ## Status
-**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-10, FP-11, FP-12, FP-13, FP-14, FP-16, FP-17, FP-18, FP-19, FP-20, FP-21, FP-22, FP-23, FP-24, FP-25, FP-26, and FP-27 are complete. The next highest-priority unfinished feature is FP-15 `/panes` compatibility.
+**In progress** - parity implementation is underway from highest priority to lowest priority. `ccgram_feature_parity_plan.md` is the tracker of record and implementation journal. FP-01 through FP-10, FP-11, FP-12, FP-13, FP-14, FP-15, FP-16, FP-17, FP-18, FP-19, FP-20, FP-21, FP-22, FP-23, FP-24, FP-25, FP-26, and FP-27 are complete. The next highest-priority unfinished feature is FP-28 inter-agent messaging/mailbox.
