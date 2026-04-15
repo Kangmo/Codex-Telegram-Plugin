@@ -45,7 +45,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-11 | `/send` file browser/upload | P0 | Native | Implemented |
 | FP-12 | `/toolbar` configurable action bar | P1 | Adapted | Implemented |
 | FP-13 | `/verbose` and notification modes | P0 | Native | Implemented |
-| FP-14 | `/screenshot` | P1 | Adapted | Missing |
+| FP-14 | `/screenshot` | P1 | Adapted | Implemented |
 | FP-15 | `/panes` compatibility | P2 | Compatibility only | Codex App has no pane model |
 | FP-16 | `/recall` top-level recall flow | P1 | Native | Implemented |
 | FP-17 | Command discovery and Telegram menu sync | P0 | Adapted | Partial today |
@@ -132,9 +132,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-14: `/screenshot`
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-15: `/panes` Compatibility
 - [ ] Implemented
@@ -1339,6 +1339,51 @@ Provide a Telegram-triggered visual snapshot of the current Codex App thread.
   - screenshot send path with fake image bytes
 - E2E:
   - manual macOS test in CI notes; automated test only validates adapter contract
+
+**Implementation notes**
+
+- Reviewed `ccgram` screenshot flow before implementation:
+  - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
+  - screenshot dispatch hooks in `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
+- Added `screenshot_capture.py` with:
+  - `ScreenshotProvider` interface
+  - `ScreenshotCapture` result type
+  - `MacOSWindowScreenshotProvider`
+  - `build_screenshot_provider(...)`
+- The native macOS adapter captures the front Codex App window by:
+  - querying window geometry through AppleScript / `System Events`
+  - invoking `screencapture -R...` to create a PNG under `.codex-telegram/screenshots`
+- Added `/gateway screenshot` to the gateway command set and wired the existing sessions-dashboard 📸 callback to the same capture/send path.
+- Screenshot delivery reuses the existing Telegram upload helpers:
+  - send as photo by default
+  - switch to document when the captured file exceeds the photo size threshold
+
+**Implementation decisions**
+
+- Adapted `ccgram`’s tmux-pane screenshot behavior to a Codex-App-native whole-window capture because Codex App exposes no pane model.
+- Kept the screenshot provider injectable so daemon tests and end-to-end tests do not depend on AppleScript or screen-recording permissions.
+- Sent dashboard-triggered screenshots back into the topic where the dashboard message lives, not forcibly into the bound topic entry’s original location, so operator feedback stays local to the action they took.
+- Limited the automated contract to the provider boundary and the Telegram delivery path; actual macOS capture quality remains a manual workstation validation concern.
+
+**Proof reading notes**
+
+- Performed line-by-line review on:
+  - `src/codex_telegram_gateway/screenshot_capture.py`
+  - `src/codex_telegram_gateway/daemon.py`
+  - `tests/unit/test_screenshot_capture.py`
+  - `tests/unit/test_daemon.py`
+  - `tests/e2e/test_gateway_flow.py`
+- Defect found and fixed during proof reading:
+  - the sessions-dashboard screenshot callback referenced an undefined `message_thread_id` local, which caused the poll loop to swallow the exception and produce no callback result; fixed by threading the current topic id through `_handle_sessions_callback(...)`
+
+**Verification**
+
+- Focused screenshot verification:
+  - `.venv/bin/pytest tests/unit/test_screenshot_capture.py tests/unit/test_daemon.py -k screenshot tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_screenshot_sends_photo` -> `5 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest` -> `340 passed`
+- Feature-specific coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.screenshot_capture --cov-report=term-missing tests/unit/test_screenshot_capture.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_screenshot_sends_photo tests/unit/test_daemon.py::test_poll_telegram_once_sessions_dashboard_screenshot_sends_photo tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_screenshot_sends_photo` -> `screenshot_capture.py 81%`
 
 ### FP-15: `/panes` Compatibility
 

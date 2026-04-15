@@ -64,6 +64,11 @@ from codex_telegram_gateway.recall_command import (
     parse_recall_callback,
     render_recall_prompt,
 )
+from codex_telegram_gateway.screenshot_capture import (
+    build_screenshot_provider,
+    ScreenshotCaptureError,
+    ScreenshotProvider,
+)
 from codex_telegram_gateway.service import (
     DEFAULT_NEW_THREAD_TITLE,
     GatewayService,
@@ -148,12 +153,16 @@ class GatewayDaemon:
         telegram: TelegramClient,
         codex: CodexBridge,
         transcriber: TranscriptionProvider | None = None,
+        screenshot_provider: ScreenshotProvider | None = None,
     ) -> None:
         self._config = config
         self._state = state
         self._telegram = telegram
         self._codex = codex
         self._transcriber = transcriber if transcriber is not None else build_transcription_provider(config)
+        self._screenshot_provider = (
+            screenshot_provider if screenshot_provider is not None else build_screenshot_provider(config)
+        )
         self._toolbar_config = load_toolbar_config(config.toolbar_config_path)
         self._last_typing_sent_at: dict[tuple[int, int], float] = {}
         self._topic_status_overrides: dict[tuple[int, int], str] = {}
@@ -1891,6 +1900,7 @@ class GatewayDaemon:
     def _handle_sessions_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
         chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
         message_id = int(update["message_id"])
         parsed_callback = parse_sessions_callback(str(update["data"]))
         if parsed_callback is None:
@@ -1977,10 +1987,16 @@ class GatewayDaemon:
             return
 
         if action == "screenshot":
-            self._telegram.answer_callback_query(
-                callback_query_id,
-                "Screenshot support is not available yet.",
-            )
+            try:
+                self._send_screenshot_for_binding(
+                    binding,
+                    target_chat_id=chat_id,
+                    target_message_thread_id=message_thread_id,
+                )
+            except ScreenshotCaptureError as exc:
+                self._telegram.answer_callback_query(callback_query_id, f"Screenshot failed: {exc}")
+                return
+            self._telegram.answer_callback_query(callback_query_id, "Sent screenshot.")
             return
 
     def _handle_history_callback(self, update: dict[str, object]) -> None:
@@ -3067,6 +3083,41 @@ class GatewayDaemon:
 
         self._telegram.answer_callback_query(callback_query_id, "Unknown toolbar action.")
 
+    def _send_screenshot_for_binding(
+        self,
+        binding: Binding,
+        *,
+        target_chat_id: int,
+        target_message_thread_id: int,
+    ) -> None:
+        if self._screenshot_provider is None:
+            raise ScreenshotCaptureError("Screenshot capture is not available on this platform.")
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        project_id = binding.project_id or thread.cwd or None
+        capture = self._screenshot_provider.capture_thread(
+            thread_id=binding.codex_thread_id,
+            thread_title=thread.title,
+            project_id=project_id,
+        )
+        if not capture.file_path.is_file():
+            raise ScreenshotCaptureError("Screenshot file is missing.")
+        project_name = Path(project_id or "").name or "-"
+        caption = f"Screenshot · {project_name} / {thread.title}"
+        if capture.send_as_document:
+            self._telegram.send_document_file(
+                target_chat_id,
+                target_message_thread_id,
+                capture.file_path,
+                caption=caption,
+            )
+            return
+        self._telegram.send_photo_file(
+            target_chat_id,
+            target_message_thread_id,
+            capture.file_path,
+            caption=caption,
+        )
+
     def _handle_command(
         self,
         update: dict[str, object],
@@ -3245,6 +3296,28 @@ class GatewayDaemon:
                     chat_id=chat_id,
                     message_thread_id=message_thread_id,
                     topic_name=self._topic_name_for_command(chat_id, message_thread_id),
+                )
+            return
+
+        if command_name == "screenshot":
+            if binding is None:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    "This topic is not bound to any Codex thread.",
+                )
+                return
+            try:
+                self._send_screenshot_for_binding(
+                    binding,
+                    target_chat_id=chat_id,
+                    target_message_thread_id=message_thread_id,
+                )
+            except ScreenshotCaptureError as exc:
+                self._telegram.send_message(
+                    chat_id,
+                    message_thread_id,
+                    f"Failed to capture screenshot: {exc}",
                 )
             return
 
@@ -3959,6 +4032,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("unbind", "Detach this Telegram topic from its Codex thread"),
     _BotCommand("bindings", "List Codex thread to Telegram topic bindings", aliases=("sessions",)),
     _BotCommand("create_thread", "Create a new Codex thread in this topic", aliases=("new", "start")),
+    _BotCommand("screenshot", "Capture the current Codex App window for this thread"),
     _BotCommand("send", "Browse project files and send one back to Telegram"),
     _BotCommand("verbose", "Change supplemental Telegram notification mode"),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),

@@ -60,6 +60,20 @@ class StaticTranscriptionProvider:
         )
 
 
+class StaticScreenshotProvider:
+    def __init__(self, file_path: Path, *, send_as_document: bool = False) -> None:
+        self.file_path = file_path
+        self.send_as_document = send_as_document
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def capture_thread(self, *, thread_id: str, thread_title: str, project_id: str | None):
+        self.calls.append((thread_id, thread_title, project_id))
+        return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
+            file_path=self.file_path,
+            send_as_document=self.send_as_document,
+        )
+
+
 def make_binding(*, binding_status: str = ACTIVE_BINDING_STATUS) -> Binding:
     return Binding(
         codex_thread_id="thread-1",
@@ -1299,6 +1313,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
                 "/gateway bindings - List Codex thread to Telegram topic bindings\n"
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
+                "/gateway screenshot - Capture the current Codex App window for this thread\n"
                 "/gateway send - Browse project files and send one back to Telegram\n"
                 "/gateway verbose - Change supplemental Telegram notification mode\n"
                 "/gateway project - Choose or switch the Codex project for this topic\n"
@@ -3839,7 +3854,58 @@ def test_poll_telegram_once_sessions_dashboard_rejects_stale_target_topic() -> N
     )
 
 
-def test_poll_telegram_once_sessions_dashboard_screenshot_reports_unavailable() -> None:
+def test_poll_telegram_once_gateway_screenshot_sends_photo(tmp_path) -> None:
+    screenshot_path = tmp_path / "screenshot.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway screenshot",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    screenshot_provider = StaticScreenshotProvider(screenshot_path)
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert screenshot_provider.calls == [
+        (
+            "thread-1",
+            "thread-1",
+            "/Users/kangmo/sacle/src/gateway-project",
+        )
+    ]
+    assert telegram.sent_photos == [
+        (
+            -100100,
+            77,
+            str(screenshot_path),
+            "Screenshot · gateway-project / thread-1",
+        )
+    ]
+
+
+def test_poll_telegram_once_sessions_dashboard_screenshot_sends_photo(tmp_path) -> None:
+    screenshot_path = tmp_path / "screenshot.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     state = DummyState()
     state.create_binding(make_binding())
     telegram = DummyTelegramClient()
@@ -3858,11 +3924,13 @@ def test_poll_telegram_once_sessions_dashboard_screenshot_reports_unavailable() 
             cwd="/Users/kangmo/sacle/src/gateway-project",
         )
     )
+    screenshot_provider = StaticScreenshotProvider(screenshot_path)
     daemon = GatewayDaemon(
         config=make_config(),
         state=state,
         telegram=telegram,
         codex=codex,
+        screenshot_provider=screenshot_provider,
     )
 
     daemon.poll_telegram_once()
@@ -3878,9 +3946,24 @@ def test_poll_telegram_once_sessions_dashboard_screenshot_reports_unavailable() 
 
     daemon.poll_telegram_once()
 
+    assert screenshot_provider.calls == [
+        (
+            "thread-1",
+            "thread-1",
+            "/Users/kangmo/sacle/src/gateway-project",
+        )
+    ]
+    assert telegram.sent_photos == [
+        (
+            -100100,
+            77,
+            str(screenshot_path),
+            "Screenshot · gateway-project / thread-1",
+        )
+    ]
     assert telegram.answered_callback_queries[-1] == (
         "cb-shot",
-        "Screenshot support is not available yet.",
+        "Sent screenshot.",
     )
 
 

@@ -188,6 +188,7 @@
 - FP-11 `/send`
 - FP-12 `/toolbar`
 - FP-13 `/verbose`
+- FP-14 `/screenshot`
 - FP-17 Command/menu sync
 - FP-18 Full sessions dashboard
 - FP-19 Interactive prompt bridge
@@ -578,3 +579,32 @@
   - `.venv/bin/pytest` -> `336 passed`
 - Feature-specific module coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway.toolbar --cov-report=term-missing tests/unit/test_toolbar.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_toolbar_sends_and_refreshes_persisted_view tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_status_callback_routes_to_gateway_command tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_thread_text_callback_enqueues_bound_inbound tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_steer_callback_steers_active_turn tests/unit/test_daemon.py::test_poll_telegram_once_toolbar_dismiss_callback_clears_persisted_view tests/e2e/test_gateway_flow.py::test_gateway_flow_toolbar_override_persists_across_restart` -> `src/codex_telegram_gateway/toolbar.py 88%`
+
+### FP-14 verification
+- Branch and merge:
+  - feature branch `feature/fp-14-screenshot`
+  - feature commit pending until this feature is committed
+  - merge commit on `main` pending until this feature is merged
+- Re-reviewed `ccgram` screenshot sources before implementation:
+  - `/tmp/ccgram/src/ccgram/handlers/screenshot_callbacks.py`
+  - `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
+- Added `screenshot_capture.py` with:
+  - a `ScreenshotProvider` interface for daemon injection
+  - a native `MacOSWindowScreenshotProvider`
+  - AppleScript window-geometry lookup plus `screencapture` PNG capture
+- `GatewayDaemon` now supports:
+  - `/gateway screenshot`
+  - the existing sessions dashboard 📸 callback
+  - photo/document delivery based on captured file size
+- Implementation decisions locked during FP-14:
+  - whole-window capture is the supported parity adaptation because Codex App has no pane model
+  - screenshot delivery returns to the topic where the command or dashboard action was invoked
+  - automated tests use fake providers and do not depend on live macOS capture permissions
+- Proofread fixes before sign-off:
+  - fixed an undefined `message_thread_id` local in the sessions screenshot callback path that otherwise caused the poller to swallow the exception silently
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_screenshot_capture.py tests/unit/test_daemon.py -k screenshot tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_screenshot_sends_photo` -> `5 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest` -> `340 passed`
+- Feature-specific module coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.screenshot_capture --cov-report=term-missing tests/unit/test_screenshot_capture.py tests/unit/test_daemon.py::test_poll_telegram_once_gateway_screenshot_sends_photo tests/unit/test_daemon.py::test_poll_telegram_once_sessions_dashboard_screenshot_sends_photo tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_screenshot_sends_photo` -> `src/codex_telegram_gateway/screenshot_capture.py 81%`

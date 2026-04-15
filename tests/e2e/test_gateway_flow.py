@@ -16,6 +16,7 @@ from codex_telegram_gateway.recovery import CALLBACK_RESTORE_CONTINUE
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 from codex_telegram_gateway.toolbar import CALLBACK_TOOLBAR_PREFIX
+from pathlib import Path
 
 
 class StaticTranscriptionProvider:
@@ -27,6 +28,20 @@ class StaticTranscriptionProvider:
         return __import__("codex_telegram_gateway.voice_ingest", fromlist=["TranscriptionResult"]).TranscriptionResult(
             text=self.text,
             language="en",
+        )
+
+
+class StaticScreenshotProvider:
+    def __init__(self, file_path: Path, *, send_as_document: bool = False) -> None:
+        self.file_path = file_path
+        self.send_as_document = send_as_document
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def capture_thread(self, *, thread_id: str, thread_title: str, project_id: str | None):
+        self.calls.append((thread_id, thread_title, project_id))
+        return __import__("codex_telegram_gateway.screenshot_capture", fromlist=["ScreenshotCapture"]).ScreenshotCapture(
+            file_path=self.file_path,
+            send_as_document=self.send_as_document,
         )
 
 
@@ -379,6 +394,71 @@ def test_gateway_flow_toolbar_override_persists_across_restart(tmp_path) -> None
             ]
         },
     )
+
+
+def test_gateway_flow_gateway_screenshot_sends_photo(tmp_path) -> None:
+    screenshot_path = tmp_path / "screenshot.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+        state_database_path=tmp_path / "gateway.db",
+    )
+    state = SqliteGatewayState(config.state_database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) thread-1",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    screenshot_provider = StaticScreenshotProvider(screenshot_path)
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+        screenshot_provider=screenshot_provider,
+    )
+
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway screenshot",
+    )
+    daemon.poll_telegram_once()
+
+    assert screenshot_provider.calls == [
+        (
+            "thread-1",
+            "thread-1",
+            "/Users/kangmo/sacle/src/gateway-project",
+        )
+    ]
+    assert telegram.sent_photos == [
+        (
+            -100100,
+            77,
+            str(screenshot_path),
+            "Screenshot · gateway-project / thread-1",
+        )
+    ]
 
 
 class FakeCodexBridge:
