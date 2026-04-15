@@ -192,6 +192,7 @@
 - FP-19 Interactive prompt bridge
 - FP-20 Dedicated status bubble
 - FP-21 Tool batching, failure probing, and completion summaries
+- FP-24 General file intake and unsupported-content UX
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -405,3 +406,22 @@
   - `src/codex_telegram_gateway/daemon.py` changed executable lines: `14/14 = 100.0%`
   - `src/codex_telegram_gateway/service.py` changed executable lines: `5/5 = 100.0%`
   - `TOTAL`: `138/159 = 86.8%`
+
+### FP-24 verification
+- Added `media_ingest.py` so inbound documents, PDFs, audio, and video files share one prompt/unsupported-notice normalization layer.
+- `TelegramBotClient.get_updates()` now keeps direct image delivery unchanged while downloading non-image files into `.ccgram-uploads` and converting them into explicit saved-path prompts for Codex App threads.
+- Unsupported Telegram payloads now normalize into explicit `unsupported_message` updates and the daemon replies in-topic instead of silently discarding them.
+- Implementation decisions locked during FP-24:
+  - non-image attachments are adapted through text prompts because Codex App currently ingests local images directly but does not expose native local document/audio/video inputs through this gateway
+  - attachment metadata stays out of SQLite for this feature; the saved-path prompt is the durable queue payload
+  - downloads remain gateway-local under `.ccgram-uploads` rather than per-project storage
+- Proofread changes before sign-off:
+  - preserved the existing photo/image-document flow unchanged
+  - blocked unauthorized unsupported-media notices from being echoed back into Telegram
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_media_ingest.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `176 passed`
+- Feature-specific changed-executable coverage:
+  - `src/codex_telegram_gateway/media_ingest.py`: `25/25 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `68/68 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `7/7 = 100.0%`
+  - `TOTAL`: `100/100 = 100.0%`

@@ -473,6 +473,64 @@ def test_gateway_flow_end_to_end_with_photo_message(tmp_path) -> None:
     assert state.get_pending_turn("thread-1") is not None
 
 
+def test_gateway_flow_end_to_end_with_document_prompt(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Inspect files",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+
+    service = GatewayService(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon = GatewayDaemon(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    binding = service.link_current_thread()
+    prompt_text = (
+        "I've uploaded a PDF to /tmp/project/.ccgram-uploads/design-spec.pdf. "
+        "Please inspect or read it as needed.\n\n"
+        "User note: Please review this draft."
+    )
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=binding.message_thread_id,
+        from_user_id=111,
+        text=prompt_text,
+    )
+
+    daemon.poll_telegram_once()
+    daemon.deliver_inbound_once()
+
+    assert codex.started_turns == [
+        StartedTurn(
+            thread_id="thread-1",
+            text=prompt_text,
+            local_image_paths=(),
+        )
+    ]
+    assert state.get_pending_turn("thread-1") is not None
+
+
 def test_gateway_unbind_flow_returns_topic_to_project_picker(tmp_path) -> None:
     state = SqliteGatewayState(tmp_path / "gateway.db")
     telegram = FakeTelegramClient()

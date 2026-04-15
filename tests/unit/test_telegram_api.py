@@ -8,6 +8,9 @@ from codex_telegram_gateway.telegram_api import (
     TelegramApiError,
     TelegramBotClient,
     TelegramRetryAfterError,
+    _document_media_kind,
+    _generated_attachment_name,
+    _unsupported_content_kind,
     is_missing_topic_error,
     is_topic_edit_permission_error,
 )
@@ -107,6 +110,192 @@ def test_get_updates_downloads_photo_and_returns_local_image_path(tmp_path, monk
     assert image_path.exists()
     assert image_path.parent.name == ".ccgram-uploads"
     assert image_path.suffix == ".jpg"
+
+
+def test_get_updates_downloads_document_and_returns_prompt_text(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 100,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "caption": "Please review the attached PDF.",
+                    "document": {
+                        "file_id": "file-2",
+                        "file_unique_id": "unique-2",
+                        "file_name": "design-spec.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 2048,
+                    },
+                },
+            }
+        ]
+    )
+
+    updates = client.get_updates()
+
+    assert updates == [
+        {
+            "kind": "message",
+            "update_id": 2,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "text": (
+                "I've uploaded a PDF to "
+                f"{tmp_path}/.ccgram-uploads/design-spec.pdf. "
+                "Please inspect or read it as needed.\n\n"
+                "User note: Please review the attached PDF."
+            ),
+            "local_image_paths": (),
+        }
+    ]
+
+
+def test_get_updates_returns_unsupported_message_for_sticker() -> None:
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 4,
+                "message": {
+                    "message_id": 102,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "sticker": {"file_id": "sticker-1"},
+                },
+            }
+        ]
+    )
+
+    assert client.get_updates() == [
+        {
+            "kind": "unsupported_message",
+            "update_id": 4,
+            "chat_id": -100100,
+            "message_thread_id": 77,
+            "from_user_id": 111,
+            "notice": "⚠ Stickers are not supported yet. Use text, photos, documents, audio, or video.",
+        }
+    ]
+
+
+def test_get_updates_skips_unsupported_message_without_sender() -> None:
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 5,
+                "message": {
+                    "message_id": 103,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": None,
+                    "sticker": {"file_id": "sticker-1"},
+                },
+            }
+        ]
+    )
+
+    assert client.get_updates() == []
+
+
+def test_get_updates_downloads_audio_and_video_and_generates_prompt_texts(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 6,
+                "message": {
+                    "message_id": 104,
+                    "message_thread_id": 77,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "caption": "Audio context",
+                    "audio": {
+                        "file_id": "audio-1",
+                        "file_unique_id": "audio-unique-1",
+                        "file_name": "briefing.mp3",
+                        "mime_type": "audio/mpeg",
+                        "file_size": 1024,
+                    },
+                },
+            },
+            {
+                "update_id": 7,
+                "message": {
+                    "message_id": 105,
+                    "message_thread_id": 78,
+                    "chat": {"id": -100100},
+                    "from": {"id": 111},
+                    "video": {
+                        "file_id": "video-1",
+                        "file_unique_id": "video-unique-1",
+                        "mime_type": "video/mp4",
+                        "file_size": 4096,
+                    },
+                },
+            },
+        ]
+    )
+
+    updates = client.get_updates()
+
+    assert updates[0] == {
+        "kind": "message",
+        "update_id": 6,
+        "chat_id": -100100,
+        "message_thread_id": 77,
+        "from_user_id": 111,
+        "text": (
+            "I've uploaded an audio file to "
+            f"{tmp_path}/.ccgram-uploads/briefing.mp3. "
+            "Please inspect the media file as needed.\n\n"
+            "User note: Audio context"
+        ),
+        "local_image_paths": (),
+    }
+    assert updates[1]["kind"] == "message"
+    assert updates[1]["update_id"] == 7
+    assert updates[1]["message_thread_id"] == 78
+    assert updates[1]["from_user_id"] == 111
+    assert updates[1]["local_image_paths"] == ()
+    assert updates[1]["text"].startswith(
+        "I've uploaded a video file to "
+        f"{tmp_path}/.ccgram-uploads/video_"
+    )
+    assert updates[1]["text"].endswith(".mp4. Please inspect the media file as needed.")
+
+
+def test_extract_saved_attachment_returns_none_without_file_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = StubTelegramBotClient([])
+
+    assert client._extract_saved_attachment({"document": {"file_name": "notes.txt"}}) is None
+    assert client._download_generic_attachment({}, prefix="audio", media_kind="audio") is None
+
+
+def test_document_media_kind_generated_name_and_unsupported_kind_helpers() -> None:
+    assert _document_media_kind({"mime_type": "text/plain"}) == "text"
+    assert _document_media_kind({"file_name": "notes.md"}) == "text"
+    assert _document_media_kind({"file_name": "archive.bin"}) == "document"
+
+    generated_name = _generated_attachment_name(
+        "video",
+        {
+            "file_unique_id": "unique-video",
+            "mime_type": "video/mp4",
+        },
+    )
+    assert generated_name.startswith("video_")
+    assert generated_name.endswith("_unique-v.mp4")
+
+    assert _unsupported_content_kind({"voice": {"file_id": "voice-1"}}) == "voice"
+    assert _unsupported_content_kind({"animation": {}}) == "generic"
+    assert _unsupported_content_kind({"text": "hello"}) is None
 
 
 def test_get_updates_normalizes_topic_closed_and_reopened_events() -> None:
