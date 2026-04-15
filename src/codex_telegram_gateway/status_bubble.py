@@ -9,6 +9,7 @@ class StatusBubbleSnapshot:
     queued_count: int
     latest_summary: str
     history_labels: tuple[str, ...] = ()
+    remote_action_rows: tuple[tuple[dict[str, str], ...], ...] = ()
 
 
 def build_status_bubble(snapshot: StatusBubbleSnapshot) -> tuple[str, dict[str, object]]:
@@ -33,6 +34,7 @@ def build_status_bubble(snapshot: StatusBubbleSnapshot) -> tuple[str, dict[str, 
                 for index, label in enumerate(snapshot.history_labels[:2])
             ]
         )
+    rows.extend([list(row) for row in snapshot.remote_action_rows])
     rows.append(
         [
             {"text": "↺ New", "callback_data": "gw:resp:new"},

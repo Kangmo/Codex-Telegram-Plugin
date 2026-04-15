@@ -54,7 +54,7 @@ This document turns the line-by-line gap review into an implementation roadmap. 
 | FP-20 | Dedicated status bubble | P0 | Native | Implemented |
 | FP-21 | Tool batching, failure probing, completion summaries | P0 | Native | Implemented |
 | FP-22 | Live view | P1 | Adapted | Implemented |
-| FP-23 | Remote control actions | P1 | Depends on app-server support | Missing |
+| FP-23 | Remote control actions | P1 | Depends on app-server support | Implemented |
 | FP-24 | General file intake and unsupported-content UX | P0 | Native | Implemented |
 | FP-25 | Outbound media/file delivery | P0 | Native | Implemented |
 | FP-26 | Voice transcription flow | P1 | Native | Implemented |
@@ -177,9 +177,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-23: Remote Control Actions
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-24: General File Intake and Unsupported-Content UX
 - [x] Implemented
@@ -1919,6 +1919,53 @@ Bring over the most useful operator actions from `ccgram` where Codex App suppor
   - supported actions dispatch to the fake Codex bridge correctly
 - E2E:
   - stop or retry from Telegram changes live thread state
+
+**Implementation completed**
+
+- Re-reviewed `ccgram` remote-control sources before implementation:
+  - `/tmp/ccgram-review/src/ccgram/handlers/status_bubble.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/callback_data.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/screenshot_callbacks.py`
+  - `/tmp/ccgram-review/README.md`
+- Added `src/codex_telegram_gateway/remote_actions.py` as a pure rendering/parsing module for app-native status-bubble controls.
+- Extended the Codex bridge protocol and `codex_api.py` with `interrupt_turn(...)` backed by the app-server `turn/interrupt` RPC.
+- `GatewayDaemon` now:
+  - renders `⏹ Stop` and `▶ Continue` for running turns
+  - renders approval-choice buttons in the status bubble when the active prompt is a command/file approval
+  - renders `↻ Retry Last` after failed/interrupted terminal states when topic history exists
+  - routes `gw:remote:*` callbacks for interrupt, continue, approval-choice, and retry actions
+  - updates the status bubble in place immediately after a Telegram-side stop instead of waiting for the next poll cycle
+
+**Implementation decisions locked during FP-23**
+
+- `ccgram` exposes tmux-oriented remote control from the status keyboard, but this gateway keeps only the subset that maps cleanly onto Codex App APIs: stop, continue-as-steer, approval response, and retry-last-input.
+- No synthetic arrow-key or remote-control session emulation was added because Codex App does not expose a pane/TTY model comparable to `ccgram`.
+- `Retry Last` deliberately replays the latest persisted topic-history entry instead of using `thread/rollback`, because the app-server rollback API only rewrites thread history and does not revert local file state.
+- Approval buttons on the status bubble are rendered only for command/file approval prompts; other interactive prompts continue to use the dedicated prompt message UI.
+- Stale, closed, unbound, and invalid remote callbacks are explicit user-facing toasts rather than silent no-ops.
+
+**Proofreading notes**
+
+- Verified that remote-control callbacks are routed before the generic `gw:resp:*` handler so the new namespace cannot be swallowed by the older response-action branch.
+- Checked the stop path for mirror safety: all active targets for the same thread have typing cleared and status bubbles refreshed, while inactive bindings are skipped instead of raising.
+- Fixed the changed-line coverage gap by adding explicit tests for stale controls, closed-topic restore gating, invalid approval choices, and invalid retry payloads rather than weakening the new error handling.
+
+**Verification**
+
+- Red phase:
+  - `.venv/bin/pytest tests/e2e/test_gateway_flow.py::test_status_bubble_stop_interrupts_active_turn_and_exposes_retry -q` -> failed because the running status bubble had no remote-action row
+  - `.venv/bin/pytest tests/unit/test_remote_actions.py tests/unit/test_codex_api.py::test_interrupt_turn_uses_turn_interrupt_rpc -q` -> `5 failed` with `NotImplementedError` on the interface-only scaffolding
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_remote_actions.py tests/unit/test_codex_api.py::test_interrupt_turn_uses_turn_interrupt_rpc -q` -> `5 passed`
+  - `.venv/bin/pytest tests/unit/test_status_bubble.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py::test_status_bubble_stop_interrupts_active_turn_and_exposes_retry -q` -> `178 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `385 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp23.json -q` plus diff-based changed-line audit including new source files -> `188/199 = 94.5%`
+- Branch and merge:
+  - feature branch `feature/fp-23-remote-control-actions`
+  - feature commit `<pending>`
+  - merge commit on `main` `<pending>`
 
 ## Media and Content Parity
 

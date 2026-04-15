@@ -293,6 +293,16 @@ class CodexAppServerClient:
             waiting_for_approval=waiting_for_approval,
         )
 
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> TurnResult:
+        self._request(
+            "turn/interrupt",
+            {
+                "threadId": thread_id,
+                "turnId": turn_id,
+            },
+        )
+        return TurnResult(turn_id=turn_id, status="interrupted")
+
     def list_pending_prompts(self, thread_id: str | None = None) -> list[InteractivePrompt]:
         prompts = list(self._pending_interactive_prompts.values())
         if thread_id is None:

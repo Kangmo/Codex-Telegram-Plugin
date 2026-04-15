@@ -30,6 +30,7 @@ from codex_telegram_gateway.models import (
     DELETED_BINDING_STATUS,
     HistoryViewState,
     InboundMessage,
+    InteractivePromptViewState,
     OutboundMessage,
     PendingTurn,
     RestoreViewState,
@@ -8105,6 +8106,10 @@ def test_sync_codex_once_creates_and_updates_status_bubble_in_place() -> None:
             "inline_keyboard": [
                 [{"text": "⏳ Working", "callback_data": "gw:resp:noop"}],
                 [
+                    {"text": "⏹ Stop", "callback_data": "gw:remote:interrupt:turn-1"},
+                    {"text": "▶ Continue", "callback_data": "gw:remote:continue:turn-1"},
+                ],
+                [
                     {"text": "↺ New", "callback_data": "gw:resp:new"},
                     {"text": "📁 Project", "callback_data": "gw:resp:project"},
                     {"text": "📍 Status", "callback_data": "gw:resp:status"},
@@ -8168,6 +8173,651 @@ def test_poll_telegram_once_status_bubble_callback_reuses_response_actions() -> 
             None,
         )
     ]
+
+
+def test_poll_telegram_once_remote_interrupt_callback_interrupts_turn_and_updates_status_bubble() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.record_topic_history(-100100, 77, text="Please keep going.")
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-1")] = TurnResult(turn_id="turn-1", status="in_progress")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+    bubble = state.get_status_bubble_view(-100100, 77)
+    assert bubble is not None
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-stop",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=bubble.message_id,
+        from_user_id=111,
+        data="gw:remote:interrupt:turn-1",
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.interrupted_turns == [("thread-1", "turn-1")]
+    assert state.get_pending_turn("thread-1") is None
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-stop", "Stopped.")
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        bubble.message_id,
+        "Topic status\n\n"
+        "Project: `gateway-project`\n"
+        "Thread: `thread-1`\n"
+        "State: `failed`\n"
+        "Queued: `0`\n"
+        "Latest: No assistant reply yet.",
+        {
+            "inline_keyboard": [
+                [{"text": "⚠ Turn Failed", "callback_data": "gw:resp:noop"}],
+                [{"text": "↑ Please keep going.", "callback_data": "gw:resp:recall:0"}],
+                [{"text": "↻ Retry Last", "callback_data": "gw:remote:retry:0"}],
+                [
+                    {"text": "↺ New", "callback_data": "gw:resp:new"},
+                    {"text": "📁 Project", "callback_data": "gw:resp:project"},
+                    {"text": "📍 Status", "callback_data": "gw:resp:status"},
+                    {"text": "🔄 Sync", "callback_data": "gw:resp:sync"},
+                ],
+            ]
+        },
+    )
+
+
+def test_poll_telegram_once_remote_continue_callback_steers_current_turn() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-continue",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:continue:turn-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.steered_turns == [
+        (
+            "turn-1",
+            StartedTurn(
+                thread_id="thread-1",
+                text="Continue.",
+            ),
+        )
+    ]
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-continue", "Steered.")
+
+
+def test_poll_telegram_once_remote_prompt_callback_reuses_interactive_prompt_response() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_interactive_prompt_view(
+        InteractivePromptViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            codex_thread_id="thread-1",
+            prompt_id="prompt-approval",
+            prompt_kind="command_approval",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-prompt",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:prompt:prompt-approval:accept",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": "/tmp/project",
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert codex.interactive_responses == [("prompt-approval", {"decision": "accept"})]
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-prompt", "Sent.")
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        9,
+        "Sent your answer to Codex.\n\nCommand Approval",
+        None,
+    )
+
+
+def test_poll_telegram_once_remote_retry_callback_requeues_latest_history_entry() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.record_topic_history(-100100, 77, text="Retry me.")
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-retry",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:retry:0",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_pending_inbound() == [
+        InboundMessage(
+            telegram_update_id=1,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-1",
+            text="Retry me.",
+            local_image_paths=(),
+        )
+    ]
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-retry", "Queued.")
+
+
+def test_status_bubble_remote_actions_skip_approval_prompt_without_options() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["InteractivePrompt"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.queue_interactive_prompt(
+        interactive.InteractivePrompt(
+            prompt_id="prompt-empty",
+            thread_id="thread-1",
+            turn_id="turn-approval",
+            kind="command_approval",
+            title="Command Approval",
+            body="",
+            options=(),
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=DummyTelegramClient(),
+        codex=codex,
+    )
+
+    assert daemon._status_bubble_remote_action_rows(
+        binding=binding,
+        pending_turn=PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-approval",
+            waiting_for_approval=True,
+        ),
+        turn_result=TurnResult(
+            turn_id="turn-approval",
+            status="interrupted",
+            waiting_for_approval=True,
+        ),
+        history=[],
+    ) == ()
+
+
+def test_poll_telegram_once_remote_action_callback_rejects_unknown_payload() -> None:
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-unknown",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:broken",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=DummyState(),
+        telegram=telegram,
+        codex=DummyCodexBridge(
+            CodexThread(
+                thread_id="thread-1",
+                title="thread-1",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            )
+        ),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-unknown", "Unknown remote action.")
+
+
+def test_poll_telegram_once_remote_action_callback_rejects_unbound_topic() -> None:
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-unbound",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:interrupt:turn-1",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=DummyState(),
+        telegram=telegram,
+        codex=DummyCodexBridge(
+            CodexThread(
+                thread_id="thread-1",
+                title="thread-1",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            )
+        ),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-unbound", "This topic is no longer bound.")
+
+
+def test_poll_telegram_once_remote_action_callback_rejects_closed_topic() -> None:
+    state = DummyState()
+    state.create_binding(replace(make_binding(), binding_status=CLOSED_BINDING_STATUS))
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-closed",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:interrupt:turn-1",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=DummyCodexBridge(
+            CodexThread(
+                thread_id="thread-1",
+                title="thread-1",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            )
+        ),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-closed", "This topic needs restore first.")
+
+
+def test_poll_telegram_once_remote_interrupt_callback_rejects_stale_turn() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-stop-stale",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:interrupt:turn-1",
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=DummyCodexBridge(
+            CodexThread(
+                thread_id="thread-1",
+                title="thread-1",
+                status="busy",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            )
+        ),
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-stop-stale", "This control is stale.")
+
+
+def test_poll_telegram_once_remote_continue_callback_rejects_waiting_approval_and_errors() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-continue-approval",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:continue:turn-1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-continue-approval",
+        "Use the approval buttons first.",
+    )
+
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-2",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-remote-continue-error",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:continue:turn-2",
+    )
+    codex.next_steer_error = RuntimeError("cannot steer")
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-continue-error",
+        "This Codex turn cannot be steered. The message stays queued.",
+    )
+
+
+def test_poll_telegram_once_remote_prompt_callback_handles_missing_invalid_and_direct_response() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-prompt-missing",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:prompt:prompt-missing:accept",
+    )
+    daemon.poll_telegram_once()
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-prompt-missing",
+        "This approval request is no longer pending.",
+    )
+
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-bad",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-1",
+                "command": "pytest -q",
+            },
+        )
+    )
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-remote-prompt-invalid",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:prompt:prompt-bad:not-a-choice",
+    )
+    daemon.poll_telegram_once()
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-prompt-invalid",
+        "Unknown approval choice.",
+    )
+
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-direct",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-approval",
+                "itemId": "item-1",
+                "command": "pytest -q",
+            },
+        )
+    )
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-remote-prompt-direct",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:prompt:prompt-direct:accept",
+    )
+    daemon.poll_telegram_once()
+
+    assert codex.interactive_responses[-1] == ("prompt-direct", {"decision": "accept"})
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-prompt-direct", "Sent.")
+
+
+def test_poll_telegram_once_remote_retry_callback_rejects_busy_invalid_and_missing_history() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="busy",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-remote-retry-busy",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:retry:0",
+    )
+    daemon.poll_telegram_once()
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-retry-busy",
+        "Codex is still answering right now.",
+    )
+
+    state.delete_pending_turn("thread-1")
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-remote-retry-invalid",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:retry:not-a-number",
+    )
+    daemon.poll_telegram_once()
+    assert telegram.answered_callback_queries[-1] == ("cb-remote-retry-invalid", "Invalid retry item.")
+
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-remote-retry-missing",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=7,
+        from_user_id=111,
+        data="gw:remote:retry:0",
+    )
+    daemon.poll_telegram_once()
+    assert telegram.answered_callback_queries[-1] == (
+        "cb-remote-retry-missing",
+        "That message is no longer available.",
+    )
 
 
 def test_sync_codex_once_edits_same_tool_batch_message_as_commands_accumulate() -> None:

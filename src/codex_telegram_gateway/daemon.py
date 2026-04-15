@@ -27,6 +27,13 @@ from codex_telegram_gateway.live_view import (
     parse_live_view_callback,
     render_live_view_caption,
 )
+from codex_telegram_gateway.remote_actions import (
+    CALLBACK_REMOTE_ACTION_PREFIX,
+    RemoteActionContext,
+    RemotePromptOption,
+    build_remote_action_rows,
+    parse_remote_action_callback,
+)
 from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
 from codex_telegram_gateway.voice_ingest import (
     TranscriptionProvider,
@@ -1095,6 +1102,12 @@ class GatewayDaemon:
             queued_count=queued_count,
             latest_summary=latest_summary or "No assistant reply yet.",
             history_labels=tuple(_history_entry_label(entry) for entry in history),
+            remote_action_rows=self._status_bubble_remote_action_rows(
+                binding=binding,
+                pending_turn=pending_turn,
+                turn_result=turn_result,
+                history=history,
+            ),
         )
         text, reply_markup = build_status_bubble(snapshot)
         key = (binding.chat_id, binding.message_thread_id)
@@ -1168,6 +1181,49 @@ class GatewayDaemon:
         if topic_status == TOPIC_STATUS_CLOSED:
             return "closed"
         return "ready"
+
+    def _status_bubble_remote_action_rows(
+        self,
+        *,
+        binding: Binding,
+        pending_turn: PendingTurn | None,
+        turn_result: TurnResult | None,
+        history: list[TopicHistoryEntry],
+    ) -> tuple[tuple[dict[str, str], ...], ...]:
+        state = self._status_bubble_state(binding, pending_turn, turn_result)
+        prompt_id: str | None = None
+        prompt_options: tuple[RemotePromptOption, ...] = ()
+        supports_prompt_choices = False
+        if state == "approval":
+            for prompt in self._codex.list_pending_prompts(binding.codex_thread_id):
+                if prompt.kind not in {"command_approval", "file_change_approval"}:
+                    continue
+                if not prompt.options:
+                    continue
+                prompt_id = prompt.prompt_id
+                prompt_options = tuple(
+                    RemotePromptOption(option_id=option.option_id, label=option.label)
+                    for option in prompt.options
+                )
+                supports_prompt_choices = True
+                break
+        return build_remote_action_rows(
+            RemoteActionContext(
+                state=state,
+                turn_id=pending_turn.turn_id if pending_turn is not None else None,
+                history_count=len(history),
+                prompt_id=prompt_id,
+                prompt_options=prompt_options,
+                supports_interrupt=pending_turn is not None and state == "running",
+                supports_continue=(
+                    pending_turn is not None
+                    and state == "running"
+                    and not pending_turn.waiting_for_approval
+                ),
+                supports_retry=state == "failed",
+                supports_prompt_choices=supports_prompt_choices,
+            )
+        )
 
     def _sync_interactive_prompt_for_binding(self, binding: Binding) -> None:
         if not self._is_primary_binding(binding):
@@ -1717,6 +1773,9 @@ class GatewayDaemon:
             return
         if data.startswith(_CALLBACK_QUEUE_PREFIX):
             self._handle_queue_callback(update)
+            return
+        if data.startswith(CALLBACK_REMOTE_ACTION_PREFIX):
+            self._handle_remote_action_callback(update)
             return
         if data.startswith(_CALLBACK_RESPONSE_PREFIX):
             self._handle_response_callback(update)
@@ -2480,6 +2539,226 @@ class GatewayDaemon:
             return
 
         self._telegram.answer_callback_query(callback_query_id, "Unknown response action.")
+
+    def _handle_remote_action_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        from_user_id = int(update["from_user_id"])
+        parsed = parse_remote_action_callback(str(update["data"]))
+        if parsed is None:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown remote action.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None:
+            self._telegram.answer_callback_query(callback_query_id, "This topic is no longer bound.")
+            return
+        if binding.binding_status != ACTIVE_BINDING_STATUS:
+            if self._is_primary_binding(binding):
+                self._offer_restore_prompt(binding)
+            self._telegram.answer_callback_query(callback_query_id, "This topic needs restore first.")
+            return
+
+        action = str(parsed["action"])
+        if action == "interrupt":
+            self._handle_remote_interrupt_action(
+                callback_query_id,
+                binding,
+                turn_id=str(parsed["turn_id"]),
+            )
+            return
+        if action == "continue":
+            self._handle_remote_continue_action(
+                callback_query_id,
+                binding,
+                turn_id=str(parsed["turn_id"]),
+            )
+            return
+        if action == "prompt":
+            self._handle_remote_prompt_action(
+                callback_query_id,
+                binding,
+                prompt_id=str(parsed["prompt_id"]),
+                choice=str(parsed["choice"]),
+            )
+            return
+        if action == "retry":
+            self._handle_remote_retry_action(
+                callback_query_id,
+                binding,
+                from_user_id=from_user_id,
+                telegram_update_id=int(update["update_id"]),
+                history_index_text=str(parsed["history_index"]),
+            )
+            return
+        self._telegram.answer_callback_query(callback_query_id, "Unknown remote action.")
+
+    def _handle_remote_interrupt_action(
+        self,
+        callback_query_id: str,
+        binding: Binding,
+        *,
+        turn_id: str,
+    ) -> None:
+        pending_turn = self._state.get_pending_turn(binding.codex_thread_id)
+        if pending_turn is None or pending_turn.turn_id != turn_id:
+            self._telegram.answer_callback_query(callback_query_id, "This control is stale.")
+            return
+        turn_result = self._codex.interrupt_turn(binding.codex_thread_id, turn_id)
+        self._state.delete_pending_turn(binding.codex_thread_id)
+        primary_binding = self._state.get_binding_by_thread(binding.codex_thread_id)
+        self._clear_interactive_prompt_topic(
+            primary_binding.chat_id,
+            primary_binding.message_thread_id,
+            codex_thread_id=binding.codex_thread_id,
+        )
+        queued_count = self._queued_inbound_count(binding.codex_thread_id)
+        latest_summary = _latest_visible_summary(self._codex.list_events(binding.codex_thread_id))
+        thread = self._codex.read_thread(binding.codex_thread_id)
+        for target in self._targets_for_thread(binding.codex_thread_id):
+            self._set_topic_status_override(
+                target.chat_id,
+                target.message_thread_id,
+                TOPIC_STATUS_FAILED,
+            )
+            self._clear_typing_state(target.chat_id, target.message_thread_id)
+            if target.binding_status != ACTIVE_BINDING_STATUS:
+                continue
+            self._sync_status_bubble_for_binding(
+                target,
+                thread=thread,
+                pending_turn=None,
+                turn_result=turn_result,
+                latest_summary=latest_summary,
+                queued_count=queued_count,
+            )
+        self._telegram.answer_callback_query(callback_query_id, "Stopped.")
+
+    def _handle_remote_continue_action(
+        self,
+        callback_query_id: str,
+        binding: Binding,
+        *,
+        turn_id: str,
+    ) -> None:
+        pending_turn = self._state.get_pending_turn(binding.codex_thread_id)
+        if pending_turn is None or pending_turn.turn_id != turn_id:
+            self._telegram.answer_callback_query(callback_query_id, "This control is stale.")
+            return
+        if pending_turn.waiting_for_approval:
+            self._telegram.answer_callback_query(callback_query_id, "Use the approval buttons first.")
+            return
+        self._send_typing_if_due(binding.chat_id, binding.message_thread_id, force=True)
+        try:
+            self._codex.steer_turn(
+                StartedTurn(
+                    thread_id=binding.codex_thread_id,
+                    text="Continue.",
+                ),
+                expected_turn_id=pending_turn.turn_id,
+                on_progress=lambda: self._send_typing_if_due(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                ),
+            )
+        except Exception as exc:
+            self._telegram.answer_callback_query(callback_query_id, _steer_callback_text(exc))
+            return
+        self._telegram.answer_callback_query(callback_query_id, "Steered.")
+
+    def _handle_remote_prompt_action(
+        self,
+        callback_query_id: str,
+        binding: Binding,
+        *,
+        prompt_id: str,
+        choice: str,
+    ) -> None:
+        prompt = next(
+            (
+                candidate
+                for candidate in self._codex.list_pending_prompts(binding.codex_thread_id)
+                if candidate.prompt_id == prompt_id
+            ),
+            None,
+        )
+        if prompt is None:
+            self._telegram.answer_callback_query(callback_query_id, "This approval request is no longer pending.")
+            return
+        session = self._interactive_prompt_sessions.get(prompt_id)
+        if session is None:
+            session = start_interactive_prompt_session(prompt)
+            self._interactive_prompt_sessions[prompt_id] = session
+        try:
+            prompt_update = apply_interactive_callback(
+                session,
+                action="choose",
+                value=choice,
+            )
+        except ValueError as exc:
+            self._telegram.answer_callback_query(callback_query_id, str(exc))
+            return
+
+        prompt_view = self._state.get_interactive_prompt_view(binding.chat_id, binding.message_thread_id)
+        if prompt_view is None or prompt_view.prompt_id != prompt_id:
+            try:
+                primary_binding = self._state.get_binding_by_thread(binding.codex_thread_id)
+            except KeyError:
+                primary_binding = binding
+            prompt_view = self._state.get_interactive_prompt_view(
+                primary_binding.chat_id,
+                primary_binding.message_thread_id,
+            )
+            if prompt_view is not None and prompt_view.prompt_id == prompt_id:
+                self._apply_interactive_prompt_update(
+                    primary_binding,
+                    prompt_id=prompt_id,
+                    message_id=prompt_view.message_id,
+                    update=prompt_update,
+                )
+            elif prompt_update.response_payload is not None:
+                self._codex.respond_interactive_prompt(prompt_id, prompt_update.response_payload)
+                self._interactive_prompt_sessions.pop(prompt_id, None)
+        else:
+            self._apply_interactive_prompt_update(
+                binding,
+                prompt_id=prompt_id,
+                message_id=prompt_view.message_id,
+                update=prompt_update,
+            )
+        self._telegram.answer_callback_query(callback_query_id, prompt_update.toast_text)
+
+    def _handle_remote_retry_action(
+        self,
+        callback_query_id: str,
+        binding: Binding,
+        *,
+        from_user_id: int,
+        telegram_update_id: int,
+        history_index_text: str,
+    ) -> None:
+        if self._state.get_pending_turn(binding.codex_thread_id) is not None:
+            self._telegram.answer_callback_query(callback_query_id, "Codex is still answering right now.")
+            return
+        try:
+            history_index = int(history_index_text)
+        except ValueError:
+            self._telegram.answer_callback_query(callback_query_id, "Invalid retry item.")
+            return
+        history = self._state.list_topic_history(binding.chat_id, binding.message_thread_id, limit=history_index + 1)
+        if history_index < 0 or history_index >= len(history):
+            self._telegram.answer_callback_query(callback_query_id, "That message is no longer available.")
+            return
+        recalled = history[history_index]
+        self._enqueue_bound_inbound(
+            binding,
+            telegram_update_id=telegram_update_id,
+            from_user_id=from_user_id,
+            text=recalled.text,
+            local_image_paths=recalled.local_image_paths,
+        )
+        self._telegram.answer_callback_query(callback_query_id, "Queued.")
 
     def _handle_verbose_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -3990,6 +4269,13 @@ class GatewayDaemon:
                 continue
             return inbound_message
         return None
+
+    def _queued_inbound_count(self, codex_thread_id: str) -> int:
+        return sum(
+            1
+            for inbound_message in self._state.list_pending_inbound()
+            if inbound_message.codex_thread_id == codex_thread_id
+        )
 
     def _status_text(
         self,

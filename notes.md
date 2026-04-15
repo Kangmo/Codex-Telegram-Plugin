@@ -643,3 +643,36 @@
   - `.venv/bin/pytest -q` -> `367 passed`
 - Feature-specific changed-executable coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp22.json -q` plus diff-based changed-line audit -> `155/168 = 92.3%`
+
+### FP-23 verification
+- Branch and merge:
+  - feature branch `feature/fp-23-remote-control-actions`
+  - feature commit `<pending>`
+  - merge commit on `main` `<pending>`
+- Re-reviewed `ccgram` remote-control sources before implementation:
+  - `/tmp/ccgram-review/src/ccgram/handlers/status_bubble.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/callback_data.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/screenshot_callbacks.py`
+  - `/tmp/ccgram-review/README.md`
+- Added `remote_actions.py` for status-bubble button rendering and callback parsing.
+- `GatewayDaemon` now exposes:
+  - `⏹ Stop` and `▶ Continue` on running status bubbles
+  - approval-choice buttons for active command/file approval prompts
+  - `↻ Retry Last` after failed/interrupted turns when topic history exists
+  - `gw:remote:*` callback handling with explicit stale/unbound/closed-topic toasts
+- Implementation decisions locked during FP-23:
+  - adapt `ccgram` remote control to app-native Codex actions only; do not emulate tmux keys or remote-control sessions
+  - use app-server `turn/interrupt` for stop
+  - implement retry by replaying persisted topic history instead of `thread/rollback`
+  - keep generic tool-request-user-input flows on the existing interactive prompt message UI
+- Proofread fixes before sign-off:
+  - confirmed remote callbacks are routed before generic response callbacks
+  - checked stop handling across primary and mirror targets
+  - added branch-coverage tests for stale, invalid, and closed-topic remote callbacks instead of softening the behavior
+- Focused verification:
+  - `.venv/bin/pytest tests/unit/test_remote_actions.py tests/unit/test_codex_api.py::test_interrupt_turn_uses_turn_interrupt_rpc -q` -> `5 passed`
+  - `.venv/bin/pytest tests/unit/test_status_bubble.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py::test_status_bubble_stop_interrupts_active_turn_and_exposes_retry -q` -> `178 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `385 passed`
+- Feature-specific changed-executable coverage:
+  - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp23.json -q` plus diff-based changed-line audit including new source files -> `188/199 = 94.5%`
