@@ -169,6 +169,16 @@ class CodexAppServerClient:
             return self.read_thread(created_thread.thread_id)
         return created_thread
 
+    def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
+        self._request(
+            "thread/name/set",
+            {
+                "threadId": thread_id,
+                "name": thread_name,
+            },
+        )
+        return self.read_thread(thread_id)
+
     def ensure_project_visible(self, project_id: str) -> None:
         ensure_sidebar_workspace_root(self._codex_home, project_id)
 

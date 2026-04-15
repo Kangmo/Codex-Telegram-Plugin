@@ -172,6 +172,15 @@ class FakeCodexBridge:
         del project_id, thread_name
         raise AssertionError("create_thread is not used in this end-to-end flow")
 
+    def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
+        self._threads[thread_id] = CodexThread(
+            thread_id=thread_id,
+            title=thread_name,
+            status=self._threads[thread_id].status,
+            cwd=self._threads[thread_id].cwd,
+        )
+        return self._threads[thread_id]
+
     def ensure_project_visible(self, project_id: str) -> None:
         if project_id not in self.ensured_projects:
             self.ensured_projects.append(project_id)

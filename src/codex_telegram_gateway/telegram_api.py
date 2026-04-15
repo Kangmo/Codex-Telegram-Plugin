@@ -119,6 +119,19 @@ class TelegramBotClient:
                     }
                 )
                 continue
+            edited_topic = message.get("forum_topic_edited")
+            if isinstance(edited_topic, dict):
+                updates.append(
+                    {
+                        "kind": "topic_edited",
+                        "update_id": int(update["update_id"]),
+                        "chat_id": int(chat["id"]),
+                        "message_thread_id": message_thread_id,
+                        "from_user_id": int(sender["id"]) if isinstance(sender, dict) else 0,
+                        "topic_name": str(edited_topic.get("name") or ""),
+                    }
+                )
+                continue
             text = message.get("text")
             caption = message.get("caption")
             local_image_paths = self._extract_local_image_paths(message)

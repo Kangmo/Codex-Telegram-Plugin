@@ -267,6 +267,26 @@ class DummyTelegramClient:
             }
         )
 
+    def push_topic_edited_update(
+        self,
+        *,
+        update_id: int,
+        chat_id: int,
+        message_thread_id: int,
+        from_user_id: int,
+        topic_name: str,
+    ) -> None:
+        self._updates.append(
+            {
+                "kind": "topic_edited",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+                "from_user_id": from_user_id,
+                "topic_name": topic_name,
+            }
+        )
+
     def push_callback_query(
         self,
         *,
@@ -344,6 +364,7 @@ class DummyCodexBridge:
         self.steered_turns: list[tuple[str, StartedTurn]] = []
         self.created_threads: list[CodexThread] = []
         self.ensured_projects: list[str] = []
+        self.renamed_threads: list[tuple[str, str]] = []
         self.next_turn_result = TurnResult(turn_id="turn-1", status="in_progress")
         self.next_steer_result: TurnResult | None = None
         self.next_steer_error: RuntimeError | None = None
@@ -409,6 +430,11 @@ class DummyCodexBridge:
     def ensure_project_visible(self, project_id: str) -> None:
         if project_id not in self.ensured_projects:
             self.ensured_projects.append(project_id)
+
+    def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
+        self.renamed_threads.append((thread_id, thread_name))
+        self.set_thread_title(thread_id, thread_name)
+        return self.read_thread(thread_id)
 
     def start_turn(self, started_turn: StartedTurn, on_progress=None) -> TurnResult:
         self.started_turns.append(started_turn)

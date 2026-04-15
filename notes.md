@@ -172,3 +172,15 @@
 - `/panes` as compatibility messaging only
 - inter-agent mailbox
 - shell/NL-to-command provider mode
+
+## Parity Implementation Progress
+
+### Completed features
+- FP-01 Topic close/reopen lifecycle
+- FP-02 Bidirectional topic rename sync
+
+### FP-02 verification
+- Added inbound `forum_topic_edited` normalization in the Telegram client.
+- Added reverse rename handling from Telegram topic title to Codex thread title when the canonical project prefix is preserved.
+- Restores canonical topic names when the rename is malformed or attempts to change the project segment.
+- Coverage for FP-02-specific lines is 46/46 = 100.0%.
