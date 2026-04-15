@@ -1120,8 +1120,8 @@ Provide a safe plugin-upgrade operator path, adapted from `ccgram`’s self-upda
   - `.venv/bin/pytest --cov=codex_telegram_gateway --cov-report=json:coverage-fp10.json -q` plus diff-based changed-line audit including new source files -> `79/85 = 92.9%`
 - Branch and merge:
   - feature branch `feature/fp-10-upgrade`
-  - feature commit `<pending>`
-  - merge commit on `main` `<pending>`
+  - feature commit `409f524`
+  - merge commit on `main` `1bedb38`
 
 ### FP-11: `/send` File Browser and Upload
 

@@ -680,8 +680,8 @@
 ### FP-10 verification
 - Branch and merge:
   - feature branch `feature/fp-10-upgrade`
-  - feature commit `<pending>`
-  - merge commit on `main` `<pending>`
+  - feature commit `409f524`
+  - merge commit on `main` `1bedb38`
 - Re-reviewed `ccgram` upgrade source before implementation:
   - `/tmp/ccgram-review/src/ccgram/handlers/upgrade.py`
 - Added `upgrade_diagnostics.py` for:
