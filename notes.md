@@ -515,3 +515,26 @@
   - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `13/13 = 100.0%`
   - `src/codex_telegram_gateway/daemon.py` changed executable lines: `12/12 = 100.0%`
   - `TOTAL`: `55/55 = 100.0%`
+
+### FP-16 verification
+- Branch and merge:
+  - feature branch `feature/fp-16-top-level-recall-flow`
+- Reviewed `ccgram` recall handling in `handlers/command_history.py` and its unit tests before implementation.
+- Added `recall_command.py` for shared history-label rendering plus top-level recall prompt generation.
+- `/gateway recall` now exposes recent topic history beyond the two shortcut buttons already present in the response/status widgets.
+- Implementation decisions locked during FP-16:
+  - text-only history entries use inline query so the user can edit before resending
+  - image-bearing history entries keep using the existing callback replay path so local image attachments are preserved
+  - no new persisted view state is introduced because topic history already exists and the prompt itself is stateless
+- Proofread fixes before sign-off:
+  - image-count suffixes now survive label truncation
+  - inline-query command ordering was adjusted so pass-through commands remain visible after adding `/gateway recall`
+  - help output now includes the recall command
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_recall_command.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -k "recall"` -> `7 passed, 163 deselected`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `323 passed`
+- Feature-specific changed-code coverage:
+  - `src/codex_telegram_gateway/recall_command.py`: `33/36 = 91.7%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `21/24 = 87.5%`
+  - `TOTAL`: `54/60 = 90.0%`

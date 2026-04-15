@@ -7,6 +7,7 @@ _ECHO_DESCRIPTION = "Tap to insert into the current chat."
 _MAX_RESULTS = 8
 _GATEWAY_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/gateway status", "Show the current topic binding and Codex thread status."),
+    ("/gateway recall", "Recall recent topic messages."),
     ("/gateway bindings", "Open the sessions dashboard."),
     ("/gateway create_thread", "Start a fresh Codex thread in this topic."),
     ("/gateway project", "Open the project picker for this topic."),
@@ -62,7 +63,7 @@ def _command_candidates(passthrough_commands: tuple[str, ...]) -> tuple[tuple[st
         )
         for command_name in passthrough_commands
     )
-    return (*_GATEWAY_COMMANDS, *passthrough_results)
+    return (*passthrough_results, *_GATEWAY_COMMANDS)
 
 
 def _matches_query(query_key: str, command_text: str, description: str) -> bool:

@@ -1249,13 +1249,14 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             77,
             "Available gateway commands:\n"
             "/gateway <subcommand> - Run a gateway control action\n\n"
-            "Gateway subcommands:\n"
-            "/gateway doctor - Show Telegram and Codex App gateway status\n"
-            "/gateway projects - List loaded Codex App projects\n"
-            "/gateway threads - List loaded Codex App threads\n"
-            "/gateway history - Show paginated history for this Codex thread\n"
-            "/gateway resume - Resume another Codex thread from this project\n"
-                "/gateway restore - Show recovery options for this topic\n"
+                "Gateway subcommands:\n"
+                "/gateway doctor - Show Telegram and Codex App gateway status\n"
+                "/gateway projects - List loaded Codex App projects\n"
+                "/gateway threads - List loaded Codex App threads\n"
+                "/gateway recall - Recall recent topic messages\n"
+                "/gateway history - Show paginated history for this Codex thread\n"
+                "/gateway resume - Resume another Codex thread from this project\n"
+                    "/gateway restore - Show recovery options for this topic\n"
                 "/gateway unbind - Detach this Telegram topic from its Codex thread\n"
                 "/gateway bindings - List Codex thread to Telegram topic bindings\n"
                 "/gateway create_thread - Create a new Codex thread in this topic\n"
@@ -7520,3 +7521,127 @@ def test_poll_telegram_once_ignores_unauthorized_inline_query() -> None:
     daemon.poll_telegram_once()
 
     assert telegram.answered_inline_queries == []
+
+
+def test_poll_telegram_once_gateway_recall_renders_recent_topic_history() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.record_topic_history(-100100, 77, text="Please continue with the refactor.")
+    state.record_topic_history(
+        -100100,
+        77,
+        text="Please inspect the screenshots.",
+        local_image_paths=("/tmp/one.png", "/tmp/two.png"),
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway recall",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (
+        -100100,
+        77,
+        "Recent topic messages\n\nTap a text-only entry to edit it inline before sending, or use the image entry buttons to replay the full message with attachments.",
+        {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "↑ Please inspect the screenshots. [2 images]",
+                        "callback_data": "gw:resp:recall:0",
+                    }
+                ],
+                [
+                    {
+                        "text": "↑ Please continue with the refactor.",
+                        "switch_inline_query_current_chat": "Please continue with the refactor.",
+                    }
+                ],
+                [{"text": "Close", "callback_data": "gw:recall:dismiss"}],
+            ]
+        },
+    )
+
+
+def test_poll_telegram_once_gateway_recall_reports_empty_history() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway recall",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages[-1] == (-100100, 77, "No recent topic messages yet.", None)
+
+
+def test_recall_dismiss_callback_clears_reply_markup() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-recall-dismiss",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=42,
+        from_user_id=111,
+        data="gw:recall:dismiss",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_reply_markups == [(-100100, 42, None)]
+    assert telegram.answered_callback_queries == [("cb-recall-dismiss", "Dismissed.")]
