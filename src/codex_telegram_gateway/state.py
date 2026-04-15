@@ -10,6 +10,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    ResumeViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -144,6 +145,15 @@ class SqliteGatewayState:
                 message_thread_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 codex_thread_id TEXT NOT NULL,
+                page_index INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_views (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                project_id TEXT NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (chat_id, message_thread_id)
             );
@@ -900,6 +910,67 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM history_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_resume_view(self, resume_view: ResumeViewState) -> ResumeViewState:
+        self._connection.execute(
+            """
+            INSERT INTO resume_views (
+                chat_id,
+                message_thread_id,
+                message_id,
+                project_id,
+                page_index
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                message_id = excluded.message_id,
+                project_id = excluded.project_id,
+                page_index = excluded.page_index
+            """,
+            (
+                resume_view.chat_id,
+                resume_view.message_thread_id,
+                resume_view.message_id,
+                resume_view.project_id,
+                resume_view.page_index,
+            ),
+        )
+        self._connection.commit()
+        return resume_view
+
+    def get_resume_view(self, chat_id: int, message_thread_id: int) -> ResumeViewState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                message_id,
+                project_id,
+                page_index
+            FROM resume_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return ResumeViewState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            message_id=row["message_id"],
+            project_id=row["project_id"],
+            page_index=row["page_index"],
+        )
+
+    def delete_resume_view(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM resume_views
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

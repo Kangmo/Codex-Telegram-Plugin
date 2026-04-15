@@ -298,6 +298,61 @@ def test_recreate_topic_creates_new_topic_and_replays_latest_assistant_block() -
     assert state.has_seen_event("thread-1", "event-2") is False
 
 
+def test_rebind_topic_to_thread_reuses_topic_and_marks_existing_history_seen() -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state = DummyState()
+    state.create_binding(
+        service_binding(
+            codex_thread_id="thread-1",
+            message_thread_id=55,
+            topic_name="(blink) current",
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Current thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/blink",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/blink", "Older thread")
+    codex.set_thread_status("thread-2", "notLoaded")
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-2:event-1",
+            thread_id="thread-2",
+            kind="assistant_message",
+            text="existing reply",
+        )
+    )
+    service = GatewayService(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    rebound = service.rebind_topic_to_thread(
+        chat_id=-100100,
+        message_thread_id=55,
+        codex_thread_id="thread-2",
+    )
+
+    assert rebound.codex_thread_id == "thread-2"
+    assert rebound.topic_name == "(blink) Older thread"
+    assert state.get_binding_by_topic(-100100, 55) == rebound
+    assert telegram.edited_topics == [(-100100, 55, "(blink) Older thread")]
+    assert state.has_seen_event("thread-2", "thread-2:event-1") is True
+    assert codex.read_thread("thread-2").status == "idle"
+
+
 def service_binding(
     *,
     codex_thread_id: str,

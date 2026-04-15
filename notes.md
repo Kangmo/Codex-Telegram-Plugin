@@ -182,6 +182,7 @@
 - FP-04 Lifecycle sweeps, topic probing, autoclose, unbound TTL, pruning
 - FP-05 Multi-chat fanout and Telegram flood-control backoff
 - FP-06 `/history`
+- FP-07 `/resume`
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -222,3 +223,11 @@
   - every paginated history page now repeats the thread header instead of losing context after page 1
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `123 passed`
 - Feature-specific changed-statement coverage versus `main` is 142/166 = 85.5%.
+
+### FP-07 verification
+- Added Codex-App-native resumable thread discovery from `~/.codex/state_5.sqlite`, filtered by project root and excluding the currently bound thread.
+- Added `/gateway resume` plus a persisted Telegram picker with paging and restart-safe callback handling.
+- Added `GatewayService.rebind_topic_to_thread()` so resume reuses the existing topic, renames it to the resumed thread title, and marks the resumed thread’s historical assistant events as seen.
+- Fixed one real implementation gap during testing: rebinding to a `notLoaded` thread now explicitly calls `thread/resume`, so outbound sync can continue on the resumed thread.
+- Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `135 passed`
+- Feature-specific changed-statement coverage versus `main` is 115/139 = 82.7%.

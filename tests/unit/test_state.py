@@ -6,6 +6,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    ResumeViewState,
     TopicCreationJob,
     TopicLifecycle,
     TopicHistoryEntry,
@@ -195,6 +196,25 @@ def test_sqlite_state_persists_history_view_state(tmp_path) -> None:
     state.delete_history_view(-100100, 77)
 
     assert state.get_history_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_resume_view_state(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    resume_view = ResumeViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=43,
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        page_index=1,
+    )
+
+    state.upsert_resume_view(resume_view)
+
+    assert state.get_resume_view(-100100, 77) == resume_view
+
+    state.delete_resume_view(-100100, 77)
+
+    assert state.get_resume_view(-100100, 77) is None
 
 
 def test_sqlite_state_persists_topic_lifecycle_and_project_activity(tmp_path) -> None:

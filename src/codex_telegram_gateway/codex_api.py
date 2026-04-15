@@ -9,6 +9,7 @@ from pathlib import Path
 
 from codex_telegram_gateway.app_store import (
     ensure_sidebar_workspace_root,
+    list_project_threads,
     thread_rollout_path,
 )
 from codex_telegram_gateway.config import GatewayConfig
@@ -173,6 +174,38 @@ class CodexAppServerClient:
                 entries.append(history_entry)
         return entries
 
+    def list_resumable_threads(
+        self,
+        project_id: str,
+        *,
+        exclude_thread_id: str | None = None,
+        limit: int = 12,
+    ) -> list[CodexThread]:
+        loaded_threads = {
+            thread.thread_id: thread
+            for thread in self.list_loaded_threads()
+        }
+        resumable_threads: list[CodexThread] = []
+        for app_store_thread in list_project_threads(
+            self._codex_home,
+            project_id,
+            exclude_thread_id=exclude_thread_id,
+            limit=limit,
+        ):
+            loaded_thread = loaded_threads.get(app_store_thread.thread_id)
+            if loaded_thread is not None:
+                resumable_threads.append(loaded_thread)
+                continue
+            resumable_threads.append(
+                CodexThread(
+                    thread_id=app_store_thread.thread_id,
+                    title=_normalize_topic_name(app_store_thread.title),
+                    status="notLoaded",
+                    cwd=app_store_thread.cwd,
+                )
+            )
+        return resumable_threads
+
     def create_thread(self, project_id: str, thread_name: str | None = None) -> CodexThread:
         self.ensure_project_visible(project_id)
         response = self._request("thread/start", {"cwd": project_id})
@@ -193,6 +226,10 @@ class CodexAppServerClient:
             )
             return self.read_thread(created_thread.thread_id)
         return created_thread
+
+    def resume_thread(self, thread_id: str) -> CodexThread:
+        self._request("thread/resume", {"threadId": thread_id})
+        return self.read_thread(thread_id)
 
     def rename_thread(self, thread_id: str, thread_name: str) -> CodexThread:
         self._request(

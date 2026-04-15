@@ -1,6 +1,15 @@
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class AppStoreThread:
+    thread_id: str
+    cwd: str
+    title: str
+    updated_at: int
 
 
 def ensure_sidebar_workspace_root(codex_home: Path, workspace_root: str) -> bool:
@@ -105,3 +114,45 @@ def thread_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
     if row is None or not row["rollout_path"]:
         return None
     return Path(str(row["rollout_path"]))
+
+
+def list_project_threads(
+    codex_home: Path,
+    project_id: str,
+    *,
+    exclude_thread_id: str | None = None,
+    limit: int = 12,
+) -> list[AppStoreThread]:
+    """Return recent non-archived threads for one Codex App project root."""
+
+    database_path = codex_home / "state_5.sqlite"
+    if not database_path.exists():
+        return []
+
+    connection = sqlite3.connect(str(database_path))
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, cwd, title, updated_at
+            FROM threads
+            WHERE cwd = ?
+              AND archived = 0
+              AND (? IS NULL OR id != ?)
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (project_id, exclude_thread_id, exclude_thread_id, limit),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        AppStoreThread(
+            thread_id=str(row["id"]),
+            cwd=str(row["cwd"]),
+            title=str(row["title"]),
+            updated_at=int(row["updated_at"]),
+        )
+        for row in rows
+    ]

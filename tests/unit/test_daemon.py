@@ -1,6 +1,11 @@
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon, _parse_topic_name
 from codex_telegram_gateway.history_command import CALLBACK_HISTORY_PREFIX
+from codex_telegram_gateway.resume_command import (
+    CALLBACK_RESUME_CANCEL,
+    CALLBACK_RESUME_PAGE_PREFIX,
+    CALLBACK_RESUME_PICK_PREFIX,
+)
 from pathlib import Path
 from codex_telegram_gateway.telegram_api import TelegramRetryAfterError
 
@@ -15,6 +20,7 @@ from codex_telegram_gateway.models import (
     HistoryViewState,
     InboundMessage,
     PendingTurn,
+    ResumeViewState,
     StartedTurn,
     TopicCreationJob,
     TopicLifecycle,
@@ -1203,6 +1209,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway projects - List loaded Codex App projects\n"
             "/gateway threads - List loaded Codex App threads\n"
             "/gateway history - Show paginated history for this Codex thread\n"
+            "/gateway resume - Resume another Codex thread from this project\n"
             "/gateway bindings - List Codex thread to Telegram topic bindings\n"
             "/gateway create_thread - Create a new Codex thread in this topic\n"
             "/gateway project - Choose or switch the Codex project for this topic\n"
@@ -1396,6 +1403,259 @@ def test_poll_telegram_once_history_callback_rejects_stale_message() -> None:
 
     assert telegram.edited_messages == []
     assert telegram.answered_callback_queries == [("cb-history-stale", "This history view is stale.")]
+
+
+def test_poll_telegram_once_gateway_resume_opens_picker() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway resume",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="current thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "older thread")
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "other thread")
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "⏪ Resume Codex Thread\n\n"
+            "Project: `gateway-project`\n"
+            "Available threads: `2`\n\n"
+            "Choose an existing thread to bind to this topic.",
+            {
+                "inline_keyboard": [
+                    [{"text": "🟢 older thread", "callback_data": f"{CALLBACK_RESUME_PICK_PREFIX}thread-2"}],
+                    [{"text": "🟢 other thread", "callback_data": f"{CALLBACK_RESUME_PICK_PREFIX}thread-3"}],
+                    [{"text": "1/1", "callback_data": "tp:noop"}],
+                    [{"text": "Cancel", "callback_data": CALLBACK_RESUME_CANCEL}],
+                ]
+            },
+        )
+    ]
+    assert state.get_resume_view(-100100, 77) == ResumeViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        page_index=0,
+    )
+
+
+def test_poll_telegram_once_resume_pick_rebinds_topic_without_replaying_history() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_resume_view(
+        ResumeViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            page_index=0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-resume-pick",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_RESUME_PICK_PREFIX}thread-2",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="current thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.create_thread("/Users/kangmo/sacle/src/gateway-project", "older thread")
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-2:event-1",
+            thread_id="thread-2",
+            kind="assistant_message",
+            text="existing history",
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-1",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_topic(-100100, 77)
+    assert rebound.codex_thread_id == "thread-2"
+    assert state.has_seen_event("thread-2", "thread-2:event-1") is True
+    assert state.get_pending_turn("thread-1") is None
+    assert state.get_resume_view(-100100, 77) is None
+    assert telegram.edited_topics == [(-100100, 77, "(gateway-project) older thread")]
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            9,
+            "Resumed this topic into `older thread`.\nThread id: `thread-2`",
+            None,
+        )
+    ]
+    assert telegram.answered_callback_queries == [("cb-resume-pick", "Resumed.")]
+
+
+def test_poll_telegram_once_resume_cancel_clears_picker() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_resume_view(
+        ResumeViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            page_index=0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-resume-cancel",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=CALLBACK_RESUME_CANCEL,
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="current thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.get_resume_view(-100100, 77) is None
+    assert telegram.edited_reply_markups == [(-100100, 9, None)]
+    assert telegram.answered_callback_queries == [("cb-resume-cancel", "Cancelled.")]
+
+
+def test_poll_telegram_once_resume_page_edits_existing_picker() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_resume_view(
+        ResumeViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=9,
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+            page_index=0,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_callback_query(
+        update_id=3,
+        callback_query_id="cb-resume-page",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data=f"{CALLBACK_RESUME_PAGE_PREFIX}1",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="current thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    for index in range(9):
+        codex.create_thread(
+            "/Users/kangmo/sacle/src/gateway-project",
+            f"thread {index}",
+        )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            9,
+            "⏪ Resume Codex Thread\n\n"
+            "Project: `gateway-project`\n"
+            "Available threads: `9`\n\n"
+            "Choose an existing thread to bind to this topic.",
+            {
+                "inline_keyboard": [
+                    [{"text": "🟢 thread 6", "callback_data": f"{CALLBACK_RESUME_PICK_PREFIX}thread-8"}],
+                    [{"text": "🟢 thread 7", "callback_data": f"{CALLBACK_RESUME_PICK_PREFIX}thread-9"}],
+                    [{"text": "🟢 thread 8", "callback_data": f"{CALLBACK_RESUME_PICK_PREFIX}thread-10"}],
+                    [
+                        {"text": "◀ Prev", "callback_data": f"{CALLBACK_RESUME_PAGE_PREFIX}0"},
+                        {"text": "2/2", "callback_data": "tp:noop"},
+                    ],
+                    [{"text": "Cancel", "callback_data": CALLBACK_RESUME_CANCEL}],
+                ]
+            },
+        )
+    ]
+    assert state.get_resume_view(-100100, 77) == ResumeViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        project_id="/Users/kangmo/sacle/src/gateway-project",
+        page_index=1,
+    )
+    assert telegram.answered_callback_queries == [("cb-resume-page", "Page updated.")]
 
 
 def test_poll_telegram_once_requeues_recent_message_from_response_widget() -> None:

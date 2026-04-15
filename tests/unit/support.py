@@ -8,6 +8,7 @@ from codex_telegram_gateway.models import (
     InboundMessage,
     OutboundMessage,
     PendingTurn,
+    ResumeViewState,
     TopicCreationJob,
     StartedTurn,
     TopicLifecycle,
@@ -36,6 +37,7 @@ class DummyState:
         self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
+        self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.topic_project_last_seen: dict[tuple[int, int], float] = {}
         self.topic_creation_jobs: dict[tuple[str, int], TopicCreationJob] = {}
         self.telegram_cursor = 0
@@ -251,6 +253,16 @@ class DummyState:
 
     def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
         self.history_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_resume_view(self, resume_view: ResumeViewState) -> ResumeViewState:
+        self.resume_views[(resume_view.chat_id, resume_view.message_thread_id)] = resume_view
+        return resume_view
+
+    def get_resume_view(self, chat_id: int, message_thread_id: int) -> ResumeViewState | None:
+        return self.resume_views.get((chat_id, message_thread_id))
+
+    def delete_resume_view(self, chat_id: int, message_thread_id: int) -> None:
+        self.resume_views.pop((chat_id, message_thread_id), None)
 
     def upsert_pending_turn(self, pending_turn: PendingTurn) -> PendingTurn:
         self.pending_turns[pending_turn.codex_thread_id] = pending_turn
@@ -560,6 +572,20 @@ class DummyCodexBridge:
     def list_history_entries(self, thread_id: str) -> list[CodexHistoryEntry]:
         return list(self._history_entries[thread_id])
 
+    def list_resumable_threads(
+        self,
+        project_id: str,
+        *,
+        exclude_thread_id: str | None = None,
+        limit: int = 12,
+    ) -> list[CodexThread]:
+        threads = [
+            thread
+            for thread in self._threads.values()
+            if thread.cwd == project_id and thread.thread_id != exclude_thread_id
+        ]
+        return threads[:limit]
+
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)
 
@@ -591,6 +617,16 @@ class DummyCodexBridge:
         self._history_entries[thread_id] = []
         self.created_threads.append(created_thread)
         return created_thread
+
+    def resume_thread(self, thread_id: str) -> CodexThread:
+        thread = self._threads[thread_id]
+        self._threads[thread_id] = CodexThread(
+            thread_id=thread.thread_id,
+            title=thread.title,
+            status="idle",
+            cwd=thread.cwd,
+        )
+        return self._threads[thread_id]
 
     def ensure_project_visible(self, project_id: str) -> None:
         if project_id not in self.ensured_projects:
