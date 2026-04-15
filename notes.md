@@ -263,3 +263,20 @@
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_recovery.py tests/unit/test_daemon.py tests/unit/test_state.py tests/e2e/test_gateway_flow.py -q` -> `103 passed`
 - Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `155 passed`
 - Feature-specific changed-statement coverage for tracked source diff is 119/129 = 92.2%.
+
+### FP-17 verification
+- Added a dedicated `commands_catalog.py` module for Telegram menu generation, sanitization, known-description mapping, and hash-based registration.
+- The Telegram menu is now built from three real sources only:
+  - `/gateway`
+  - configured pass-through commands from `CODEX_TELEGRAM_MENU_PASSTHROUGH_COMMANDS`
+  - slash commands actually observed in bound topics and persisted in SQLite
+- Menu registration is chat-scoped to the configured Telegram group and uses a persisted hash so unchanged catalogs do not trigger repeated `setMyCommands` calls on restart.
+- Added persisted state for observed pass-through commands and registered menu hashes.
+- `/gateway help` now prints the live Telegram menu catalog in addition to gateway subcommands.
+- Proofread changes:
+  - removed the stale static `BOT_COMMANDS` constant so menu registration has one source of truth
+  - kept command-menu refresh best-effort so registration failures do not block the actual message pass-through flow
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_config.py tests/unit/test_commands_catalog.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -q` -> `111 passed`
+- Full suite verification: `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `161 passed`
+- Feature-specific changed-statement coverage for tracked source diff is 95/108 = 88.0%.

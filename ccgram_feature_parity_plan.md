@@ -147,9 +147,9 @@ Update these checkboxes as each feature lands.
 - [ ] Line by line proof reading for code review done
 
 ### FP-17: Command Discovery and Telegram Menu Sync
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-18: Full Sessions Dashboard
 - [ ] Implemented
@@ -415,6 +415,58 @@ Code review notes:
 - The first version of the new tests was wrong in two places: it queued multiple callback updates before changing state, which meant one `poll_telegram_once()` processed the whole batch under the old state. Those tests were fixed before sign-off so each callback branch is asserted under the intended binding state.
 - The proofread pass identified a UX issue where `Continue Here` would restore routing but leave the topic name drifted until a later sync. That was fixed by renaming the topic immediately inside the restore callback.
 - The proofread pass also identified menu spam risk on repeated messages to a closed topic. `_offer_restore_prompt()` now reuses the existing restore-menu message id when present.
+
+### FP-17: Command Discovery and Telegram Menu Sync
+
+Branch and status:
+
+- Feature branch: `feature/fp-17-command-discovery-and-telegram-menu-sync`
+
+Implementation decisions:
+
+- The Codex App bridge still does not expose a reliable slash-command discovery API, so FP-17 does not fake provider discovery. Instead, the Telegram menu is generated from:
+  - the always-present `/gateway` namespace
+  - explicitly configured pass-through commands from `CODEX_TELEGRAM_MENU_PASSTHROUGH_COMMANDS`
+  - slash commands actually observed in bound topics and persisted in SQLite
+- Menu registration is chat-scoped to the configured Telegram group rather than global, which matches the single-forum deployment model of this gateway and avoids polluting other chats if the bot is reused elsewhere.
+- A dedicated `commands_catalog.py` module now owns:
+  - menu generation
+  - command-name sanitization to Telegram-safe names
+  - stable description mapping for known Codex commands
+  - registration hash calculation
+- Menu hashes are persisted in SQLite, so plugin restart does not resend identical `setMyCommands` payloads and trigger unnecessary Telegram writes.
+- Observed pass-through commands are learned only from non-`/gateway` slash commands in already bound topics. Unbound topics and gateway namespace commands do not affect the menu.
+- `/gateway help` now shows both the gateway subcommands and the current top-level Telegram menu catalog so the visible bot menu and the documented menu stay in sync.
+
+Test and verification notes:
+
+- Red-phase tests were added first for:
+  - config parsing of `CODEX_TELEGRAM_MENU_PASSTHROUGH_COMMANDS`
+  - command-catalog generation from configured and observed pass-through commands
+  - hash-based menu registration that skips redundant updates
+  - SQLite persistence of observed pass-through commands and registered menu hashes
+  - daemon learning of a new pass-through command from a bound-topic slash command and immediate menu refresh
+  - end-to-end restart behavior proving observed menu commands persist across SQLite restart while unchanged catalogs do not re-register
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_config.py tests/unit/test_commands_catalog.py tests/unit/test_state.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py -q` -> `111 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `161 passed`
+- Feature-specific changed-statement coverage for tracked source diff:
+  - `src/codex_telegram_gateway/cli.py`: `3/5 = 60.0%`
+  - `src/codex_telegram_gateway/config.py`: `13/13 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py`: `23/27 = 85.2%`
+  - `src/codex_telegram_gateway/mcp_server.py`: `3/5 = 60.0%`
+  - `src/codex_telegram_gateway/ports.py`: `0/0 = 100.0%`
+  - `src/codex_telegram_gateway/state.py`: `16/16 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py`: `1/5 = 20.0%`
+  - `src/codex_telegram_gateway/commands_catalog.py`: `36/37 = 97.3%`
+  - `TOTAL`: `95/108 = 88.0%`
+
+Code review notes:
+
+- The main design decision was to stay explicit about the discovery limit: the menu is dynamic, but it is dynamic from real gateway capabilities, configuration, and observed usage, not from an invented Codex provider API that does not exist.
+- The proofread pass removed the stale static `BOT_COMMANDS` constant so there is only one source of truth for Telegram menu registration.
+- The proofread pass also kept registration failures non-fatal for chat flow: pass-through command learning should never block the actual inbound message from reaching Codex just because Telegram command registration failed.
 
 ## Shared Architecture Changes
 

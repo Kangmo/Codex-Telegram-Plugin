@@ -75,6 +75,13 @@ class TelegramClient(Protocol):
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         ...
 
+    def set_my_commands(
+        self,
+        commands: list[tuple[str, str]],
+        scope: dict[str, object] | None = None,
+    ) -> None:
+        ...
+
 
 class CodexBridge(Protocol):
     """Codex thread operations required by the gateway."""
@@ -269,6 +276,18 @@ class GatewayState(Protocol):
         ...
 
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def remember_passthrough_command(self, command_name: str) -> bool:
+        ...
+
+    def list_passthrough_commands(self) -> tuple[str, ...]:
+        ...
+
+    def get_registered_command_menu_hash(self, scope_key: str) -> str | None:
+        ...
+
+    def set_registered_command_menu_hash(self, scope_key: str, menu_hash: str) -> None:
         ...
 
     def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:

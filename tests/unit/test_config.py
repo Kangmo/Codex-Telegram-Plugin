@@ -84,3 +84,21 @@ def test_gateway_config_loads_mirror_chat_ids_and_dedupes_targets(tmp_path) -> N
 
     assert config.telegram_mirror_chat_ids == (-100200, -100300)
     assert config.telegram_target_chat_ids == (-100100, -100200, -100300)
+
+
+def test_gateway_config_loads_menu_passthrough_commands_from_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_BOT_TOKEN=test-token",
+                "TELEGRAM_ALLOWED_USER_IDS=111",
+                "TELEGRAM_DEFAULT_CHAT_ID=-100100",
+                "CODEX_TELEGRAM_MENU_PASSTHROUGH_COMMANDS=help,status,model",
+            ]
+        )
+    )
+
+    config = GatewayConfig.from_env(env_file)
+
+    assert config.telegram_menu_passthrough_commands == ("help", "status", "model")

@@ -1,4 +1,5 @@
 from codex_telegram_gateway.config import GatewayConfig
+from codex_telegram_gateway.commands_catalog import register_bot_commands_if_changed
 from codex_telegram_gateway.daemon import GatewayDaemon
 from codex_telegram_gateway.models import (
     Binding,
@@ -26,6 +27,7 @@ class FakeTelegramClient:
         self.sent_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.sent_chat_actions: list[tuple[int, int, str]] = []
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
+        self.registered_command_sets: list[tuple[tuple[tuple[str, str], ...], dict[str, object] | None]] = []
 
     def create_forum_topic(self, chat_id: int, name: str) -> int:
         topic_id = self._next_topic_id
@@ -118,6 +120,13 @@ class FakeTelegramClient:
 
     def send_chat_action(self, chat_id: int, message_thread_id: int, action: str) -> None:
         self.sent_chat_actions.append((chat_id, message_thread_id, action))
+
+    def set_my_commands(
+        self,
+        commands: list[tuple[str, str]],
+        scope: dict[str, object] | None = None,
+    ) -> None:
+        self.registered_command_sets.append((tuple(commands), scope))
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
         del callback_query_id, text
@@ -508,3 +517,64 @@ def test_gateway_restore_continue_survives_restart_and_routes_next_message(tmp_p
     second_daemon.deliver_inbound_once()
 
     assert codex.started_turns == [StartedTurn(thread_id="thread-1", text="Please continue.")]
+
+
+def test_command_menu_sync_persists_observed_passthrough_commands_across_restart(tmp_path) -> None:
+    database_path = tmp_path / "gateway.db"
+    telegram = FakeTelegramClient()
+    codex = FakeCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Menu sync",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    config = GatewayConfig(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state = SqliteGatewayState(database_path)
+    state.create_binding(
+        Binding(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            topic_name="(gateway-project) Menu sync",
+            sync_mode="assistant_plus_alerts",
+            project_id="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+
+    register_bot_commands_if_changed(telegram=telegram, state=state, config=config)
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/status",
+    )
+    first_daemon = GatewayDaemon(config=config, state=state, telegram=telegram, codex=codex)
+    first_daemon.poll_telegram_once()
+
+    restarted_state = SqliteGatewayState(database_path)
+    restarted_telegram = FakeTelegramClient()
+
+    assert register_bot_commands_if_changed(telegram=restarted_telegram, state=restarted_state, config=config) is False
+    assert restarted_state.list_passthrough_commands() == ("status",)
+    assert telegram.registered_command_sets == [
+        (
+            (("gateway", "Gateway control commands and status"),),
+            {"type": "chat", "chat_id": -100100},
+        ),
+        (
+            (
+                ("gateway", "Gateway control commands and status"),
+                ("status", "Show Codex status in the bound thread"),
+            ),
+            {"type": "chat", "chat_id": -100100},
+        ),
+    ]
+    assert restarted_telegram.registered_command_sets == []

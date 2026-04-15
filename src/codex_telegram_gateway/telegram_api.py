@@ -283,18 +283,22 @@ class TelegramBotClient:
             pass
         return True
 
-    def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
-        self._call(
-            "setMyCommands",
-            {
-                "commands": json.dumps(
-                    [
-                        {"command": command, "description": description}
-                        for command, description in commands
-                    ]
-                )
-            },
-        )
+    def set_my_commands(
+        self,
+        commands: list[tuple[str, str]],
+        scope: dict[str, object] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "commands": json.dumps(
+                [
+                    {"command": command, "description": description}
+                    for command, description in commands
+                ]
+            )
+        }
+        if scope is not None:
+            payload["scope"] = json.dumps(scope)
+        self._call("setMyCommands", payload)
 
     def _extract_local_image_paths(self, message: dict[str, object]) -> tuple[str, ...]:
         photo_variants = message.get("photo")

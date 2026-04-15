@@ -37,6 +37,8 @@ class DummyState:
         self.pending_turns: dict[str, PendingTurn] = {}
         self.topic_lifecycles: dict[str, TopicLifecycle] = {}
         self.topic_history: dict[tuple[int, int], list[TopicHistoryEntry]] = {}
+        self.passthrough_commands: set[str] = set()
+        self.command_menu_hashes: dict[str, str] = {}
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
@@ -268,6 +270,21 @@ class DummyState:
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
         self.topic_history.pop((chat_id, message_thread_id), None)
 
+    def remember_passthrough_command(self, command_name: str) -> bool:
+        if command_name in self.passthrough_commands:
+            return False
+        self.passthrough_commands.add(command_name)
+        return True
+
+    def list_passthrough_commands(self) -> tuple[str, ...]:
+        return tuple(sorted(self.passthrough_commands))
+
+    def get_registered_command_menu_hash(self, scope_key: str) -> str | None:
+        return self.command_menu_hashes.get(scope_key)
+
+    def set_registered_command_menu_hash(self, scope_key: str, menu_hash: str) -> None:
+        self.command_menu_hashes[scope_key] = menu_hash
+
     def upsert_history_view(self, history_view: HistoryViewState) -> HistoryViewState:
         self.history_views[(history_view.chat_id, history_view.message_thread_id)] = history_view
         return history_view
@@ -376,6 +393,7 @@ class DummyTelegramClient:
         self.edited_messages: list[tuple[int, int, str, dict[str, object] | None]] = []
         self.edited_topics: list[tuple[int, int, str]] = []
         self.closed_topics: list[tuple[int, int]] = []
+        self.registered_command_sets: list[tuple[tuple[tuple[str, str], ...], dict[str, object] | None]] = []
 
     def create_forum_topic(self, chat_id: int, name: str) -> int:
         topic_id = self._next_topic_id
@@ -554,6 +572,13 @@ class DummyTelegramClient:
 
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         return (chat_id, message_thread_id) not in self.dead_topics
+
+    def set_my_commands(
+        self,
+        commands: list[tuple[str, str]],
+        scope: dict[str, object] | None = None,
+    ) -> None:
+        self.registered_command_sets.append((tuple(commands), scope))
 
 
 class DummyCodexBridge:

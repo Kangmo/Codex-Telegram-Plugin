@@ -12,6 +12,7 @@ class GatewayConfig:
     telegram_default_chat_id: int
     sync_mode: str
     telegram_mirror_chat_ids: tuple[int, ...] = ()
+    telegram_menu_passthrough_commands: tuple[str, ...] = ()
     telegram_topic_status_emoji_enabled: bool = True
     lifecycle_probe_interval_seconds: float = 60.0
     lifecycle_unbound_ttl_seconds: float = 1800.0
@@ -38,6 +39,10 @@ class GatewayConfig:
             int(raw_chat_id.strip())
             for raw_chat_id in env.get("TELEGRAM_MIRROR_CHAT_IDS", "").split(",")
             if raw_chat_id.strip()
+        )
+        menu_passthrough_commands = _env_command_list(
+            env,
+            "CODEX_TELEGRAM_MENU_PASSTHROUGH_COMMANDS",
         )
         state_database_path = Path(
             env.get("CODEX_TELEGRAM_STATE_DB", ".codex-telegram/gateway.db")
@@ -78,6 +83,7 @@ class GatewayConfig:
                 if configured_chat_id != chat_id
             ),
             sync_mode=sync_mode,
+            telegram_menu_passthrough_commands=menu_passthrough_commands,
             telegram_topic_status_emoji_enabled=topic_status_emoji_enabled,
             lifecycle_probe_interval_seconds=lifecycle_probe_interval_seconds,
             lifecycle_unbound_ttl_seconds=lifecycle_unbound_ttl_seconds,
@@ -142,3 +148,16 @@ def _env_float(env: dict[str, str], name: str, *, default: float) -> float:
     if value is None:
         return default
     return float(value)
+
+
+def _env_command_list(env: dict[str, str], name: str) -> tuple[str, ...]:
+    raw_value = env.get(name, "")
+    commands: list[str] = []
+    seen: set[str] = set()
+    for raw_command in raw_value.split(","):
+        normalized = raw_command.strip().lstrip("/").lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        commands.append(normalized)
+    return tuple(commands)

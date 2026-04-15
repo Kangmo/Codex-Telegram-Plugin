@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
+import time
 
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
@@ -166,6 +167,16 @@ class SqliteGatewayState:
                 codex_thread_id TEXT NOT NULL,
                 issue_kind TEXT NOT NULL,
                 PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS passthrough_commands (
+                command_name TEXT PRIMARY KEY,
+                seen_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS command_menu_state (
+                scope_key TEXT PRIMARY KEY,
+                menu_hash TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS topic_lifecycles (
@@ -902,6 +913,53 @@ class SqliteGatewayState:
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def remember_passthrough_command(self, command_name: str) -> bool:
+        cursor = self._connection.execute(
+            """
+            INSERT INTO passthrough_commands (command_name, seen_at)
+            VALUES (?, ?)
+            ON CONFLICT(command_name) DO NOTHING
+            """,
+            (command_name, time.time()),
+        )
+        self._connection.commit()
+        return cursor.rowcount > 0
+
+    def list_passthrough_commands(self) -> tuple[str, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT command_name
+            FROM passthrough_commands
+            ORDER BY command_name ASC
+            """
+        ).fetchall()
+        return tuple(str(row["command_name"]) for row in rows)
+
+    def get_registered_command_menu_hash(self, scope_key: str) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT menu_hash
+            FROM command_menu_state
+            WHERE scope_key = ?
+            """,
+            (scope_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["menu_hash"])
+
+    def set_registered_command_menu_hash(self, scope_key: str, menu_hash: str) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO command_menu_state (scope_key, menu_hash)
+            VALUES (?, ?)
+            ON CONFLICT(scope_key) DO UPDATE SET
+                menu_hash = excluded.menu_hash
+            """,
+            (scope_key, menu_hash),
         )
         self._connection.commit()
 
