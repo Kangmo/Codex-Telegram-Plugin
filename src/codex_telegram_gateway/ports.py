@@ -20,6 +20,7 @@ from codex_telegram_gateway.models import (
     StatusBubbleViewState,
     TopicCreationJob,
     StartedTurn,
+    ToolbarViewState,
     TopicLifecycle,
     TopicHistoryEntry,
     TopicProject,
@@ -397,6 +398,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_status_bubble_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_toolbar_view(self, toolbar_view: ToolbarViewState) -> ToolbarViewState:
+        ...
+
+    def get_toolbar_view(self, chat_id: int, message_thread_id: int) -> ToolbarViewState | None:
+        ...
+
+    def delete_toolbar_view(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_send_view(self, send_view: SendViewState) -> SendViewState:

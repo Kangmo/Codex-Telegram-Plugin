@@ -209,6 +209,17 @@ class StatusBubbleViewState:
 
 
 @dataclass(frozen=True)
+class ToolbarViewState:
+    """Persisted Telegram toolbar message context for one topic."""
+
+    chat_id: int
+    message_thread_id: int
+    message_id: int
+    codex_thread_id: str | None
+    project_id: str | None
+
+
+@dataclass(frozen=True)
 class SendViewState:
     """Persisted Telegram send-browser context for one topic."""
 
