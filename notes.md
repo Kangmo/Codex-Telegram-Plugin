@@ -545,8 +545,8 @@
 ### FP-12 verification
 - Branch and merge:
   - feature branch `feature/fp-12-toolbar-configurable-action-bar`
-  - feature commit pending until this feature is committed
-  - merge commit on `main` pending until this feature is merged
+  - feature commit `a6b22ee`
+  - merge commit on `main` `47fd034`
 - Re-reviewed `ccgram` toolbar sources before implementation:
   - `/tmp/ccgram/src/ccgram/toolbar_config.py`
   - `/tmp/ccgram/src/ccgram/handlers/toolbar_callbacks.py`
