@@ -487,3 +487,29 @@
   - `src/codex_telegram_gateway/state.py`: `366/379 = 96.6%`
   - `src/codex_telegram_gateway/models.py`: `158/158 = 100.0%`
   - targeted changed-module set total: `2658/3199 = 83.1%`
+
+### FP-27 verification
+- Branch and merge:
+  - feature branch `feature/fp-27-inline-query-support`
+- Reviewed `ccgram` inline-query handling in `bot.py::inline_query_handler()` and `handlers/command_history.py` before implementation.
+- Added `inline_query.py` for safe result building, and extended the Telegram transport with inline-query normalization plus `answerInlineQuery`.
+- `GatewayDaemon` now answers authorized inline queries with personal, zero-cache results built from:
+  - the raw query text
+  - gateway commands
+  - remembered pass-through Codex commands
+- Implementation decisions locked during FP-27:
+  - parity is adapted to safe text insertion rather than project/binding search because inline query is stateless and best aligned with `ccgram`’s text-echo usage
+  - existing callback UIs remain the place for project selection, recovery, and other topic-scoped actions
+- Proofread fixes before sign-off:
+  - duplicate command suggestions are suppressed when the query already equals a command
+  - slash-only queries now surface suggestions instead of being treated as blank
+  - malformed inline-query updates and unauthorized users are filtered before answer generation
+- Focused verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_inline_query.py tests/unit/test_telegram_api.py tests/unit/test_daemon.py tests/e2e/test_gateway_flow.py` -> `192 passed`
+- Full-suite verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `316 passed`
+- Feature-specific changed-code coverage:
+  - `src/codex_telegram_gateway/inline_query.py`: `30/30 = 100.0%`
+  - `src/codex_telegram_gateway/telegram_api.py` changed executable lines: `13/13 = 100.0%`
+  - `src/codex_telegram_gateway/daemon.py` changed executable lines: `12/12 = 100.0%`
+  - `TOTAL`: `55/55 = 100.0%`

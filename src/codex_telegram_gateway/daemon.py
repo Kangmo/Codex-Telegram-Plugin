@@ -18,6 +18,7 @@ from codex_telegram_gateway.interactive_bridge import (
     render_interactive_prompt,
     start_interactive_prompt_session,
 )
+from codex_telegram_gateway.inline_query import build_inline_query_results
 from codex_telegram_gateway.status_bubble import StatusBubbleSnapshot, build_status_bubble
 from codex_telegram_gateway.voice_ingest import (
     TranscriptionProvider,
@@ -298,6 +299,12 @@ class GatewayDaemon:
 
             try:
                 kind = str(update.get("kind") or "message")
+                if kind == "inline_query":
+                    from_user_id = int(update["from_user_id"])
+                    if from_user_id not in self._config.telegram_allowed_user_ids:
+                        continue
+                    self._handle_inline_query(update)
+                    continue
                 chat_id = int(update["chat_id"])
                 message_thread_id = int(update["message_thread_id"])
                 from_user_id = int(update["from_user_id"])
@@ -1572,6 +1579,20 @@ class GatewayDaemon:
             local_image_paths=(),
         )
         self._telegram.answer_callback_query(callback_query_id, "Queued.")
+
+    def _handle_inline_query(self, update: dict[str, object]) -> None:
+        inline_query_id = str(update["inline_query_id"])
+        query = str(update.get("query") or "")
+        results = build_inline_query_results(
+            query,
+            passthrough_commands=self._state.list_passthrough_commands(),
+        )
+        self._telegram.answer_inline_query(
+            inline_query_id,
+            results,
+            cache_time=0,
+            is_personal=True,
+        )
 
     def _handle_callback_query(self, update: dict[str, object]) -> None:
         chat_id = int(update["chat_id"])

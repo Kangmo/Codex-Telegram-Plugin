@@ -7453,3 +7453,70 @@ def test_sync_codex_once_reraises_unexpected_artifact_send_failures(tmp_path) ->
 
     with pytest.raises(RuntimeError, match="upload failed"):
         daemon.sync_codex_once()
+
+
+def test_poll_telegram_once_answers_inline_query_with_echo_and_matching_commands() -> None:
+    state = DummyState()
+    state.remember_passthrough_command("status")
+    telegram = DummyTelegramClient()
+    telegram.push_inline_query_update(
+        update_id=1,
+        inline_query_id="inline-1",
+        from_user_id=111,
+        query="sta",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert len(telegram.answered_inline_queries) == 1
+    inline_query_id, results, cache_time, is_personal = telegram.answered_inline_queries[0]
+    assert inline_query_id == "inline-1"
+    assert cache_time == 0
+    assert is_personal is True
+    inserted_texts = [result["input_message_content"]["message_text"] for result in results]
+    assert inserted_texts[0] == "sta"
+    assert "/gateway status" in inserted_texts
+    assert "/status" in inserted_texts
+
+
+def test_poll_telegram_once_ignores_unauthorized_inline_query() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    telegram.push_inline_query_update(
+        update_id=1,
+        inline_query_id="inline-1",
+        from_user_id=999,
+        query="sta",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_inline_queries == []

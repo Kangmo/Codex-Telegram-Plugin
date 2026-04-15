@@ -218,6 +218,56 @@ def test_get_updates_downloads_voice_and_returns_voice_message(tmp_path, monkeyp
     assert str(updates[0]["file_path"]).endswith(".ogg")
 
 
+def test_get_updates_returns_inline_query() -> None:
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 9,
+                "inline_query": {
+                    "id": "inline-1",
+                    "from": {"id": 111},
+                    "query": "sta",
+                },
+            }
+        ]
+    )
+
+    assert client.get_updates() == [
+        {
+            "kind": "inline_query",
+            "update_id": 9,
+            "inline_query_id": "inline-1",
+            "from_user_id": 111,
+            "query": "sta",
+        }
+    ]
+
+
+def test_get_updates_skips_inline_query_without_sender_or_id() -> None:
+    client = StubTelegramBotClient(
+        [
+            {
+                "update_id": 10,
+                "inline_query": {
+                    "id": "inline-1",
+                    "from": None,
+                    "query": "sta",
+                },
+            },
+            {
+                "update_id": 11,
+                "inline_query": {
+                    "id": 123,
+                    "from": {"id": 111},
+                    "query": "sta",
+                },
+            },
+        ]
+    )
+
+    assert client.get_updates() == []
+
+
 def test_get_updates_skips_unsupported_message_without_sender() -> None:
     client = StubTelegramBotClient(
         [
@@ -450,6 +500,41 @@ def test_send_document_file_calls_telegram_api_with_multipart_upload(tmp_path) -
             },
             "document",
             file_path,
+        )
+    ]
+
+
+def test_answer_inline_query_serializes_results() -> None:
+    client = RecordingTelegramBotClient()
+
+    client.answer_inline_query(
+        "inline-1",
+        [
+            {
+                "type": "article",
+                "id": "echo",
+                "title": "sta",
+                "description": "Tap to insert into the current chat.",
+                "input_message_content": {"message_text": "sta"},
+            }
+        ],
+        cache_time=0,
+        is_personal=True,
+    )
+
+    assert client.calls == [
+        (
+            "answerInlineQuery",
+            {
+                "inline_query_id": "inline-1",
+                "results": (
+                    '[{"type": "article", "id": "echo", "title": "sta", '
+                    '"description": "Tap to insert into the current chat.", '
+                    '"input_message_content": {"message_text": "sta"}}]'
+                ),
+                "cache_time": 0,
+                "is_personal": True,
+            },
         )
     ]
 
