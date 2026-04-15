@@ -202,6 +202,7 @@
 - FP-25 Outbound media and file delivery
 - FP-26 Voice transcription flow
 - FP-27 Inline query support
+- FP-28 Inter-agent messaging/mailbox
 
 ### FP-02 verification
 - Added inbound `forum_topic_edited` normalization in the Telegram client.
@@ -737,3 +738,41 @@
 - Feature-specific changed-executable coverage:
   - `.venv/bin/pytest --cov=codex_telegram_gateway.daemon --cov=codex_telegram_gateway.panes_compat --cov-report=json:/tmp/fp15_cov.json tests/unit/test_panes_compat.py tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_panes_reports_project_threads tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_panes_reports_project_threads`
   - diff-based changed-line audit for FP-15 source work -> `32/34 = 94.1%`
+
+### FP-28 verification
+- Branch and merge:
+  - feature branch `feature/fp-28-inter-agent-messaging-mailbox`
+  - feature commit `89d473e`
+  - merge commit on `main` `c65b9a4`
+- Re-reviewed `ccgram` mailbox sources before implementation:
+  - `/tmp/ccgram-review/src/ccgram/msg_cmd.py`
+  - `/tmp/ccgram-review/src/ccgram/mailbox.py`
+  - `/tmp/ccgram-review/src/ccgram/handlers/msg_broker.py`
+  - `/tmp/ccgram-review/README.md`
+- Added `mailbox_commands.py` for:
+  - `/gateway msg ...` parsing
+  - mailbox help rendering
+  - peer-list rendering
+  - delivery and notification text rendering
+- Added persisted SQLite mailbox state for:
+  - message creation
+  - inbox listing
+  - pending delivery queue listing
+  - delivered/read status updates
+- `GatewayDaemon` now handles `/gateway msg peers|send|inbox|read|reply|broadcast` and drains one pending mailbox message per `deliver_inbound_once()` cycle into an idle recipient Codex thread.
+- Implementation decisions locked during FP-28:
+  - adapt `ccgram` mailbox identities from tmux-window ids to `codex_thread_id`
+  - scope peer messaging to active bound threads so Telegram notifications have a stable destination
+  - use SQLite instead of file mailboxes because the gateway already coordinates through SQLite
+  - treat self-send blocking and pending-turn recipient skipping as the adapted loop-safety mechanisms for Codex App mode
+- Proofread fixes before sign-off:
+  - added the `/gateway msg` help snapshot update after introducing the new command family
+  - added operator-error tests for missing args, self-send, unknown recipients, empty inbox, and no-peer broadcast
+  - added delivery-skip tests for pending-turn, missing-binding, closed-binding, and busy-recipient cases
+- Focused verification:
+  - `.venv/bin/pytest -q tests/unit/test_mailbox_commands.py tests/unit/test_state.py::test_sqlite_state_persists_mailbox_messages_and_status_updates tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_send_and_deliver_mailbox_message tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_inbox_read_reply_and_broadcast tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_help_and_error_paths tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_broadcast_without_peers_and_reply_target_not_bound tests/unit/test_daemon.py::test_deliver_inbound_once_skips_unavailable_mailbox_recipients_until_idle_bound_peer tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_msg_send_delivers_to_idle_peer_thread` -> `15 passed`
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.daemon --cov=codex_telegram_gateway.state --cov=codex_telegram_gateway.mailbox_commands --cov=codex_telegram_gateway.models --cov-report=json:/tmp/fp28_cov.json tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_mailbox_commands.py tests/e2e/test_gateway_flow.py` -> `244 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` -> `411 passed`
+- Feature-specific changed-executable coverage:
+  - diff-based changed-line audit for FP-28 source work -> `220/227 = 96.9%`

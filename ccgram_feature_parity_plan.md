@@ -202,9 +202,9 @@ Update these checkboxes as each feature lands.
 - [x] Line by line proof reading for code review done
 
 ### FP-28: Inter-Agent Messaging/Mailbox
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### FP-29: Shell/NL-to-Command Mode
 - [ ] Implemented
@@ -2372,29 +2372,65 @@ Support Telegram inline-query insertion as a fast way to send prepared text back
 
 ### FP-28: Inter-Agent Messaging/Mailbox
 
-**Parity target**
+Branch and merge:
 
-Replicate `ccgram`’s agent-to-agent messaging only if Codex App exposes a meaningful equivalent.
+- Feature branch: `feature/fp-28-inter-agent-messaging-mailbox`
+- Feature commit: `89d473e`
+- Merge commit on `main`: `c65b9a4`
 
-**Dev design**
+Implementation decisions:
 
-- Treat this as a separate subsystem, not part of the main Telegram-thread bridge.
-- If implemented, the mailbox should operate on `codex_thread_id` and project identities, not tmux windows.
-- This requires a clear product requirement first.
+- Adapted `ccgram msg ...` into `/gateway msg ...` rather than inventing a new command family, so the mailbox surface stays recognizably aligned with the reference implementation.
+- Kept the Codex-App-native scope deliberately bounded to bound peer threads:
+  - peer discovery is built from loaded Codex threads that already have active Telegram bindings
+  - sender and recipient notifications are emitted into the mapped Telegram topics
+  - there is no tmux-window identity, so mailbox routing keys are `codex_thread_id`
+- Implemented the mailbox as persisted SQLite state instead of `ccgram`’s file-based inbox directories because this gateway already uses SQLite as its durable coordination layer.
+- Added the mailbox command family:
+  - `/gateway msg peers`
+  - `/gateway msg send <thread-id> <body>`
+  - `/gateway msg inbox`
+  - `/gateway msg read <message-id>`
+  - `/gateway msg reply <message-id> <body>`
+  - `/gateway msg broadcast <body>`
+- Added automatic mailbox delivery through the existing `deliver_inbound_once()` loop. Pending mailbox messages are injected into idle recipient threads as real Codex turns with a normalized mailbox preamble.
+- Adapted loop protection to Codex-App reality:
+  - block self-send immediately
+  - skip delivery while the recipient thread already has a pending turn
+  - skip closed, missing, or busy recipients until a valid idle bound recipient is found
 
-**Implementation plan**
+Test and verification notes:
 
-1. Defer until there is a confirmed user need and Codex-side API for thread-to-thread messaging semantics.
-2. If revived later:
-   - create mailbox schema
-   - delivery queue
-   - loop detection
-   - Telegram notifications
+- Red-phase sequence:
+  - added the end-to-end mailbox send/deliver contract first
+  - added interface-only `mailbox_commands.py` signatures
+  - added unit tests for command parsing and rendering
+  - confirmed the expected failures:
+    - mailbox helper tests failed with `NotImplementedError`
+    - `/gateway msg` fell back to the generic help output before daemon wiring existed
+- Focused verification:
+  - `.venv/bin/pytest -q tests/unit/test_mailbox_commands.py tests/unit/test_state.py::test_sqlite_state_persists_mailbox_messages_and_status_updates tests/unit/test_daemon.py::test_poll_telegram_once_handles_commands_without_queueing_to_codex tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_send_and_deliver_mailbox_message tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_inbox_read_reply_and_broadcast tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_help_and_error_paths tests/unit/test_daemon.py::test_poll_telegram_once_gateway_msg_broadcast_without_peers_and_reply_target_not_bound tests/unit/test_daemon.py::test_deliver_inbound_once_skips_unavailable_mailbox_recipients_until_idle_bound_peer tests/e2e/test_gateway_flow.py::test_gateway_flow_gateway_msg_send_delivers_to_idle_peer_thread` -> `15 passed`
+  - `.venv/bin/pytest --cov=codex_telegram_gateway.daemon --cov=codex_telegram_gateway.state --cov=codex_telegram_gateway.mailbox_commands --cov=codex_telegram_gateway.models --cov-report=json:/tmp/fp28_cov.json tests/unit/test_daemon.py tests/unit/test_state.py tests/unit/test_mailbox_commands.py tests/e2e/test_gateway_flow.py` -> `244 passed`
+- Full-suite verification:
+  - `.venv/bin/pytest -q` on the feature branch -> `411 passed`
+  - `.venv/bin/pytest -q` on `main` after merge -> `411 passed`
+- Feature-specific changed-executable coverage:
+  - diff-based audit of the FP-28 source work against the focused coverage run -> `220/227 = 96.9%`
 
-**Test automation plan**
+Code review notes:
 
-- No immediate implementation tests.
-- Add only design-contract tests if this feature is greenlit later.
+- The proofread pass kept the subsystem isolated:
+  - parser/render helpers live in `mailbox_commands.py`
+  - durable state lives in `state.py`
+  - command orchestration and broker delivery live in `daemon.py`
+- The review explicitly added operator-error coverage for:
+  - empty and unknown mailbox commands
+  - missing send/read/reply/broadcast arguments
+  - self-send
+  - unbound recipients
+  - reply targets that are no longer bound
+  - empty inbox and no-peer broadcast cases
+- The review also added delivery-skip coverage so the broker does not steal control from active threads and does not crash on stale bindings.
 
 ### FP-29: Shell/NL-to-Command Mode
 
