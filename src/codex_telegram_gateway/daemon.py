@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 
+from codex_telegram_gateway.commands_catalog import build_bot_commands, register_bot_commands_if_changed
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.history_command import (
     CALLBACK_HISTORY_PREFIX,
@@ -53,6 +54,7 @@ from codex_telegram_gateway.recovery import (
     render_restore_prompt,
 )
 from codex_telegram_gateway.telegram_api import (
+    TelegramApiError,
     is_missing_topic_error,
     is_topic_edit_permission_error,
     TelegramRetryAfterError,
@@ -248,6 +250,7 @@ class GatewayDaemon:
                 if binding is None:
                     self._handle_unbound_topic_message(update)
                     continue
+                self._refresh_command_menu_for_passthrough(text)
 
                 self._enqueue_bound_inbound(
                     binding,
@@ -1804,7 +1807,10 @@ class GatewayDaemon:
             self._telegram.send_message(
                 chat_id,
                 message_thread_id,
-                _commands_text(),
+                _commands_text(
+                    self._config,
+                    self._state.list_passthrough_commands(),
+                ),
             )
             return
 
@@ -2097,6 +2103,21 @@ class GatewayDaemon:
             )
         )
         return True
+
+    def _refresh_command_menu_for_passthrough(self, text: str) -> None:
+        command_name = _extract_passthrough_command_name(text)
+        if command_name is None:
+            return
+        if not self._state.remember_passthrough_command(command_name):
+            return
+        try:
+            register_bot_commands_if_changed(
+                telegram=self._telegram,
+                state=self._state,
+                config=self._config,
+            )
+        except TelegramApiError:
+            return
 
     @staticmethod
     def _restore_issue_for_binding(binding: Binding) -> str | None:
@@ -2490,9 +2511,6 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("sync", "Audit bindings and recover deleted topics"),
     _BotCommand("help", "Show available gateway commands", aliases=("commands",)),
 )
-BOT_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("gateway", "Gateway control commands and status"),
-)
 _COMMAND_ALIASES: dict[str, str] = {
     alias: command.name
     for command in _GATEWAY_SUBCOMMANDS
@@ -2783,7 +2801,10 @@ def _parse_topic_name(topic_name: str) -> tuple[str, str] | None:
     return match.group("project").strip(), match.group("title").strip()
 
 
-def _commands_text() -> str:
+def _commands_text(
+    config: GatewayConfig,
+    observed_passthrough_commands: tuple[str, ...],
+) -> str:
     lines = ["Available gateway commands:"]
     lines.append("/gateway <subcommand> - Run a gateway control action")
     lines.append("")
@@ -2791,9 +2812,28 @@ def _commands_text() -> str:
     for command in _GATEWAY_SUBCOMMANDS:
         lines.append(f"/gateway {command.name} - {command.description}")
     lines.append("")
+    lines.append("Telegram menu commands:")
+    for command_name, description in build_bot_commands(
+        config,
+        observed_passthrough_commands=observed_passthrough_commands,
+    ):
+        lines.append(f"/{command_name} - {description}")
+    if not observed_passthrough_commands and not config.telegram_menu_passthrough_commands:
+        lines.append("Additional pass-through commands appear here after you use them or configure them.")
+    lines.append("")
     lines.append("Compatibility aliases inside `/gateway`: new, start, sessions, commands")
     lines.append("All other slash commands are passed through to the bound Codex thread unchanged.")
     return "\n".join(lines)
+
+
+def _extract_passthrough_command_name(text: str) -> str | None:
+    match = _COMMAND_RE.match(text.strip())
+    if match is None:
+        return None
+    command_name = match.group(1).lower()
+    if command_name == "gateway":
+        return None
+    return command_name
 
 
 def _queued_message_markup(telegram_update_id: int) -> dict[str, object]:

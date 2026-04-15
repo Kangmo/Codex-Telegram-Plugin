@@ -1228,6 +1228,9 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
             "/gateway status - Show the current topic binding and thread status\n"
             "/gateway sync - Audit bindings and recover deleted topics\n"
             "/gateway help - Show available gateway commands\n\n"
+            "Telegram menu commands:\n"
+            "/gateway - Gateway control commands and status\n"
+            "Additional pass-through commands appear here after you use them or configure them.\n\n"
             "Compatibility aliases inside `/gateway`: new, start, sessions, commands\n"
             "All other slash commands are passed through to the bound Codex thread unchanged.",
             None,
@@ -2934,6 +2937,48 @@ def test_poll_telegram_once_passthroughs_non_gateway_slash_commands_to_codex() -
             from_user_id=111,
             codex_thread_id="thread-1",
             text="/doctor",
+        )
+    ]
+
+
+def test_poll_telegram_once_learns_passthrough_commands_and_refreshes_menu() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/status",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert state.list_passthrough_commands() == ("status",)
+    assert state.get_registered_command_menu_hash("chat:-100100") is not None
+    assert telegram.registered_command_sets == [
+        (
+            (
+                ("gateway", "Gateway control commands and status"),
+                ("status", "Show Codex status in the bound thread"),
+            ),
+            {"type": "chat", "chat_id": -100100},
         )
     ]
 

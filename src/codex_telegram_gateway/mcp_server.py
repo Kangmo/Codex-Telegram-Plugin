@@ -9,9 +9,10 @@ from typing import Iterator
 
 from mcp.server.fastmcp import FastMCP
 
+from codex_telegram_gateway.commands_catalog import register_bot_commands_if_changed
 from codex_telegram_gateway.codex_api import CodexAppServerClient, CodexAppServerError
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.daemon import BOT_COMMANDS, GatewayDaemon
+from codex_telegram_gateway.daemon import GatewayDaemon
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 from codex_telegram_gateway.sync_lock import SyncLock, try_acquire_sync_lock
@@ -80,7 +81,7 @@ def auto_sync_loaded_threads(env_file: str | None = None) -> list[dict[str, obje
 
 def _background_sync_loop(stop_event: threading.Event, env_file: str) -> None:
     with _runtime(env_file) as runtime:
-        _register_bot_commands(runtime.telegram)
+        _register_bot_commands(runtime)
         while not stop_event.is_set():
             try:
                 runtime.daemon.poll_telegram_once()
@@ -115,9 +116,13 @@ def _release_sync_lock(sync_lock: SyncLock) -> None:
     sync_lock.release()
 
 
-def _register_bot_commands(telegram: TelegramBotClient) -> None:
+def _register_bot_commands(runtime: _Runtime) -> None:
     try:
-        telegram.set_my_commands(list(BOT_COMMANDS))
+        register_bot_commands_if_changed(
+            telegram=runtime.telegram,
+            state=runtime.state,
+            config=runtime.config,
+        )
     except TelegramApiError:
         return
 

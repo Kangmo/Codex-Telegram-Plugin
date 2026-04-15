@@ -5,9 +5,10 @@ import threading
 import time
 from pathlib import Path
 
+from codex_telegram_gateway.commands_catalog import register_bot_commands_if_changed
 from codex_telegram_gateway.codex_api import CodexAppServerClient, CodexAppServerError
 from codex_telegram_gateway.config import GatewayConfig
-from codex_telegram_gateway.daemon import BOT_COMMANDS, GatewayDaemon
+from codex_telegram_gateway.daemon import GatewayDaemon
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 from codex_telegram_gateway.sync_lock import try_acquire_sync_lock
@@ -81,7 +82,7 @@ def main() -> None:
                 print(json.dumps(_run_sync_iteration(state, service, daemon), indent=2, sort_keys=True))
                 return
             if args.command == "run-daemon":
-                _register_bot_commands(telegram)
+                _register_bot_commands(telegram=telegram, state=state, config=config)
                 sync_lock = try_acquire_sync_lock(config.sync_lock_path)
                 if sync_lock is None:
                     raise ValueError(
@@ -227,9 +228,18 @@ def _run_codex_loop(
             stop_event.wait(interval_seconds)
 
 
-def _register_bot_commands(telegram: TelegramBotClient) -> None:
+def _register_bot_commands(
+    *,
+    telegram: TelegramBotClient,
+    state: SqliteGatewayState,
+    config: GatewayConfig,
+) -> None:
     try:
-        telegram.set_my_commands(list(BOT_COMMANDS))
+        register_bot_commands_if_changed(
+            telegram=telegram,
+            state=state,
+            config=config,
+        )
     except TelegramApiError:
         return
 

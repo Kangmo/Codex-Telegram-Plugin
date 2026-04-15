@@ -419,3 +419,15 @@ def test_sqlite_state_can_delete_seen_events_and_outbound_messages(tmp_path) -> 
 
     assert state.has_seen_event("thread-1", "event-1") is False
     assert state.get_outbound_message("thread-1", "event-1") is None
+
+
+def test_sqlite_state_persists_command_menu_hash_and_passthrough_commands(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+
+    assert state.remember_passthrough_command("status") is True
+    assert state.remember_passthrough_command("status") is False
+    assert state.remember_passthrough_command("help") is True
+    state.set_registered_command_menu_hash("chat:-100100", "hash-1")
+
+    assert state.list_passthrough_commands() == ("help", "status")
+    assert state.get_registered_command_menu_hash("chat:-100100") == "hash-1"
