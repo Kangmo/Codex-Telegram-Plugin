@@ -66,9 +66,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-05: Local Daemon Start/Stop/Restart/Status/Logs
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-06: macOS launchd Service Install/Start/Stop/Status/Uninstall
 - [ ] Implemented
@@ -532,5 +532,53 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-04-marketplace-install-and-repair`
+- Feature commit: `da9a723`
+- Merge commit: `2ffe81d`
+
+### CI-05: Local Daemon Start/Stop/Restart/Status/Logs
+
+Implementation decisions:
+- Added `daemon_manager.py` as the local background-process owner for:
+  - daemon command rendering
+  - pid-file parsing
+  - current status derivation
+  - daemon start/stop
+  - log-tail reads
+- Added top-level CLI commands:
+  - `start`
+  - `stop`
+  - `restart`
+  - `status`
+  - `logs`
+- The local daemon command uses the installed checkout's venv Python:
+  - `<install-root>/.venv/bin/python -m codex_telegram_gateway.cli --env-file <runtime-home>/.env run-daemon`
+- Runtime status output now reports:
+  - running/stopped state
+  - pid when present
+  - env file path
+  - log file path
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_daemon_cli_flow.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_daemon_cli_flow.py:1)
+  - [tests/unit/test_daemon_manager.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_daemon_manager.py:1)
+- Green phase verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_daemon_cli_flow.py tests/unit/test_daemon_manager.py -q`
+  - result: `8 passed`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_daemon_cli_flow.py tests/unit/test_daemon_manager.py --cov=codex_telegram_gateway.daemon_manager --cov-report=term-missing -q`
+  - result: `74/83 = 89%`
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/daemon_manager.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/daemon_manager.py:1) and the new local-daemon branch in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:99).
+- Found and fixed one real implementation bug during proof review:
+  - exited child processes could remain as zombies, causing `os.kill(pid, 0)` to misreport them as still running
+  - fixed by reaping child exit state with `waitpid(..., WNOHANG)` inside `_is_process_running()`
+- Found one timing issue in the end-to-end test and fixed the test, not the implementation:
+  - log assertions now wait for the first daemon line instead of assuming immediate file creation.
+- Removed the leftover `NotImplementedError` catch from `cli.py` after the daemon commands were fully implemented.
+
+Branch and merge record:
+- Feature branch: `feature/ci-05-local-daemon-lifecycle`
 - Feature commit: pending
 - Merge commit: pending

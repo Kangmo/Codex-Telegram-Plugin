@@ -318,6 +318,10 @@
 ### CI-04 landed decisions
 - Added `plugin install` and `plugin status` so local Codex marketplace registration is no longer a manual JSON edit.
 - Updated the bootstrap installer to run `plugin install` after interactive gateway configuration, so the one-line setup now covers both runtime config and plugin marketplace wiring.
+
+### CI-05 landed decisions
+- Added a separate `daemon_manager.py` so process control, pid-file handling, and log-tail behavior do not leak into the main runtime CLI logic.
+- Fixed daemon status detection to reap exited child processes with `waitpid(..., WNOHANG)`, avoiding zombie processes being misreported as still running.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
