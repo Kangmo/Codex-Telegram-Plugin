@@ -330,6 +330,10 @@
 ### CI-07 landed decisions
 - Added `update` so operators no longer need to manually refresh the checkout and rerun `pip install`.
 - Kept update synchronization intentionally conservative by preserving `.git` and `.venv` while replacing the rest of the managed install root from a fresh clone.
+
+### CI-08 landed decisions
+- Expanded top-level `status` into an operator summary instead of creating yet another diagnostics command, keeping the quick daemon state at the top while adding install/runtime/plugin/service visibility.
+- Left live launchd probing in `service status`; the operator summary only reports whether the launchd plist is installed.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`

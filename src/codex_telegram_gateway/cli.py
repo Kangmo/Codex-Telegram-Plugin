@@ -30,6 +30,7 @@ from codex_telegram_gateway.launchd_service import (
     stop_launchd_service,
     uninstall_launchd_service,
 )
+from codex_telegram_gateway.operator_status import build_operator_status, render_operator_status
 from codex_telegram_gateway.plugin_installation import (
     find_marketplace_plugin_entry,
     upsert_marketplace_plugin,
@@ -400,12 +401,14 @@ def _run_local_daemon_command(*, command: str) -> None:
         return
     if command == "status":
         status = get_daemon_status(paths=paths)
-        state = "running" if status.running else "stopped"
-        print(f"Daemon status: {state}")
-        if status.pid is not None:
-            print(f"PID: {status.pid}")
-        print(f"Env file: {status.env_file}")
-        print(f"Log file: {status.log_file}")
+        summary = build_operator_status(
+            paths=paths,
+            daemon_status=status,
+            marketplace_registered=find_marketplace_plugin_entry(marketplace_path=paths.marketplace_path)
+            is not None,
+            service_installed=paths.launchd_plist_path.is_file(),
+        )
+        print(render_operator_status(summary), end="")
         return
     if command == "logs":
         log_tail = read_log_tail(paths=paths)
