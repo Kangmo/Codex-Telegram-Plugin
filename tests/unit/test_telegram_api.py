@@ -482,6 +482,22 @@ def test_close_forum_topic_calls_telegram_api() -> None:
     ]
 
 
+def test_delete_forum_topic_calls_telegram_api() -> None:
+    client = RecordingTelegramBotClient()
+
+    client.delete_forum_topic(-100100, 77)
+
+    assert client.calls == [
+        (
+            "deleteForumTopic",
+            {
+                "chat_id": -100100,
+                "message_thread_id": 77,
+            },
+        )
+    ]
+
+
 def test_send_document_file_calls_telegram_api_with_multipart_upload(tmp_path) -> None:
     client = RecordingTelegramBotClient()
     file_path = tmp_path / "notes.txt"
@@ -673,6 +689,58 @@ def test_call_multipart_upload_encodes_body_and_returns_result(tmp_path, monkeyp
     assert b"-100100" in captured["body"]
     assert b'name="document"; filename="notes.txt"' in captured["body"]
     assert b"notes" in captured["body"]
+
+
+def test_send_message_uses_default_request_timeout(monkeypatch) -> None:
+    client = TelegramBotClient("test-token")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": true, "result": {"message_id": 55}}'
+
+    def fake_urlopen(req, timeout: int):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("codex_telegram_gateway.telegram_api.request.urlopen", fake_urlopen)
+
+    assert client.send_message(-100100, 77, "hello") == 55
+    assert captured["url"] == "https://api.telegram.org/bottest-token/sendMessage"
+    assert captured["timeout"] == 10
+
+
+def test_edit_message_text_uses_short_request_timeout(monkeypatch) -> None:
+    client = TelegramBotClient("test-token")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": true, "result": true}'
+
+    def fake_urlopen(req, timeout: int):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("codex_telegram_gateway.telegram_api.request.urlopen", fake_urlopen)
+
+    client.edit_message_text(-100100, 55, "updated")
+    assert captured["url"] == "https://api.telegram.org/bottest-token/editMessageText"
+    assert captured["timeout"] == 5
 
 
 def test_call_multipart_raises_api_error_when_telegram_returns_unsuccessful_result(

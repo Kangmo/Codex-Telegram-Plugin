@@ -5,6 +5,7 @@ from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
+    CodexThread,
     TopicCreationJob,
     TopicLifecycle,
 )
@@ -34,7 +35,7 @@ class GatewayService:
         return self.link_thread(self._codex.get_current_thread_id())
 
     def link_loaded_threads(self) -> list[Binding]:
-        return [self.link_thread(thread.thread_id) for thread in self._codex.list_loaded_threads()]
+        return [self.link_thread(thread.thread_id) for thread in self._list_sync_threads()]
 
     def link_thread(self, thread_id: str) -> Binding:
         thread = self._codex.read_thread(thread_id)
@@ -223,6 +224,12 @@ class GatewayService:
                     project_id=project_id,
                 )
             )
+
+    def _list_sync_threads(self) -> list[CodexThread]:
+        list_sidebar_threads = getattr(self._codex, "list_sidebar_threads", None)
+        if callable(list_sidebar_threads):
+            return list_sidebar_threads()
+        return self._codex.list_loaded_threads()
 
 def format_topic_name(project_id: str, thread_title: str) -> str:
     project_name = Path(project_id).name.strip()

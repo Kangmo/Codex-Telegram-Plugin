@@ -113,6 +113,30 @@ def test_list_loaded_threads_uses_app_loaded_list_api_and_deduplicates() -> None
     ]
 
 
+def test_list_sidebar_threads_uses_sidebar_order_and_appends_loaded_threads_not_in_sidebar() -> None:
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    client._codex_home = __import__("pathlib").Path("/tmp/.codex")  # type: ignore[attr-defined]
+
+    client.list_loaded_threads = lambda: [  # type: ignore[method-assign]
+        CodexThread(thread_id="thread-2", title="Loaded 2", status="idle", cwd="/tmp/project"),
+        CodexThread(thread_id="thread-3", title="Loaded 3", status="idle", cwd="/tmp/project"),
+    ]
+    client.read_thread = lambda thread_id: CodexThread(  # type: ignore[method-assign]
+        thread_id=thread_id,
+        title=f"Read {thread_id}",
+        status="notLoaded",
+        cwd="/tmp/project",
+    )
+
+    with patch("codex_telegram_gateway.codex_api.sidebar_thread_ids") as sidebar_thread_ids:
+        sidebar_thread_ids.return_value = ["thread-1", "thread-2"]
+
+        threads = client.list_sidebar_threads()
+
+    assert [thread.thread_id for thread in threads] == ["thread-1", "thread-2", "thread-3"]
+    assert [thread.status for thread in threads] == ["notLoaded", "idle", "idle"]
+
+
 def test_steer_turn_uses_active_turn_rpc_with_expected_turn_id() -> None:
     client = CodexAppServerClient.__new__(CodexAppServerClient)
     requests: list[tuple[str, dict[str, object]]] = []

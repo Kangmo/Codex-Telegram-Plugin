@@ -2,6 +2,7 @@ from codex_telegram_gateway.models import (
     CLOSED_BINDING_STATUS,
     Binding,
     CodexProject,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     StatusBubbleViewState,
@@ -419,6 +420,49 @@ def test_sqlite_state_persists_history_view_state(tmp_path) -> None:
     state.delete_history_view(-100100, 77)
 
     assert state.get_history_view(-100100, 77) is None
+
+
+def test_sqlite_state_persists_history_sync_state_and_replay_ledger(tmp_path) -> None:
+    state = SqliteGatewayState(tmp_path / "gateway.db")
+    history_sync_state = HistorySyncState(
+        chat_id=-100100,
+        message_thread_id=77,
+        codex_thread_id="thread-1",
+        cutoff_at=42.5,
+        prompt_message_id=19,
+    )
+
+    state.upsert_history_sync_state(history_sync_state)
+    state.mark_history_entry_replayed(
+        -100100,
+        77,
+        codex_thread_id="thread-1",
+        entry_id="entry-1",
+    )
+
+    assert state.get_history_sync_state(-100100, 77) == history_sync_state
+    assert state.has_history_entry_replayed(
+        -100100,
+        77,
+        codex_thread_id="thread-1",
+        entry_id="entry-1",
+    ) is True
+    assert state.history_entry_replay_count(
+        -100100,
+        77,
+        codex_thread_id="thread-1",
+    ) == 1
+
+    state.delete_history_entry_replays(-100100, 77, codex_thread_id="thread-1")
+    state.delete_history_sync_state(-100100, 77)
+
+    assert state.has_history_entry_replayed(
+        -100100,
+        77,
+        codex_thread_id="thread-1",
+        entry_id="entry-1",
+    ) is False
+    assert state.get_history_sync_state(-100100, 77) is None
 
 
 def test_sqlite_state_persists_resume_view_state(tmp_path) -> None:

@@ -29,6 +29,18 @@ class TelegramRetryAfterError(TelegramApiError):
 
 _UPLOAD_DIR_NAME = ".ccgram-uploads"
 _MAX_FILE_SIZE = 50 * 1024 * 1024
+_REQUEST_TIMEOUT_SECONDS = 10
+_REQUEST_TIMEOUTS_BY_METHOD = {
+    "answerCallbackQuery": 5,
+    "answerInlineQuery": 5,
+    "closeForumTopic": 5,
+    "deleteForumTopic": 5,
+    "deleteMessage": 5,
+    "editForumTopic": 5,
+    "editMessageReplyMarkup": 5,
+    "editMessageText": 5,
+    "sendChatAction": 5,
+}
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _IMAGE_DOCUMENT_EXTENSIONS = frozenset(
@@ -439,6 +451,15 @@ class TelegramBotClient:
             },
         )
 
+    def delete_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        self._call(
+            "deleteForumTopic",
+            {
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+            },
+        )
+
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         try:
             result = self._call(
@@ -633,7 +654,7 @@ class TelegramBotClient:
         encoded = parse.urlencode(payload).encode()
         req = request.Request(f"{self._base_url}/{method}", data=encoded, method="POST")
         try:
-            with request.urlopen(req, timeout=30) as response:
+            with request.urlopen(req, timeout=_request_timeout_seconds(method)) as response:
                 data = json.loads(response.read().decode())
         except error.HTTPError as exc:
             body = exc.read().decode()
@@ -757,6 +778,10 @@ def _retry_after_seconds(data: dict[str, object]) -> int | None:
     if isinstance(retry_after, int):
         return max(1, retry_after)
     return None
+
+
+def _request_timeout_seconds(method: str) -> int:
+    return _REQUEST_TIMEOUTS_BY_METHOD.get(method, _REQUEST_TIMEOUT_SECONDS)
 
 
 def _encode_multipart_form_data(

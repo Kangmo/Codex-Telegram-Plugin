@@ -35,6 +35,7 @@ from codex_telegram_gateway.models import (
     CodexHistoryEntry,
     CodexThread,
     DELETED_BINDING_STATUS,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     InteractivePromptViewState,
@@ -1195,6 +1196,48 @@ def test_sync_codex_once_attaches_response_widget_with_recent_history() -> None:
     ]
 
 
+def test_sync_codex_once_does_not_abort_when_reply_markup_edit_is_rate_limited() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    telegram = DummyTelegramClient()
+
+    def raise_retry_after(chat_id: int, message_id: int, reply_markup: dict[str, object] | None) -> None:
+        raise TelegramRetryAfterError("editMessageReplyMarkup", 30, {"ok": False})
+
+    telegram.edit_message_reply_markup = raise_retry_after  # type: ignore[method-assign]
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-1:turn-1:item-1",
+            thread_id="thread-1",
+            kind="assistant_message",
+            text="Completed the gateway update.",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.has_seen_event("thread-1", "thread-1:turn-1:item-1") is True
+    assert state.get_outbound_message("thread-1", "thread-1:turn-1:item-1") is not None
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "Completed the gateway update.", None)
+    ]
+
+
 def test_sync_codex_once_updates_response_widget_from_running_to_ready() -> None:
     state = DummyState()
     binding = make_binding()
@@ -1430,7 +1473,7 @@ def test_poll_telegram_once_handles_commands_without_queueing_to_codex() -> None
                 "/gateway verbose - Change supplemental Telegram notification mode\n"
                 "/gateway project - Choose or switch the Codex project for this topic\n"
                 "/gateway status - Show the current topic binding and thread status\n"
-                "/gateway sync - Audit bindings and recover deleted topics\n"
+                "/gateway sync - Audit bindings, recover topics, or replay earlier messages\n"
                 "/gateway toolbar - Show or refresh the topic action bar\n"
             "/gateway help - Show available gateway commands\n\n"
             "Telegram menu commands:\n"
@@ -3090,6 +3133,229 @@ def test_poll_telegram_once_history_callback_rejects_stale_message() -> None:
 
     assert telegram.edited_messages == []
     assert telegram.answered_callback_queries == [("cb-history-stale", "This history view is stale.")]
+
+
+def test_sync_codex_once_new_topic_offers_history_sync_prompt() -> None:
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_history_entries(
+        "thread-1",
+        [
+            CodexHistoryEntry(
+                entry_id="entry-1",
+                kind="user",
+                text="Earlier request",
+                timestamp="2026-04-15T10:00:00Z",
+            ),
+            CodexHistoryEntry(
+                entry_id="entry-2",
+                kind="assistant",
+                text="Earlier response",
+                timestamp="2026-04-15T10:01:00Z",
+            ),
+        ],
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.get_binding_by_thread("thread-1").message_thread_id == 1
+    assert (
+        -100100,
+        1,
+        "This synced topic does not have its earlier Codex App chat history in Telegram yet.\n\n"
+        "Sync 2 earlier messages into this topic?",
+        {
+            "inline_keyboard": [
+                [
+                    {"text": "Sync Messages", "callback_data": "gw:hsync:run"},
+                    {"text": "Dismiss", "callback_data": "gw:hsync:dismiss"},
+                ]
+            ]
+        },
+    ) in telegram.sent_messages
+    assert state.get_history_sync_state(-100100, 1) == HistorySyncState(
+        chat_id=-100100,
+        message_thread_id=1,
+        codex_thread_id="thread-1",
+        cutoff_at=state.get_history_sync_state(-100100, 1).cutoff_at,
+        prompt_message_id=1,
+    )
+
+
+def test_poll_telegram_once_gateway_sync_messages_replays_history_once() -> None:
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_history_sync_state(
+        HistorySyncState(
+            chat_id=-100100,
+            message_thread_id=77,
+            codex_thread_id="thread-1",
+            cutoff_at=50.0,
+            prompt_message_id=None,
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sync messages",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_history_entries(
+        "thread-1",
+        [
+            CodexHistoryEntry(
+                entry_id="entry-1",
+                kind="user",
+                text="Earlier request",
+                timestamp="1970-01-01T00:00:10+00:00",
+            ),
+            CodexHistoryEntry(
+                entry_id="entry-2",
+                kind="assistant",
+                text="Earlier response",
+                timestamp="1970-01-01T00:00:20+00:00",
+            ),
+            CodexHistoryEntry(
+                entry_id="entry-3",
+                kind="assistant",
+                text="Recent response",
+                timestamp="1970-01-01T00:01:10+00:00",
+            ),
+        ],
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+    telegram.push_update(
+        update_id=2,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sync messages",
+    )
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (-100100, 77, "👤 Earlier request", None),
+        (-100100, 77, "🤖 Earlier response", None),
+        (-100100, 77, "Synced 2 earlier Codex App messages into this topic.", None),
+        (-100100, 77, "No earlier Codex App messages need syncing.", None),
+    ]
+    assert state.history_entry_replay_count(-100100, 77, codex_thread_id="thread-1") == 2
+
+
+def test_poll_telegram_once_history_sync_callback_backs_off_on_retry_after(monkeypatch) -> None:
+    class RetryOnceTelegram(DummyTelegramClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_once = False
+
+        def send_message(
+            self,
+            chat_id: int,
+            message_thread_id: int,
+            text: str,
+            reply_markup: dict[str, object] | None = None,
+        ) -> int:
+            if text.startswith("🤖") and not self.failed_once:
+                self.failed_once = True
+                raise TelegramRetryAfterError("sendMessage", 2, {"ok": False})
+            return super().send_message(chat_id, message_thread_id, text, reply_markup=reply_markup)
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("codex_telegram_gateway.daemon.time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+    state = DummyState()
+    binding = make_binding()
+    state.create_binding(binding)
+    state.upsert_history_sync_state(
+        HistorySyncState(
+            chat_id=-100100,
+            message_thread_id=77,
+            codex_thread_id="thread-1",
+            cutoff_at=50.0,
+            prompt_message_id=9,
+        )
+    )
+    telegram = RetryOnceTelegram()
+    telegram.push_callback_query(
+        update_id=1,
+        callback_query_id="cb-history-sync",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=9,
+        from_user_id=111,
+        data="gw:hsync:run",
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_history_entries(
+        "thread-1",
+        [
+            CodexHistoryEntry(
+                entry_id="entry-1",
+                kind="assistant",
+                text="Earlier response",
+                timestamp="1970-01-01T00:00:20+00:00",
+            ),
+        ],
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.answered_callback_queries == [("cb-history-sync", "Syncing earlier messages...")]
+    assert telegram.sent_messages == [(-100100, 77, "🤖 Earlier response", None)]
+    assert telegram.edited_messages == [
+        (
+            -100100,
+            9,
+            "Synced 1 earlier Codex App message into this topic.",
+            None,
+        )
+    ]
+    assert sleep_calls == [0.2, 2.5]
 
 
 def test_poll_telegram_once_gateway_resume_opens_picker() -> None:
@@ -6881,9 +7147,9 @@ def test_poll_telegram_once_gateway_sync_audits_and_fix_recovers_dead_topic() ->
             -100100,
             77,
             "Gateway sync\n\n"
-            "Loaded Codex App threads: 1\n"
+            "Visible Codex App threads: 1\n"
             "Bound Telegram topics: 1\n"
-            "✓ All loaded threads have Telegram topics\n"
+            "✓ All visible threads have Telegram topics\n"
             "⚠ 1 bound topic(s) were deleted in Telegram",
             {
                 "inline_keyboard": [
@@ -6916,14 +7182,100 @@ def test_poll_telegram_once_gateway_sync_audits_and_fix_recovers_dead_topic() ->
         -100100,
         1,
         "Fixed 1 issue(s).\n\n"
-        "Loaded Codex App threads: 1\n"
+        "Visible Codex App threads: 1\n"
         "Bound Telegram topics: 1\n"
-        "✓ All loaded threads have Telegram topics\n"
+        "✓ All visible threads have Telegram topics\n"
         "✓ All bound Telegram topics are reachable\n\n"
         "No fixes needed.",
         None,
     )
     assert telegram.answered_callback_queries[-1] == ("cb-sync", "Fixed 1 issue(s).")
+
+
+def test_poll_telegram_once_gateway_sync_fixes_unbound_sidebar_thread() -> None:
+    state = DummyState()
+    bound_thread = CodexThread(
+        thread_id="thread-1",
+        title="thread-1",
+        status="idle",
+        cwd="/Users/kangmo/sacle/src/gateway-project",
+    )
+    state.create_binding(make_binding())
+    telegram = DummyTelegramClient()
+    telegram.push_update(
+        update_id=1,
+        chat_id=-100100,
+        message_thread_id=77,
+        from_user_id=111,
+        text="/gateway sync",
+    )
+    codex = DummyCodexBridge(bound_thread)
+    codex.set_sidebar_threads(
+        [
+            bound_thread,
+            CodexThread(
+                thread_id="thread-2",
+                title="thread-2",
+                status="notLoaded",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            ),
+        ]
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.poll_telegram_once()
+
+    assert telegram.sent_messages == [
+        (
+            -100100,
+            77,
+            "Gateway sync\n\n"
+            "Visible Codex App threads: 2\n"
+            "Bound Telegram topics: 1\n"
+            "⚠ 1 visible thread(s) have no Telegram topic yet\n"
+            "✓ All bound Telegram topics are reachable",
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔧 Fix 1", "callback_data": "gw:sync:fix"},
+                        {"text": "Dismiss", "callback_data": "gw:sync:dismiss"},
+                    ]
+                ]
+            },
+        )
+    ]
+
+    telegram.push_callback_query(
+        update_id=2,
+        callback_query_id="cb-sync-sidebar",
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=1,
+        from_user_id=111,
+        data="gw:sync:fix",
+    )
+
+    daemon.poll_telegram_once()
+
+    rebound = state.get_binding_by_thread("thread-2")
+    assert rebound.topic_name == "(gateway-project) thread-2"
+    assert telegram.created_topics == [(-100100, "(gateway-project) thread-2")]
+    assert telegram.edited_messages[-1] == (
+        -100100,
+        1,
+        "Fixed 1 issue(s).\n\n"
+        "Visible Codex App threads: 2\n"
+        "Bound Telegram topics: 2\n"
+        "✓ All visible threads have Telegram topics\n"
+        "✓ All bound Telegram topics are reachable\n\n"
+        "No fixes needed.",
+        None,
+    )
 
 
 def test_poll_telegram_once_passthroughs_non_gateway_slash_commands_to_codex() -> None:
@@ -7742,6 +8094,7 @@ def test_deliver_inbound_once_keeps_typing_pending_for_approval_blocked_turn() -
 
 
 def test_sync_codex_once_continues_typing_for_approval_blocked_turn() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
     state = DummyState()
     binding = make_binding()
     state.create_binding(binding)
@@ -7768,6 +8121,19 @@ def test_sync_codex_once_continues_typing_for_approval_blocked_turn() -> None:
         status="interrupted",
         waiting_for_approval=True,
     )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-10",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": "/tmp/project",
+            },
+        )
+    )
     daemon = GatewayDaemon(
         config=make_config(),
         state=state,
@@ -7782,8 +8148,61 @@ def test_sync_codex_once_continues_typing_for_approval_blocked_turn() -> None:
 
 
 def test_sync_codex_once_suppresses_typing_for_approval_blocked_turn_when_errors_only() -> None:
+    interactive = __import__("codex_telegram_gateway.interactive_bridge", fromlist=["normalize_interactive_request"])
     state = DummyState()
     state.create_binding(replace(make_binding(), sync_mode="errors_only"))
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-10",
+            waiting_for_approval=True,
+        )
+    )
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-10")] = TurnResult(
+        turn_id="turn-10",
+        status="interrupted",
+        waiting_for_approval=True,
+    )
+    codex.queue_interactive_prompt(
+        interactive.normalize_interactive_request(
+            prompt_id="prompt-approval",
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "thread-1",
+                "turnId": "turn-10",
+                "itemId": "item-1",
+                "command": "pytest -q",
+                "cwd": "/tmp/project",
+            },
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert telegram.sent_chat_actions == []
+    assert state.get_pending_turn("thread-1") is not None
+
+
+def test_sync_codex_once_clears_terminal_waiting_for_approval_turn_without_live_prompt() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
     state.upsert_pending_turn(
         PendingTurn(
             codex_thread_id="thread-1",
@@ -7816,8 +8235,263 @@ def test_sync_codex_once_suppresses_typing_for_approval_blocked_turn_when_errors
 
     daemon.sync_codex_once()
 
-    assert telegram.sent_chat_actions == []
-    assert state.get_pending_turn("thread-1") is not None
+    assert state.get_pending_turn("thread-1") is None
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Codex started processing your message, but the turn was interrupted before a final answer was produced.",
+            None,
+        )
+    ]
+
+
+def test_sync_codex_once_clears_terminal_turn_when_status_bubble_edit_is_not_modified() -> None:
+    state = DummyState()
+    state.create_binding(make_binding())
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-1",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-12",
+            waiting_for_approval=False,
+        )
+    )
+    state.upsert_status_bubble_view(
+        StatusBubbleViewState(
+            chat_id=-100100,
+            message_thread_id=77,
+            message_id=31,
+            codex_thread_id="thread-1",
+        )
+    )
+    telegram = DummyTelegramClient()
+    telegram.edit_message_text = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        TelegramApiError("message is not modified")
+    )
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="thread-1",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.inspect_results[("thread-1", "turn-12")] = TurnResult(
+        turn_id="turn-12",
+        status="interrupted",
+        waiting_for_approval=False,
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.get_pending_turn("thread-1") is None
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Codex started processing your message, but the turn was interrupted before a final answer was produced.",
+            None,
+        )
+    ]
+    assert state.get_status_bubble_view(-100100, 77) == StatusBubbleViewState(
+        chat_id=-100100,
+        message_thread_id=77,
+        message_id=31,
+        codex_thread_id="thread-1",
+    )
+
+
+def test_sync_codex_once_skips_passive_bindings_while_active_backlog_exists() -> None:
+    state = DummyState()
+    passive_binding = replace(
+        make_binding(),
+        codex_thread_id="thread-passive",
+        message_thread_id=70,
+        topic_name="(gateway-project) passive",
+    )
+    active_binding = replace(
+        make_binding(),
+        codex_thread_id="thread-active",
+        message_thread_id=77,
+        topic_name="(gateway-project) active",
+    )
+    state.create_binding(passive_binding)
+    state.create_binding(active_binding)
+    state.enqueue_inbound(
+        InboundMessage(
+            telegram_update_id=1234,
+            chat_id=-100100,
+            message_thread_id=77,
+            from_user_id=111,
+            codex_thread_id="thread-active",
+            text="next",
+        )
+    )
+    state.upsert_pending_turn(
+        PendingTurn(
+            codex_thread_id="thread-active",
+            chat_id=-100100,
+            message_thread_id=77,
+            turn_id="turn-active",
+            waiting_for_approval=False,
+        )
+    )
+    state.upsert_status_bubble_view(
+        StatusBubbleViewState(
+            chat_id=-100100,
+            message_thread_id=70,
+            message_id=31,
+            codex_thread_id="thread-passive",
+        )
+    )
+
+    class GuardedTelegramClient(DummyTelegramClient):
+        def edit_message_text(
+            self,
+            chat_id: int,
+            message_id: int,
+            text: str,
+            reply_markup: dict[str, object] | None = None,
+        ) -> None:
+            if message_id == 31:
+                raise AssertionError("passive status bubble should be skipped while active backlog exists")
+            super().edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+
+    telegram = GuardedTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-passive",
+            title="passive",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_sidebar_threads(
+        [
+            CodexThread(
+                thread_id="thread-passive",
+                title="passive",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            ),
+            CodexThread(
+                thread_id="thread-active",
+                title="active",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            ),
+        ]
+    )
+    codex.inspect_results[("thread-active", "turn-active")] = TurnResult(
+        turn_id="turn-active",
+        status="completed",
+        waiting_for_approval=False,
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    daemon.sync_codex_once()
+
+    assert state.get_pending_turn("thread-active") is None
+    assert all(message_id != 31 for _chat_id, message_id, _text, _markup in telegram.edited_messages)
+
+
+def test_sync_codex_once_prioritizes_recently_active_thread_without_current_queue() -> None:
+    state = DummyState()
+    passive_binding = replace(
+        make_binding(),
+        codex_thread_id="thread-passive",
+        message_thread_id=70,
+        topic_name="(gateway-project) passive",
+    )
+    active_binding = replace(
+        make_binding(),
+        codex_thread_id="thread-active",
+        message_thread_id=77,
+        topic_name="(gateway-project) active",
+    )
+    state.create_binding(passive_binding)
+    state.create_binding(active_binding)
+    state.upsert_status_bubble_view(
+        StatusBubbleViewState(
+            chat_id=-100100,
+            message_thread_id=70,
+            message_id=31,
+            codex_thread_id="thread-passive",
+        )
+    )
+
+    class GuardedTelegramClient(DummyTelegramClient):
+        def edit_message_text(
+            self,
+            chat_id: int,
+            message_id: int,
+            text: str,
+            reply_markup: dict[str, object] | None = None,
+        ) -> None:
+            if message_id == 31:
+                raise AssertionError("passive status bubble should be skipped for a recently active thread")
+            super().edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+
+    telegram = GuardedTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-passive",
+            title="passive",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/gateway-project",
+        )
+    )
+    codex.set_sidebar_threads(
+        [
+            CodexThread(
+                thread_id="thread-passive",
+                title="passive",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            ),
+            CodexThread(
+                thread_id="thread-active",
+                title="active",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/gateway-project",
+            ),
+        ]
+    )
+    codex.append_event(
+        CodexEvent(
+            event_id="thread-active:event-1",
+            thread_id="thread-active",
+            kind="assistant_message",
+            text="final answer",
+        )
+    )
+    daemon = GatewayDaemon(
+        config=make_config(),
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+    daemon._mark_thread_recently_active("thread-active")
+
+    daemon.sync_codex_once()
+
+    assert non_bubble_sent_messages(telegram) == [
+        (-100100, 77, "final answer", None)
+    ]
+    assert all(message_id != 31 for _chat_id, message_id, _text, _markup in telegram.edited_messages)
 
 
 def test_sync_codex_once_reports_failed_turn_even_when_notification_mode_is_muted() -> None:
@@ -10266,8 +10940,18 @@ def test_sync_codex_once_reraises_unexpected_artifact_send_failures(tmp_path) ->
         codex=codex,
     )
 
-    with pytest.raises(RuntimeError, match="upload failed"):
-        daemon.sync_codex_once()
+    daemon.sync_codex_once()
+
+    assert state.has_seen_event("thread-1", "thread-1:turn-1:item-1:artifact:document") is True
+    assert non_bubble_sent_messages(telegram) == [
+        (
+            -100100,
+            77,
+            "Artifact upload failed for `summary.txt` and was skipped.\n"
+            "Use `/gateway send` if you still need the file in Telegram.",
+            None,
+        )
+    ]
 
 
 def test_poll_telegram_once_answers_inline_query_with_echo_and_matching_commands() -> None:

@@ -81,6 +81,9 @@ class FakeTelegramClient:
     def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
         del chat_id, message_thread_id
 
+    def delete_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        del chat_id, message_thread_id
+
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         del chat_id, message_thread_id
         return True

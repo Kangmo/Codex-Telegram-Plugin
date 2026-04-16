@@ -11,6 +11,7 @@ from codex_telegram_gateway.models import (
     CodexHistoryEntry,
     CodexProject,
     CodexThread,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     InteractivePromptViewState,
@@ -130,6 +131,9 @@ class TelegramClient(Protocol):
         ...
 
     def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def delete_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
@@ -309,6 +313,9 @@ class GatewayState(Protocol):
     def get_outbound_message(self, codex_thread_id: str, event_id: str) -> OutboundMessage | None:
         ...
 
+    def outbound_message_count(self, codex_thread_id: str) -> int:
+        ...
+
     def delete_outbound_messages(self, codex_thread_id: str) -> None:
         ...
 
@@ -323,6 +330,15 @@ class GatewayState(Protocol):
         chat_id: int,
         message_thread_id: int,
     ) -> OutboundMessage | None:
+        ...
+
+    def mirror_outbound_message_count(
+        self,
+        codex_thread_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> int:
         ...
 
     def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
@@ -348,6 +364,44 @@ class GatewayState(Protocol):
         ...
 
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def mark_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> None:
+        ...
+
+    def has_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> bool:
+        ...
+
+    def history_entry_replay_count(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+    ) -> int:
+        ...
+
+    def delete_history_entry_replays(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str | None = None,
+    ) -> None:
         ...
 
     def create_mailbox_message(
@@ -400,6 +454,15 @@ class GatewayState(Protocol):
         ...
 
     def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
+        ...
+
+    def upsert_history_sync_state(self, history_sync_state: HistorySyncState) -> HistorySyncState:
+        ...
+
+    def get_history_sync_state(self, chat_id: int, message_thread_id: int) -> HistorySyncState | None:
+        ...
+
+    def delete_history_sync_state(self, chat_id: int, message_thread_id: int) -> None:
         ...
 
     def upsert_resume_view(self, resume_view: ResumeViewState) -> ResumeViewState:

@@ -66,9 +66,15 @@ def sidebar_thread_ids(codex_home: Path) -> list[str]:
     connection = sqlite3.connect(str(database_path))
     connection.row_factory = sqlite3.Row
     try:
+        available_columns = _thread_table_columns(connection)
+        select_columns = ["id", "cwd", "updated_at"]
+        if "rollout_path" in available_columns:
+            select_columns.append("rollout_path")
+        if "first_user_message" in available_columns:
+            select_columns.append("first_user_message")
         rows = connection.execute(
-            """
-            SELECT id, cwd, updated_at
+            f"""
+            SELECT {", ".join(select_columns)}
             FROM threads
             WHERE archived = 0
             """
@@ -79,7 +85,7 @@ def sidebar_thread_ids(codex_home: Path) -> list[str]:
     ranked_rows = [
         row
         for row in rows
-        if row["cwd"] in root_order
+        if row["cwd"] in root_order and _is_displayable_thread_row(row)
     ]
     ranked_rows.sort(
         key=lambda row: (
@@ -132,17 +138,22 @@ def list_project_threads(
     connection = sqlite3.connect(str(database_path))
     connection.row_factory = sqlite3.Row
     try:
+        available_columns = _thread_table_columns(connection)
+        select_columns = ["id", "cwd", "title", "updated_at"]
+        if "rollout_path" in available_columns:
+            select_columns.append("rollout_path")
+        if "first_user_message" in available_columns:
+            select_columns.append("first_user_message")
         rows = connection.execute(
-            """
-            SELECT id, cwd, title, updated_at
+            f"""
+            SELECT {", ".join(select_columns)}
             FROM threads
             WHERE cwd = ?
               AND archived = 0
               AND (? IS NULL OR id != ?)
             ORDER BY updated_at DESC, id DESC
-            LIMIT ?
             """,
-            (project_id, exclude_thread_id, exclude_thread_id, limit),
+            (project_id, exclude_thread_id, exclude_thread_id),
         ).fetchall()
     finally:
         connection.close()
@@ -155,4 +166,48 @@ def list_project_threads(
             updated_at=int(row["updated_at"]),
         )
         for row in rows
-    ]
+        if _is_displayable_thread_row(row)
+    ][:limit]
+
+
+def _thread_table_columns(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute("PRAGMA table_info(threads)").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _is_displayable_thread_row(row: sqlite3.Row) -> bool:
+    if "first_user_message" not in row.keys() and "rollout_path" not in row.keys():
+        return True
+
+    first_user_message = str(row["first_user_message"] or "").strip() if "first_user_message" in row.keys() else ""
+    if first_user_message:
+        return True
+
+    rollout_path_value = str(row["rollout_path"] or "").strip() if "rollout_path" in row.keys() else ""
+    if not rollout_path_value:
+        return True
+    return _rollout_has_material_activity(Path(rollout_path_value))
+
+
+def _rollout_has_material_activity(rollout_path: Path) -> bool:
+    if not rollout_path.exists():
+        return False
+    try:
+        for raw_line in rollout_path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            record_type = str(record.get("type") or "")
+            if record_type == "session_meta":
+                continue
+            if record_type != "event_msg":
+                return True
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                return True
+            if str(payload.get("type") or "") != "thread_name_updated":
+                return True
+    except (json.JSONDecodeError, OSError):
+        return True
+    return False

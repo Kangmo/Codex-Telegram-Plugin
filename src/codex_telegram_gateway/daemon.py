@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 import re
 
@@ -8,6 +9,7 @@ from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.history_command import (
     CALLBACK_HISTORY_PREFIX,
     parse_history_callback,
+    render_history_entry_text,
     render_history_page,
 )
 from codex_telegram_gateway.interactive_bridge import (
@@ -67,9 +69,12 @@ from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
     CLOSED_BINDING_STATUS,
+    CodexEvent,
     CodexProject,
+    CodexHistoryEntry,
     CodexThread,
     DELETED_BINDING_STATUS,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     InteractivePromptViewState,
@@ -189,6 +194,9 @@ class GatewayDaemon:
     _TYPING_ACTION = "typing"
     _TYPING_INTERVAL_SECONDS = 4.0
     _TELEGRAM_MESSAGE_LIMIT = 4000
+    _HISTORY_SYNC_DELAY_SECONDS = 0.2
+    _HISTORY_SYNC_DELAY_MAX_SECONDS = 5.0
+    _RECENT_THREAD_PRIORITY_SECONDS = 60.0
 
     def __init__(
         self,
@@ -221,6 +229,7 @@ class GatewayDaemon:
         self._interactive_prompt_sessions: dict[str, InteractivePromptSession] = {}
         self._interactive_prompt_renders: dict[str, tuple[str, dict[str, object] | None]] = {}
         self._status_bubble_renders: dict[tuple[int, int], tuple[str, dict[str, object]]] = {}
+        self._recently_active_threads: dict[str, float] = {}
         self._lifecycle_timers = {
             "probe": 0.0,
             "autoclose": 0.0,
@@ -247,7 +256,10 @@ class GatewayDaemon:
             pending_turn.codex_thread_id: pending_turn
             for pending_turn in self._state.list_pending_turns()
         }
-        for binding in self._state.list_bindings():
+        active_thread_ids = set(pending_turns_by_thread)
+        active_thread_ids.update(pending_inbound_counts)
+        active_thread_ids.update(self._recently_active_thread_ids())
+        for binding in self._bindings_for_sync(active_thread_ids):
             targets = self._targets_for_thread(binding.codex_thread_id)
             pending_turn = pending_turns_by_thread.get(binding.codex_thread_id)
             turn_result = None
@@ -300,13 +312,17 @@ class GatewayDaemon:
                 turn_result = self._codex.inspect_turn(binding.codex_thread_id, pending_turn.turn_id)
 
             self._sync_interactive_prompt_for_binding(binding)
+            has_live_pending_prompt = bool(self._codex.list_pending_prompts(binding.codex_thread_id))
             active_turn_has_completion_summary = any(
                 getattr(event, "kind", None) == "completion_summary"
                 and _event_turn_id(event.event_id) == pending_turn.turn_id
                 for event in events
             )
 
-            if turn_result.waiting_for_approval or not _is_terminal_turn_status(turn_result.status):
+            if (
+                (turn_result.waiting_for_approval and has_live_pending_prompt)
+                or not _is_terminal_turn_status(turn_result.status)
+            ):
                 for target in active_targets:
                     if target.binding_status == ACTIVE_BINDING_STATUS:
                         self._send_typing_if_due(target.chat_id, target.message_thread_id)
@@ -359,6 +375,28 @@ class GatewayDaemon:
                     )
             if turn_result.status == "completed":
                 self._mark_topic_completed(binding.codex_thread_id)
+
+    def _bindings_for_sync(self, active_thread_ids: set[str]) -> list[Binding]:
+        bindings = self._state.list_bindings()
+        if not active_thread_ids:
+            return bindings
+        return [
+            binding
+            for binding in bindings
+            if binding.codex_thread_id in active_thread_ids
+        ]
+
+    def _mark_thread_recently_active(self, codex_thread_id: str) -> None:
+        self._recently_active_threads[codex_thread_id] = time.monotonic()
+
+    def _recently_active_thread_ids(self) -> set[str]:
+        cutoff = time.monotonic() - self._RECENT_THREAD_PRIORITY_SECONDS
+        self._recently_active_threads = {
+            thread_id: last_active_at
+            for thread_id, last_active_at in self._recently_active_threads.items()
+            if last_active_at >= cutoff
+        }
+        return set(self._recently_active_threads)
 
     def poll_telegram_once(self) -> None:
         self._sync_projects_once()
@@ -499,6 +537,7 @@ class GatewayDaemon:
                     waiting_for_approval=turn_result.waiting_for_approval,
                 )
             )
+            self._mark_thread_recently_active(inbound_message.codex_thread_id)
             self._state.mark_inbound_delivered(inbound_message.telegram_update_id)
             return
         self._deliver_mailbox_once()
@@ -531,6 +570,8 @@ class GatewayDaemon:
             except Exception as exc:
                 if self._mark_binding_deleted_if_missing_topic(binding, exc):
                     return
+                if isinstance(exc, TelegramApiError):
+                    return
                 raise
             self._upsert_outbound_message_for_target(binding, outbound_message)
             self._mark_event_seen_for_target(binding, event.event_id)
@@ -553,6 +594,8 @@ class GatewayDaemon:
             )
         except Exception as exc:
             if self._mark_binding_deleted_if_missing_topic(binding, exc):
+                return
+            if isinstance(exc, TelegramApiError):
                 return
             raise
         self._upsert_outbound_message_for_target(
@@ -596,7 +639,8 @@ class GatewayDaemon:
         except Exception as exc:
             if self._mark_binding_deleted_if_missing_topic(binding, exc):
                 return
-            raise
+            self._handle_artifact_send_failure(binding, event, file_path=file_path)
+            return
 
         self._upsert_outbound_message_for_target(
             binding,
@@ -612,6 +656,17 @@ class GatewayDaemon:
         if self._is_primary_binding(binding):
             self._touch_topic_lifecycle(binding.codex_thread_id, last_outbound_at=time.time())
 
+    def _handle_artifact_send_failure(self, binding: Binding, event: CodexEvent, *, file_path: Path) -> None:
+        try:
+            self._telegram.send_message(
+                binding.chat_id,
+                binding.message_thread_id,
+                _artifact_send_failure_text(file_path),
+            )
+        except Exception:
+            pass
+        self._mark_event_seen_for_target(binding, event.event_id)
+
     def _sync_projects_once(self) -> None:
         for project in self._codex.list_loaded_projects():
             self._state.upsert_project(project)
@@ -622,7 +677,15 @@ class GatewayDaemon:
                 self._codex.ensure_project_visible(binding.project_id)
 
     def _sync_loaded_threads_once(self) -> None:
-        self._service.link_loaded_threads()
+        existing_topics = {
+            (binding.chat_id, binding.message_thread_id)
+            for binding in self._state.list_bindings()
+        }
+        for binding in self._service.link_loaded_threads():
+            if (binding.chat_id, binding.message_thread_id) in existing_topics:
+                continue
+            self._reset_history_sync_state(binding)
+            self._offer_history_sync_prompt(binding)
 
     def _targets_for_thread(self, codex_thread_id: str) -> list[Binding]:
         try:
@@ -729,6 +792,7 @@ class GatewayDaemon:
                 binding_status=ACTIVE_BINDING_STATUS,
             )
             self._state.upsert_mirror_binding(mirror_binding)
+            self._reset_history_sync_state(mirror_binding)
             for event in self._codex.list_events(topic_creation_job.codex_thread_id):
                 self._state.mark_mirror_event_seen(
                     topic_creation_job.codex_thread_id,
@@ -737,6 +801,7 @@ class GatewayDaemon:
                     message_thread_id=mirror_binding.message_thread_id,
                 )
             self._state.delete_topic_creation_job(topic_creation_job.codex_thread_id, topic_creation_job.chat_id)
+            self._offer_history_sync_prompt(mirror_binding)
 
     def _send_typing_if_due(self, chat_id: int, message_thread_id: int, *, force: bool = False) -> None:
         binding = self._binding_by_topic(chat_id, message_thread_id)
@@ -1095,13 +1160,26 @@ class GatewayDaemon:
         if previous_last_id == next_last_id:
             if next_last_id is None or previous_reply_markup == next_reply_markup:
                 return
-            self._telegram.edit_message_reply_markup(chat_id, next_last_id, next_reply_markup)
+            self._try_edit_message_reply_markup(chat_id, next_last_id, next_reply_markup)
             return
 
         if previous_last_id is not None and previous_reply_markup is not None:
-            self._telegram.edit_message_reply_markup(chat_id, previous_last_id, None)
+            self._try_edit_message_reply_markup(chat_id, previous_last_id, None)
         if next_last_id is not None and next_reply_markup is not None:
-            self._telegram.edit_message_reply_markup(chat_id, next_last_id, next_reply_markup)
+            self._try_edit_message_reply_markup(chat_id, next_last_id, next_reply_markup)
+
+    def _try_edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: dict[str, object] | None,
+    ) -> None:
+        try:
+            self._telegram.edit_message_reply_markup(chat_id, message_id, reply_markup)
+        except TelegramApiError as exc:
+            if _is_message_not_modified_error(exc) or isinstance(exc, TelegramRetryAfterError):
+                return
+            raise
 
     def _assistant_reply_markup(
         self,
@@ -1178,6 +1256,22 @@ class GatewayDaemon:
                 self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
                 self._status_bubble_renders.pop(key, None)
                 return
+            if _is_message_not_modified_error(exc):
+                message_id = existing_view.message_id if existing_view is not None else None
+                if message_id is None:
+                    return
+                self._state.upsert_status_bubble_view(
+                    StatusBubbleViewState(
+                        chat_id=binding.chat_id,
+                        message_thread_id=binding.message_thread_id,
+                        message_id=message_id,
+                        codex_thread_id=binding.codex_thread_id,
+                    )
+                )
+                self._status_bubble_renders[key] = (text, reply_markup)
+                return
+            if isinstance(exc, TelegramRetryAfterError):
+                return
             try:
                 message_id = self._telegram.send_message(
                     binding.chat_id,
@@ -1189,6 +1283,8 @@ class GatewayDaemon:
                 if self._mark_binding_deleted_if_missing_topic(binding, send_exc):
                     self._state.delete_status_bubble_view(binding.chat_id, binding.message_thread_id)
                     self._status_bubble_renders.pop(key, None)
+                    return
+                if isinstance(send_exc, TelegramRetryAfterError):
                     return
                 raise
 
@@ -1776,6 +1872,9 @@ class GatewayDaemon:
         if data.startswith(CALLBACK_HISTORY_PREFIX):
             self._handle_history_callback(update)
             return
+        if data.startswith(_CALLBACK_HISTORY_SYNC_PREFIX):
+            self._handle_history_sync_callback(update)
+            return
         if data.startswith("gw:restore:"):
             self._handle_restore_callback(update)
             return
@@ -2038,10 +2137,14 @@ class GatewayDaemon:
         audit = self._audit_sync_state()
         fixed_count = 0
         for thread in audit.unbound_loaded_threads:
-            self._service.link_thread(thread.thread_id)
+            created_binding = self._service.link_thread(thread.thread_id)
+            self._reset_history_sync_state(created_binding)
+            self._offer_history_sync_prompt(created_binding)
             fixed_count += 1
         for binding in audit.dead_topics:
-            self._service.recreate_topic(binding.codex_thread_id)
+            recreated_binding = self._service.recreate_topic(binding.codex_thread_id)
+            self._reset_history_sync_state(recreated_binding)
+            self._offer_history_sync_prompt(recreated_binding)
             fixed_count += 1
 
         refreshed_audit = self._audit_sync_state()
@@ -2052,6 +2155,45 @@ class GatewayDaemon:
             reply_markup=_sync_report_markup(refreshed_audit),
         )
         self._telegram.answer_callback_query(callback_query_id, f"Fixed {fixed_count} issue(s).")
+
+    def _handle_history_sync_callback(self, update: dict[str, object]) -> None:
+        callback_query_id = str(update["callback_query_id"])
+        chat_id = int(update["chat_id"])
+        message_thread_id = int(update["message_thread_id"])
+        message_id = int(update["message_id"])
+        data = str(update["data"])
+
+        history_sync_state = self._state.get_history_sync_state(chat_id, message_thread_id)
+        if history_sync_state is None or history_sync_state.prompt_message_id != message_id:
+            self._telegram.answer_callback_query(callback_query_id, "This sync prompt is stale.")
+            return
+
+        binding = self._binding_by_topic(chat_id, message_thread_id)
+        if binding is None or binding.codex_thread_id != history_sync_state.codex_thread_id:
+            self._clear_history_sync_prompt(
+                chat_id,
+                message_thread_id,
+                message_id=message_id,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "This topic no longer matches the sync prompt.")
+            return
+
+        if data == _CALLBACK_HISTORY_SYNC_DISMISS:
+            self._clear_history_sync_prompt(
+                chat_id,
+                message_thread_id,
+                message_id=message_id,
+            )
+            self._telegram.answer_callback_query(callback_query_id, "Dismissed.")
+            return
+
+        if data != _CALLBACK_HISTORY_SYNC_RUN:
+            self._telegram.answer_callback_query(callback_query_id, "Unknown sync action.")
+            return
+
+        self._telegram.answer_callback_query(callback_query_id, "Syncing earlier messages...")
+        result_text = self._sync_history_messages(binding)
+        self._render_history_sync_result(binding, result_text)
 
     def _handle_sessions_callback(self, update: dict[str, object]) -> None:
         callback_query_id = str(update["callback_query_id"])
@@ -2278,6 +2420,7 @@ class GatewayDaemon:
                 self._telegram.answer_callback_query(callback_query_id, "Recreate is not available for this issue.")
                 return
             recreated = self._service.recreate_topic(binding.codex_thread_id)
+            self._reset_history_sync_state(recreated)
             self._state.delete_restore_view(chat_id, message_thread_id)
             self._telegram.edit_message_text(
                 chat_id,
@@ -2289,6 +2432,7 @@ class GatewayDaemon:
                 ),
                 reply_markup=None,
             )
+            self._offer_history_sync_prompt(recreated)
             self._telegram.answer_callback_query(callback_query_id, "Recreated.")
             return
 
@@ -2357,6 +2501,7 @@ class GatewayDaemon:
             message_thread_id=message_thread_id,
             codex_thread_id=picked_thread_id,
         )
+        self._reset_history_sync_state(rebound_binding)
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_topic_lifecycle(previous_thread_id)
         self._state.delete_history_view(chat_id, message_thread_id)
@@ -2379,6 +2524,7 @@ class GatewayDaemon:
             ),
             reply_markup=None,
         )
+        self._offer_history_sync_prompt(rebound_binding)
         self._telegram.answer_callback_query(callback_query_id, "Resumed.")
 
     def _handle_interactive_prompt_callback(self, update: dict[str, object]) -> None:
@@ -3226,6 +3372,7 @@ class GatewayDaemon:
             project_id=topic_project.project_id,
             thread_title=DEFAULT_NEW_THREAD_TITLE,
         )
+        self._reset_history_sync_state(binding)
         if existing_binding is not None:
             self._state.delete_pending_turn(existing_binding.codex_thread_id)
             self._clear_typing_state(existing_binding.chat_id, existing_binding.message_thread_id)
@@ -3255,6 +3402,7 @@ class GatewayDaemon:
             topic_project.message_thread_id,
             f"Bound this topic to {Path(topic_project.project_id).name} and created thread '{DEFAULT_NEW_THREAD_TITLE}'.",
         )
+        self._offer_history_sync_prompt(binding)
 
     def _open_project_picker(
         self,
@@ -3857,6 +4005,17 @@ class GatewayDaemon:
             return
 
         if command_name == "sync":
+            if command_args.strip() == "messages":
+                if binding is None:
+                    self._telegram.send_message(
+                        chat_id,
+                        message_thread_id,
+                        "No Codex thread is bound to this topic yet.",
+                    )
+                    return
+                result_text = self._sync_history_messages(binding)
+                self._render_history_sync_result(binding, result_text)
+                return
             audit = self._audit_sync_state()
             self._telegram.send_message(
                 chat_id,
@@ -4064,6 +4223,233 @@ class GatewayDaemon:
             )
         )
 
+    def _target_outbound_message_count(self, binding: Binding) -> int:
+        if self._is_primary_binding(binding):
+            return self._state.outbound_message_count(binding.codex_thread_id)
+        return self._state.mirror_outbound_message_count(
+            binding.codex_thread_id,
+            chat_id=binding.chat_id,
+            message_thread_id=binding.message_thread_id,
+        )
+
+    def _history_sync_state_for_binding(self, binding: Binding) -> HistorySyncState | None:
+        history_sync_state = self._state.get_history_sync_state(binding.chat_id, binding.message_thread_id)
+        if history_sync_state is None:
+            return None
+        if history_sync_state.codex_thread_id != binding.codex_thread_id:
+            return None
+        return history_sync_state
+
+    def _reset_history_sync_state(self, binding: Binding) -> None:
+        existing_state = self._state.get_history_sync_state(binding.chat_id, binding.message_thread_id)
+        if existing_state is not None and existing_state.prompt_message_id is not None:
+            try:
+                self._telegram.edit_message_reply_markup(
+                    binding.chat_id,
+                    existing_state.prompt_message_id,
+                    None,
+                )
+            except Exception:
+                pass
+        self._state.upsert_history_sync_state(
+            HistorySyncState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+                cutoff_at=time.time(),
+                prompt_message_id=None,
+            )
+        )
+
+    def _history_sync_cutoff_at(self, binding: Binding) -> float | None:
+        history_sync_state = self._history_sync_state_for_binding(binding)
+        if history_sync_state is not None:
+            return history_sync_state.cutoff_at
+        if self._is_primary_binding(binding):
+            topic_lifecycle = self._state.get_topic_lifecycle(binding.codex_thread_id)
+            if (
+                topic_lifecycle is not None
+                and topic_lifecycle.chat_id == binding.chat_id
+                and topic_lifecycle.message_thread_id == binding.message_thread_id
+                and topic_lifecycle.bound_at is not None
+            ):
+                return topic_lifecycle.bound_at
+        if (
+            self._target_outbound_message_count(binding) > 0
+            or self._state.history_entry_replay_count(
+                binding.chat_id,
+                binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+            )
+            > 0
+        ):
+            return None
+        return time.time()
+
+    def _replayable_history_entries(
+        self,
+        binding: Binding,
+        *,
+        cutoff_at: float | None = None,
+    ) -> list[CodexHistoryEntry]:
+        effective_cutoff_at = cutoff_at if cutoff_at is not None else self._history_sync_cutoff_at(binding)
+        if effective_cutoff_at is None:
+            return []
+        return [
+            entry
+            for entry in self._codex.list_history_entries(binding.codex_thread_id)
+            if not self._state.has_history_entry_replayed(
+                binding.chat_id,
+                binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+                entry_id=entry.entry_id,
+            )
+            and _history_entry_before_cutoff(entry, effective_cutoff_at)
+        ]
+
+    def _offer_history_sync_prompt(self, binding: Binding) -> bool:
+        if binding.binding_status != ACTIVE_BINDING_STATUS:
+            return False
+        history_sync_state = self._history_sync_state_for_binding(binding)
+        if history_sync_state is not None and history_sync_state.prompt_message_id is not None:
+            return False
+        if self._target_outbound_message_count(binding) > 0:
+            return False
+        if (
+            self._state.history_entry_replay_count(
+                binding.chat_id,
+                binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+            )
+            > 0
+        ):
+            return False
+        cutoff_at = self._history_sync_cutoff_at(binding)
+        if cutoff_at is None:
+            return False
+        replayable_entries = self._replayable_history_entries(binding, cutoff_at=cutoff_at)
+        if not replayable_entries:
+            return False
+        message_id = self._telegram.send_message(
+            binding.chat_id,
+            binding.message_thread_id,
+            _history_sync_prompt_text(len(replayable_entries)),
+            reply_markup=_history_sync_prompt_markup(),
+        )
+        self._state.upsert_history_sync_state(
+            HistorySyncState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+                cutoff_at=cutoff_at,
+                prompt_message_id=message_id,
+            )
+        )
+        return True
+
+    def _clear_history_sync_prompt(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        message_id: int | None = None,
+    ) -> None:
+        history_sync_state = self._state.get_history_sync_state(chat_id, message_thread_id)
+        if history_sync_state is None:
+            return
+        target_message_id = message_id if message_id is not None else history_sync_state.prompt_message_id
+        if target_message_id is not None:
+            try:
+                self._telegram.edit_message_reply_markup(chat_id, target_message_id, None)
+            except Exception:
+                pass
+        self._state.upsert_history_sync_state(
+            replace(
+                history_sync_state,
+                prompt_message_id=None,
+            )
+        )
+
+    def _sync_history_messages(self, binding: Binding) -> str:
+        history_sync_state = self._history_sync_state_for_binding(binding)
+        cutoff_at = self._history_sync_cutoff_at(binding)
+        if cutoff_at is None:
+            return "Earlier message sync is unavailable because this topic already has live messages but no replay cutoff was recorded."
+        prompt_message_id = history_sync_state.prompt_message_id if history_sync_state is not None else None
+        self._state.upsert_history_sync_state(
+            HistorySyncState(
+                chat_id=binding.chat_id,
+                message_thread_id=binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+                cutoff_at=cutoff_at,
+                prompt_message_id=prompt_message_id,
+            )
+        )
+        replayable_entries = self._replayable_history_entries(binding, cutoff_at=cutoff_at)
+        if not replayable_entries:
+            return "No earlier Codex App messages need syncing."
+
+        delay_seconds = self._HISTORY_SYNC_DELAY_SECONDS
+        for entry in replayable_entries:
+            for part in _split_outbound_text(render_history_entry_text(entry), self._TELEGRAM_MESSAGE_LIMIT):
+                _, delay_seconds = self._send_history_sync_message(
+                    binding.chat_id,
+                    binding.message_thread_id,
+                    part,
+                    delay_seconds=delay_seconds,
+                )
+            self._state.mark_history_entry_replayed(
+                binding.chat_id,
+                binding.message_thread_id,
+                codex_thread_id=binding.codex_thread_id,
+                entry_id=entry.entry_id,
+            )
+        return _history_sync_result_text(len(replayable_entries))
+
+    def _send_history_sync_message(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        text: str,
+        *,
+        delay_seconds: float,
+    ) -> tuple[int, float]:
+        next_delay_seconds = delay_seconds
+        sleep_seconds = delay_seconds
+        while True:
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            try:
+                return self._telegram.send_message(chat_id, message_thread_id, text), next_delay_seconds
+            except TelegramRetryAfterError as exc:
+                next_delay_seconds = min(
+                    max(next_delay_seconds * 2, exc.retry_after_seconds + 0.5),
+                    self._HISTORY_SYNC_DELAY_MAX_SECONDS,
+                )
+                sleep_seconds = exc.retry_after_seconds + 0.5
+
+    def _render_history_sync_result(self, binding: Binding, text: str) -> None:
+        history_sync_state = self._history_sync_state_for_binding(binding)
+        prompt_message_id = history_sync_state.prompt_message_id if history_sync_state is not None else None
+        if prompt_message_id is not None:
+            try:
+                self._telegram.edit_message_text(
+                    binding.chat_id,
+                    prompt_message_id,
+                    text,
+                    reply_markup=None,
+                )
+            except Exception:
+                self._telegram.send_message(binding.chat_id, binding.message_thread_id, text)
+            self._state.upsert_history_sync_state(
+                replace(
+                    history_sync_state,
+                    prompt_message_id=None,
+                )
+            )
+            return
+        self._telegram.send_message(binding.chat_id, binding.message_thread_id, text)
+
     @staticmethod
     def _history_display_name(binding: Binding, thread: CodexThread) -> str:
         return binding.topic_name or format_topic_name(binding.project_id or thread.cwd, thread.title)
@@ -4217,6 +4603,7 @@ class GatewayDaemon:
             project_id=project_id,
             thread_title=thread_title,
         )
+        self._reset_history_sync_state(new_binding)
         self._state.delete_pending_turn(previous_thread_id)
         self._state.delete_restore_view(chat_id, message_thread_id)
         self._state.delete_send_view(chat_id, message_thread_id)
@@ -4237,6 +4624,7 @@ class GatewayDaemon:
                 f"Thread id: `{new_binding.codex_thread_id}`"
             ),
         )
+        self._offer_history_sync_prompt(new_binding)
         return True
 
     def _unbind_topic(self, binding: Binding) -> int:
@@ -4284,6 +4672,8 @@ class GatewayDaemon:
             self._state.delete_status_bubble_view(target.chat_id, target.message_thread_id)
             self._status_bubble_renders.pop((target.chat_id, target.message_thread_id), None)
             self._state.delete_topic_history(target.chat_id, target.message_thread_id)
+            self._clear_history_sync_prompt(target.chat_id, target.message_thread_id)
+            self._state.delete_history_sync_state(target.chat_id, target.message_thread_id)
             self._clear_typing_state(target.chat_id, target.message_thread_id)
             self._clear_topic_status_override(target.chat_id, target.message_thread_id)
 
@@ -4886,7 +5276,7 @@ class GatewayDaemon:
             return
 
     def _audit_sync_state(self) -> "_SyncAudit":
-        loaded_threads = {thread.thread_id: thread for thread in self._codex.list_loaded_threads()}
+        loaded_threads = {thread.thread_id: thread for thread in self._list_sync_threads()}
         bindings = self._state.list_bindings()
         bound_thread_ids = {binding.codex_thread_id for binding in bindings}
         unbound_loaded_threads = [
@@ -4925,6 +5315,12 @@ class GatewayDaemon:
             dead_topics=dead_topics,
             unloaded_bindings=unloaded_bindings,
         )
+
+    def _list_sync_threads(self) -> list[CodexThread]:
+        list_sidebar_threads = getattr(self._codex, "list_sidebar_threads", None)
+        if callable(list_sidebar_threads):
+            return list_sidebar_threads()
+        return self._codex.list_loaded_threads()
 
     def _edit_sessions_dashboard_message(
         self,
@@ -5072,7 +5468,9 @@ class GatewayDaemon:
             return "Restored."
 
         if issue_kind == RESTORE_ISSUE_DELETED:
-            self._service.recreate_topic(binding.codex_thread_id)
+            recreated_binding = self._service.recreate_topic(binding.codex_thread_id)
+            self._reset_history_sync_state(recreated_binding)
+            self._offer_history_sync_prompt(recreated_binding)
             return "Recreated."
 
         return "Nothing to restore."
@@ -5091,6 +5489,9 @@ _CALLBACK_NOOP = "tp:noop"
 _CALLBACK_SYNC_PREFIX = "gw:sync:"
 _CALLBACK_SYNC_FIX = f"{_CALLBACK_SYNC_PREFIX}fix"
 _CALLBACK_SYNC_DISMISS = f"{_CALLBACK_SYNC_PREFIX}dismiss"
+_CALLBACK_HISTORY_SYNC_PREFIX = "gw:hsync:"
+_CALLBACK_HISTORY_SYNC_RUN = f"{_CALLBACK_HISTORY_SYNC_PREFIX}run"
+_CALLBACK_HISTORY_SYNC_DISMISS = f"{_CALLBACK_HISTORY_SYNC_PREFIX}dismiss"
 _CALLBACK_SESSIONS_PREFIX = "gw:sessions:"
 _CALLBACK_VERBOSE_PREFIX = "gw:verbose:"
 _CALLBACK_RECALL_PREFIX = "gw:recall:"
@@ -5139,7 +5540,7 @@ _GATEWAY_SUBCOMMANDS: tuple[_BotCommand, ...] = (
     _BotCommand("verbose", "Change supplemental Telegram notification mode"),
     _BotCommand("project", "Choose or switch the Codex project for this topic"),
     _BotCommand("status", "Show the current topic binding and thread status"),
-    _BotCommand("sync", "Audit bindings and recover deleted topics"),
+    _BotCommand("sync", "Audit bindings, recover topics, or replay earlier messages"),
     _BotCommand("toolbar", "Show or refresh the topic action bar"),
     _BotCommand("help", "Show available gateway commands", aliases=("commands",)),
 )
@@ -5170,13 +5571,13 @@ def _sync_report_text(audit: _SyncAudit, *, fixed_count: int = 0) -> str:
     else:
         lines.append("Gateway sync\n")
 
-    lines.append(f"Loaded Codex App threads: {len(audit.loaded_threads)}")
+    lines.append(f"Visible Codex App threads: {len(audit.loaded_threads)}")
     lines.append(f"Bound Telegram topics: {len(audit.bindings)}")
 
     if audit.unbound_loaded_threads:
-        lines.append(f"⚠ {len(audit.unbound_loaded_threads)} loaded thread(s) have no Telegram topic yet")
+        lines.append(f"⚠ {len(audit.unbound_loaded_threads)} visible thread(s) have no Telegram topic yet")
     else:
-        lines.append("✓ All loaded threads have Telegram topics")
+        lines.append("✓ All visible threads have Telegram topics")
 
     if audit.dead_topics:
         lines.append(f"⚠ {len(audit.dead_topics)} bound topic(s) were deleted in Telegram")
@@ -5205,6 +5606,30 @@ def _sync_report_markup(audit: _SyncAudit) -> dict[str, object] | None:
             ]
         ]
     }
+
+
+def _history_sync_prompt_text(message_count: int) -> str:
+    label = "message" if message_count == 1 else "messages"
+    return (
+        "This synced topic does not have its earlier Codex App chat history in Telegram yet.\n\n"
+        f"Sync {message_count} earlier {label} into this topic?"
+    )
+
+
+def _history_sync_prompt_markup() -> dict[str, object]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Sync Messages", "callback_data": _CALLBACK_HISTORY_SYNC_RUN},
+                {"text": "Dismiss", "callback_data": _CALLBACK_HISTORY_SYNC_DISMISS},
+            ]
+        ]
+    }
+
+
+def _history_sync_result_text(message_count: int) -> str:
+    label = "message" if message_count == 1 else "messages"
+    return f"Synced {message_count} earlier Codex App {label} into this topic."
 
 
 def _project_picker_text(
@@ -5373,6 +5798,17 @@ def _unbind_message_text(
         "Send a message in this topic to choose a project and create or bind a new thread."
     )
     return "\n".join(lines)
+
+
+def _artifact_send_failure_text(file_path: Path) -> str:
+    return (
+        f"Artifact upload failed for `{file_path.name}` and was skipped.\n"
+        "Use `/gateway send` if you still need the file in Telegram."
+    )
+
+
+def _is_message_not_modified_error(exc: Exception) -> bool:
+    return "message is not modified" in str(exc).lower()
 
 
 def _is_terminal_turn_status(status: str) -> bool:
@@ -5560,6 +5996,16 @@ def _response_status_label(status: str) -> str:
 
 def _history_entry_label(entry: TopicHistoryEntry, limit: int = 20) -> str:
     return history_entry_label(entry, limit=limit)
+
+
+def _history_entry_before_cutoff(entry: CodexHistoryEntry, cutoff_at: float) -> bool:
+    if entry.timestamp:
+        normalized_timestamp = entry.timestamp.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized_timestamp).timestamp() <= cutoff_at
+        except ValueError:
+            return False
+    return True
 
 
 def _latest_visible_summary(events: list) -> str | None:

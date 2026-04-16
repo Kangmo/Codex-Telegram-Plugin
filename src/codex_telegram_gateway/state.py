@@ -9,6 +9,7 @@ from codex_telegram_gateway.models import (
     ACTIVE_BINDING_STATUS,
     Binding,
     CodexProject,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     InteractivePromptViewState,
@@ -170,6 +171,24 @@ class SqliteGatewayState:
                 codex_thread_id TEXT NOT NULL,
                 page_index INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS history_sync_states (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                cutoff_at REAL NOT NULL,
+                prompt_message_id INTEGER,
+                PRIMARY KEY (chat_id, message_thread_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS history_replays (
+                chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                codex_thread_id TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                replayed_at REAL NOT NULL,
+                PRIMARY KEY (chat_id, message_thread_id, codex_thread_id, entry_id)
             );
 
             CREATE TABLE IF NOT EXISTS resume_views (
@@ -840,6 +859,17 @@ class SqliteGatewayState:
             reply_markup=_reply_markup_from_json(row["reply_markup_json"]),
         )
 
+    def outbound_message_count(self, codex_thread_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM outbound_messages
+            WHERE codex_thread_id = ?
+            """,
+            (codex_thread_id,),
+        ).fetchone()
+        return int(row["total"])
+
     def delete_outbound_messages(self, codex_thread_id: str) -> None:
         self._connection.execute(
             """
@@ -917,6 +947,23 @@ class SqliteGatewayState:
             text=row["text"],
             reply_markup=_reply_markup_from_json(row["reply_markup_json"]),
         )
+
+    def mirror_outbound_message_count(
+        self,
+        codex_thread_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM mirror_outbound_messages
+            WHERE codex_thread_id = ? AND chat_id = ? AND message_thread_id = ?
+            """,
+            (codex_thread_id, chat_id, message_thread_id),
+        ).fetchone()
+        return int(row["total"])
 
     def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
         self._connection.execute(
@@ -1013,6 +1060,88 @@ class SqliteGatewayState:
             """,
             (chat_id, message_thread_id),
         )
+        self._connection.commit()
+
+    def mark_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO history_replays (
+                chat_id,
+                message_thread_id,
+                codex_thread_id,
+                entry_id,
+                replayed_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, message_thread_id, codex_thread_id, entry_id, time.time()),
+        )
+        self._connection.commit()
+
+    def has_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> bool:
+        row = self._connection.execute(
+            """
+            SELECT 1
+            FROM history_replays
+            WHERE chat_id = ? AND message_thread_id = ? AND codex_thread_id = ? AND entry_id = ?
+            """,
+            (chat_id, message_thread_id, codex_thread_id, entry_id),
+        ).fetchone()
+        return row is not None
+
+    def history_entry_replay_count(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+    ) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM history_replays
+            WHERE chat_id = ? AND message_thread_id = ? AND codex_thread_id = ?
+            """,
+            (chat_id, message_thread_id, codex_thread_id),
+        ).fetchone()
+        return int(row["total"])
+
+    def delete_history_entry_replays(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str | None = None,
+    ) -> None:
+        if codex_thread_id is None:
+            self._connection.execute(
+                """
+                DELETE FROM history_replays
+                WHERE chat_id = ? AND message_thread_id = ?
+                """,
+                (chat_id, message_thread_id),
+            )
+        else:
+            self._connection.execute(
+                """
+                DELETE FROM history_replays
+                WHERE chat_id = ? AND message_thread_id = ? AND codex_thread_id = ?
+                """,
+                (chat_id, message_thread_id, codex_thread_id),
+            )
         self._connection.commit()
 
     def create_mailbox_message(
@@ -1256,6 +1385,67 @@ class SqliteGatewayState:
         self._connection.execute(
             """
             DELETE FROM history_views
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        )
+        self._connection.commit()
+
+    def upsert_history_sync_state(self, history_sync_state: HistorySyncState) -> HistorySyncState:
+        self._connection.execute(
+            """
+            INSERT INTO history_sync_states (
+                chat_id,
+                message_thread_id,
+                codex_thread_id,
+                cutoff_at,
+                prompt_message_id
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_thread_id)
+            DO UPDATE SET
+                codex_thread_id = excluded.codex_thread_id,
+                cutoff_at = excluded.cutoff_at,
+                prompt_message_id = excluded.prompt_message_id
+            """,
+            (
+                history_sync_state.chat_id,
+                history_sync_state.message_thread_id,
+                history_sync_state.codex_thread_id,
+                history_sync_state.cutoff_at,
+                history_sync_state.prompt_message_id,
+            ),
+        )
+        self._connection.commit()
+        return history_sync_state
+
+    def get_history_sync_state(self, chat_id: int, message_thread_id: int) -> HistorySyncState | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                chat_id,
+                message_thread_id,
+                codex_thread_id,
+                cutoff_at,
+                prompt_message_id
+            FROM history_sync_states
+            WHERE chat_id = ? AND message_thread_id = ?
+            """,
+            (chat_id, message_thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return HistorySyncState(
+            chat_id=row["chat_id"],
+            message_thread_id=row["message_thread_id"],
+            codex_thread_id=row["codex_thread_id"],
+            cutoff_at=float(row["cutoff_at"]),
+            prompt_message_id=row["prompt_message_id"],
+        )
+
+    def delete_history_sync_state(self, chat_id: int, message_thread_id: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM history_sync_states
             WHERE chat_id = ? AND message_thread_id = ?
             """,
             (chat_id, message_thread_id),

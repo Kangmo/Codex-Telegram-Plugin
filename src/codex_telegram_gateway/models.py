@@ -152,6 +152,17 @@ class HistoryViewState:
 
 
 @dataclass(frozen=True)
+class HistorySyncState:
+    """Persisted replay cutoff and prompt state for one Telegram topic."""
+
+    chat_id: int
+    message_thread_id: int
+    codex_thread_id: str
+    cutoff_at: float
+    prompt_message_id: int | None = None
+
+
+@dataclass(frozen=True)
 class ResumeViewState:
     """Persisted Telegram resume-picker context for one topic."""
 

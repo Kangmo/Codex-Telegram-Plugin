@@ -81,6 +81,55 @@ def test_link_loaded_threads_reuses_existing_binding() -> None:
     assert bindings == [existing]
 
 
+def test_link_loaded_threads_uses_sidebar_threads_when_available() -> None:
+    config = GatewayConfig(
+        telegram_bot_token="token",
+        telegram_allowed_user_ids={111},
+        telegram_default_chat_id=-100100,
+        sync_mode="assistant_plus_alerts",
+    )
+    state = DummyState()
+    telegram = DummyTelegramClient()
+    codex = DummyCodexBridge(
+        CodexThread(
+            thread_id="thread-1",
+            title="Loaded thread",
+            status="idle",
+            cwd="/Users/kangmo/sacle/src/blink",
+        )
+    )
+    codex.set_sidebar_threads(
+        [
+            CodexThread(
+                thread_id="thread-1",
+                title="Loaded thread",
+                status="idle",
+                cwd="/Users/kangmo/sacle/src/blink",
+            ),
+            CodexThread(
+                thread_id="thread-2",
+                title="Sidebar only thread",
+                status="notLoaded",
+                cwd="/Users/kangmo/sacle/src/blink",
+            ),
+        ]
+    )
+    service = GatewayService(
+        config=config,
+        state=state,
+        telegram=telegram,
+        codex=codex,
+    )
+
+    bindings = service.link_loaded_threads()
+
+    assert [binding.codex_thread_id for binding in bindings] == ["thread-1", "thread-2"]
+    assert telegram.created_topics == [
+        (-100100, "(blink) Loaded thread"),
+        (-100100, "(blink) Sidebar only thread"),
+    ]
+
+
 def test_link_current_thread_marks_existing_events_seen() -> None:
     config = GatewayConfig(
         telegram_bot_token="token",

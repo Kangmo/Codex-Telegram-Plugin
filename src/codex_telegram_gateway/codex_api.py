@@ -10,6 +10,7 @@ from pathlib import Path
 from codex_telegram_gateway.app_store import (
     ensure_sidebar_workspace_root,
     list_project_threads,
+    sidebar_thread_ids,
     thread_rollout_path,
 )
 from codex_telegram_gateway.artifact_detector import build_artifact_events
@@ -104,6 +105,28 @@ class CodexAppServerClient:
                 ),
             )
         return sorted(projects_by_id.values(), key=lambda project: (project.project_name, project.project_id))
+
+    def list_sidebar_threads(self) -> list[CodexThread]:
+        loaded_threads = {
+            thread.thread_id: thread
+            for thread in self.list_loaded_threads()
+        }
+        ordered_thread_ids: list[str] = []
+        seen_thread_ids: set[str] = set()
+        for thread_id in sidebar_thread_ids(self._codex_home):
+            if thread_id in seen_thread_ids:
+                continue
+            seen_thread_ids.add(thread_id)
+            ordered_thread_ids.append(thread_id)
+        for thread_id in loaded_threads:
+            if thread_id in seen_thread_ids:
+                continue
+            seen_thread_ids.add(thread_id)
+            ordered_thread_ids.append(thread_id)
+        return [
+            loaded_threads.get(thread_id) or self.read_thread(thread_id)
+            for thread_id in ordered_thread_ids
+        ]
 
     def list_all_threads(self) -> list[CodexThread]:
         raise CodexAppServerError(

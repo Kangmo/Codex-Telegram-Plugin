@@ -7,6 +7,7 @@ from codex_telegram_gateway.models import (
     CodexHistoryEntry,
     CodexProject,
     CodexThread,
+    HistorySyncState,
     HistoryViewState,
     InboundMessage,
     InteractivePromptViewState,
@@ -51,6 +52,8 @@ class DummyState:
         self.passthrough_commands: set[str] = set()
         self.command_menu_hashes: dict[str, str] = {}
         self.history_views: dict[tuple[int, int], HistoryViewState] = {}
+        self.history_sync_states: dict[tuple[int, int], HistorySyncState] = {}
+        self.history_replays: set[tuple[int, int, str, str]] = set()
         self.resume_views: dict[tuple[int, int], ResumeViewState] = {}
         self.restore_views: dict[tuple[int, int], RestoreViewState] = {}
         self.interactive_prompt_views: dict[tuple[int, int], InteractivePromptViewState] = {}
@@ -218,6 +221,9 @@ class DummyState:
     def get_outbound_message(self, codex_thread_id: str, event_id: str) -> OutboundMessage | None:
         return self.outbound_messages.get((codex_thread_id, event_id))
 
+    def outbound_message_count(self, codex_thread_id: str) -> int:
+        return sum(1 for thread_id, _event_id in self.outbound_messages if thread_id == codex_thread_id)
+
     def delete_outbound_messages(self, codex_thread_id: str) -> None:
         self.outbound_messages = {
             key: value
@@ -246,6 +252,21 @@ class DummyState:
         message_thread_id: int,
     ) -> OutboundMessage | None:
         return self.mirror_outbound_messages.get((codex_thread_id, chat_id, message_thread_id, event_id))
+
+    def mirror_outbound_message_count(
+        self,
+        codex_thread_id: str,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> int:
+        return sum(
+            1
+            for thread_id, target_chat_id, target_thread_id, _event_id in self.mirror_outbound_messages
+            if thread_id == codex_thread_id
+            and target_chat_id == chat_id
+            and target_thread_id == message_thread_id
+        )
 
     def delete_mirror_outbound_messages(self, codex_thread_id: str, *, chat_id: int) -> None:
         self.mirror_outbound_messages = {
@@ -287,6 +308,58 @@ class DummyState:
 
     def delete_topic_history(self, chat_id: int, message_thread_id: int) -> None:
         self.topic_history.pop((chat_id, message_thread_id), None)
+
+    def mark_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> None:
+        self.history_replays.add((chat_id, message_thread_id, codex_thread_id, entry_id))
+
+    def has_history_entry_replayed(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+        entry_id: str,
+    ) -> bool:
+        return (chat_id, message_thread_id, codex_thread_id, entry_id) in self.history_replays
+
+    def history_entry_replay_count(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str,
+    ) -> int:
+        return sum(
+            1
+            for replay_chat_id, replay_thread_id, replay_codex_thread_id, _entry_id in self.history_replays
+            if replay_chat_id == chat_id
+            and replay_thread_id == message_thread_id
+            and replay_codex_thread_id == codex_thread_id
+        )
+
+    def delete_history_entry_replays(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        *,
+        codex_thread_id: str | None = None,
+    ) -> None:
+        self.history_replays = {
+            replay
+            for replay in self.history_replays
+            if not (
+                replay[0] == chat_id
+                and replay[1] == message_thread_id
+                and (codex_thread_id is None or replay[2] == codex_thread_id)
+            )
+        }
 
     def create_mailbox_message(
         self,
@@ -388,6 +461,16 @@ class DummyState:
 
     def delete_history_view(self, chat_id: int, message_thread_id: int) -> None:
         self.history_views.pop((chat_id, message_thread_id), None)
+
+    def upsert_history_sync_state(self, history_sync_state: HistorySyncState) -> HistorySyncState:
+        self.history_sync_states[(history_sync_state.chat_id, history_sync_state.message_thread_id)] = history_sync_state
+        return history_sync_state
+
+    def get_history_sync_state(self, chat_id: int, message_thread_id: int) -> HistorySyncState | None:
+        return self.history_sync_states.get((chat_id, message_thread_id))
+
+    def delete_history_sync_state(self, chat_id: int, message_thread_id: int) -> None:
+        self.history_sync_states.pop((chat_id, message_thread_id), None)
 
     def upsert_resume_view(self, resume_view: ResumeViewState) -> ResumeViewState:
         self.resume_views[(resume_view.chat_id, resume_view.message_thread_id)] = resume_view
@@ -869,6 +952,9 @@ class DummyTelegramClient:
     def close_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
         self.closed_topics.append((chat_id, message_thread_id))
 
+    def delete_forum_topic(self, chat_id: int, message_thread_id: int) -> None:
+        self.closed_topics.append((chat_id, message_thread_id))
+
     def probe_topic(self, chat_id: int, message_thread_id: int) -> bool:
         return (chat_id, message_thread_id) not in self.dead_topics
 
@@ -888,6 +974,7 @@ class DummyCodexBridge:
         self._threads = {thread.thread_id: thread}
         self._events: dict[str, list[CodexEvent]] = {thread.thread_id: []}
         self._history_entries: dict[str, list[CodexHistoryEntry]] = {thread.thread_id: []}
+        self._sidebar_thread_ids = [thread.thread_id]
         self._interactive_prompts: dict[str, InteractivePrompt] = {}
         self.started_turns: list[StartedTurn] = []
         self.steered_turns: list[tuple[str, StartedTurn]] = []
@@ -906,6 +993,9 @@ class DummyCodexBridge:
 
     def list_loaded_threads(self) -> list[CodexThread]:
         return list(self._threads.values())
+
+    def list_sidebar_threads(self) -> list[CodexThread]:
+        return [self._threads[thread_id] for thread_id in self._sidebar_thread_ids]
 
     def list_loaded_projects(self) -> list[CodexProject]:
         projects: dict[str, CodexProject] = {}
@@ -956,6 +1046,14 @@ class DummyCodexBridge:
     def append_event(self, event: CodexEvent) -> None:
         self._events[event.thread_id].append(event)
 
+    def set_sidebar_threads(self, threads: list[CodexThread]) -> None:
+        self._sidebar_thread_ids = []
+        for thread in threads:
+            self._threads[thread.thread_id] = thread
+            self._events.setdefault(thread.thread_id, [])
+            self._history_entries.setdefault(thread.thread_id, [])
+            self._sidebar_thread_ids.append(thread.thread_id)
+
     def queue_interactive_prompt(self, prompt: InteractivePrompt | None) -> None:
         if prompt is None:
             return
@@ -999,6 +1097,8 @@ class DummyCodexBridge:
         self._threads[thread_id] = created_thread
         self._events[thread_id] = []
         self._history_entries[thread_id] = []
+        if thread_id not in self._sidebar_thread_ids:
+            self._sidebar_thread_ids.append(thread_id)
         self.created_threads.append(created_thread)
         return created_thread
 

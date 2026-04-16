@@ -46,7 +46,7 @@ def render_history_page(
 
     if not entries:
         return RenderedHistoryPage(
-            text=f"📋 [{display_name}] No messages yet.",
+        text=f"📋 [{display_name}] No messages yet.",
             reply_markup=None,
             page_index=0,
             total_pages=1,
@@ -57,7 +57,7 @@ def render_history_page(
     for entry in entries:
         timestamp = _format_timestamp(entry.timestamp)
         separator = f"───── {timestamp} ─────" if timestamp else "─────────────"
-        entry_blocks.append(f"{separator}\n\n{_history_entry_text(entry)}")
+        entry_blocks.append(f"{separator}\n\n{render_history_entry_text(entry)}")
 
     pages = [
         f"{header}\n\n{page_body}".rstrip()
@@ -114,7 +114,7 @@ def _format_timestamp(timestamp: str | None) -> str:
         return ""
 
 
-def _history_entry_text(entry: CodexHistoryEntry) -> str:
+def render_history_entry_text(entry: CodexHistoryEntry) -> str:
     if entry.kind == "user":
         return f"👤 {entry.text}"
     if entry.kind == "tool":
