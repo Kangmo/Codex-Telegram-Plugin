@@ -1,6 +1,7 @@
 import argparse
 import getpass
 import json
+import os
 import sys
 import threading
 import time
@@ -10,6 +11,12 @@ from codex_telegram_gateway.commands_catalog import register_bot_commands_if_cha
 from codex_telegram_gateway.codex_api import CodexAppServerClient, CodexAppServerError
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon
+from codex_telegram_gateway.daemon_manager import (
+    get_daemon_status,
+    read_log_tail,
+    start_daemon,
+    stop_daemon,
+)
 from codex_telegram_gateway.install_config import (
     build_managed_env,
     load_existing_env,
@@ -75,6 +82,11 @@ def main(argv: list[str] | None = None) -> None:
     plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command", required=True)
     plugin_subparsers.add_parser("install", help="Create or update the personal marketplace entry.")
     plugin_subparsers.add_parser("status", help="Show current personal marketplace registration status.")
+    subparsers.add_parser("start", help="Start the local gateway daemon in the background.")
+    subparsers.add_parser("stop", help="Stop the local gateway daemon.")
+    subparsers.add_parser("restart", help="Restart the local gateway daemon.")
+    subparsers.add_parser("status", help="Show local daemon runtime status.")
+    subparsers.add_parser("logs", help="Show local daemon logs.")
     subparsers.add_parser(
         "sync-once",
         help="Run one Telegram poll, one inbound delivery, and one outbound Codex sync pass.",
@@ -104,6 +116,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "plugin":
             _run_plugin_command(plugin_command=args.plugin_command)
+            return
+        if args.command in {"start", "stop", "restart", "status", "logs"}:
+            _run_local_daemon_command(command=args.command)
             return
         config = GatewayConfig.from_env(Path(args.env_file))
         state = SqliteGatewayState(config.state_database_path)
@@ -340,6 +355,43 @@ def _run_plugin_command(*, plugin_command: str) -> None:
         print(f"Source path: {source_path}")
         return
     raise ValueError(f"Unsupported plugin command: {plugin_command}")
+
+
+def _run_local_daemon_command(*, command: str) -> None:
+    paths = resolve_runtime_paths()
+    ensure_runtime_directories(paths)
+    if command == "start":
+        status = start_daemon(paths=paths)
+        print(f"Started local daemon (pid {status.pid})")
+        print(f"Log file: {status.log_file}")
+        return
+    if command == "stop":
+        status = stop_daemon(paths=paths)
+        print(f"Stopped local daemon. Log file: {status.log_file}")
+        return
+    if command == "restart":
+        stop_daemon(paths=paths)
+        status = start_daemon(paths=paths)
+        print(f"Restarted local daemon (pid {status.pid})")
+        print(f"Log file: {status.log_file}")
+        return
+    if command == "status":
+        status = get_daemon_status(paths=paths)
+        state = "running" if status.running else "stopped"
+        print(f"Daemon status: {state}")
+        if status.pid is not None:
+            print(f"PID: {status.pid}")
+        print(f"Env file: {status.env_file}")
+        print(f"Log file: {status.log_file}")
+        return
+    if command == "logs":
+        log_tail = read_log_tail(paths=paths)
+        if log_tail:
+            print(log_tail, end="" if log_tail.endswith(os.linesep) else os.linesep)
+            return
+        print(f"No daemon log found at {paths.daemon_log_path}")
+        return
+    raise ValueError(f"Unsupported local daemon command: {command}")
 
 
 if __name__ == "__main__":
