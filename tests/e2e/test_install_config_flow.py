@@ -60,3 +60,33 @@ def test_configure_command_preserves_existing_values_on_blank_input(
         f"CODEX_TELEGRAM_TOOLBAR_CONFIG={runtime_home / 'toolbar.toml'}\n"
     )
     assert "Updated gateway environment" in capsys.readouterr().out
+
+
+def test_install_command_accepts_non_interactive_overrides(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    cli.main(
+        [
+            "install",
+            "--bot-token",
+            "123456:telegram-token",
+            "--allowed-user-id",
+            "6013473151",
+            "--group-chat-id",
+            "-5251936830",
+        ]
+    )
+
+    env_file = tmp_path / ".codex-telegram" / ".env"
+    assert env_file.read_text() == (
+        "TELEGRAM_BOT_TOKEN=123456:telegram-token\n"
+        "TELEGRAM_ALLOWED_USER_IDS=6013473151\n"
+        "TELEGRAM_DEFAULT_CHAT_ID=-5251936830\n"
+        f"CODEX_TELEGRAM_STATE_DB={tmp_path / '.codex-telegram' / 'gateway.db'}\n"
+        f"CODEX_TELEGRAM_TOOLBAR_CONFIG={tmp_path / '.codex-telegram' / 'toolbar.toml'}\n"
+    )
+    assert "Configured gateway environment" in capsys.readouterr().out

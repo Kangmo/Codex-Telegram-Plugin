@@ -132,3 +132,20 @@ def test_render_env_file_skips_missing_managed_keys() -> None:
     assert render_env_file({"CODEX_TELEGRAM_WHISPER_PROVIDER": "openai"}) == (
         "CODEX_TELEGRAM_WHISPER_PROVIDER=openai\n"
     )
+
+
+def test_prompt_install_answers_uses_non_interactive_overrides_without_prompting() -> None:
+    answers = prompt_install_answers(
+        existing_env={},
+        bot_token_override="test-token",
+        allowed_user_id_override=6013473151,
+        group_chat_id_override=-5251936830,
+        input_func=lambda _prompt="": (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+        secret_input_func=lambda _prompt="": (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+    )
+
+    assert answers == InstallAnswers(
+        telegram_bot_token="test-token",
+        telegram_allowed_user_id=6013473151,
+        telegram_default_chat_id=-5251936830,
+    )

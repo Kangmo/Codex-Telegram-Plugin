@@ -95,25 +95,32 @@ def write_env_file(env_file: Path, values: Mapping[str, str]) -> None:
 def prompt_install_answers(
     *,
     existing_env: Mapping[str, str] | None = None,
+    bot_token_override: str | None = None,
+    allowed_user_id_override: int | None = None,
     group_chat_id_override: int | None = None,
     input_func=input,
     secret_input_func=input,
 ) -> InstallAnswers:
     """Collect interactive install or reconfigure values."""
     existing = dict(existing_env or {})
-    token = _prompt_secret(
-        "Telegram bot token",
+    token = _resolve_secret_value(
+        bot_token_override,
+        label="Telegram bot token",
         existing_value=existing.get("TELEGRAM_BOT_TOKEN"),
         secret_input_func=secret_input_func,
     )
-    allowed_user_id = parse_optional_int(
-        input_func(_prompt_with_default("Numeric allowed Telegram user ID", existing.get("TELEGRAM_ALLOWED_USER_IDS"))),
+    allowed_user_id = _resolve_optional_int(
+        allowed_user_id_override,
+        label="Numeric allowed Telegram user ID",
         existing_value=_maybe_int(existing.get("TELEGRAM_ALLOWED_USER_IDS")),
+        input_func=input_func,
     )
     if group_chat_id_override is None:
-        group_chat_id = parse_optional_int(
-            input_func(_prompt_with_default("Telegram group chat ID", existing.get("TELEGRAM_DEFAULT_CHAT_ID"))),
+        group_chat_id = _resolve_optional_int(
+            None,
+            label="Telegram group chat ID",
             existing_value=_maybe_int(existing.get("TELEGRAM_DEFAULT_CHAT_ID")),
+            input_func=input_func,
         )
     else:
         group_chat_id = group_chat_id_override
@@ -139,6 +146,42 @@ def _prompt_secret(
     raise ValueError(f"{label} is required")
 
 
+def _resolve_secret_value(
+    override_value: str | None,
+    *,
+    label: str,
+    existing_value: str | None,
+    secret_input_func,
+) -> str:
+    if override_value is not None:
+        normalized = override_value.strip()
+        if normalized:
+            return normalized
+        if existing_value:
+            return existing_value
+        raise ValueError(f"{label} is required")
+    return _prompt_secret(
+        label,
+        existing_value=existing_value,
+        secret_input_func=secret_input_func,
+    )
+
+
+def _resolve_optional_int(
+    override_value: int | None,
+    *,
+    label: str,
+    existing_value: int | None,
+    input_func,
+) -> int:
+    if override_value is not None:
+        return override_value
+    return parse_optional_int(
+        input_func(_prompt_with_default(label, _stringify_optional_int(existing_value))),
+        existing_value=existing_value,
+    )
+
+
 def _prompt_with_default(
     label: str,
     existing_value: str | None,
@@ -156,3 +199,9 @@ def _maybe_int(raw_value: str | None) -> int | None:
     if raw_value is None or raw_value.strip() == "":
         return None
     return int(raw_value)
+
+
+def _stringify_optional_int(value: int | None) -> str | None:
+    if value is None:
+        return None
+    return str(value)

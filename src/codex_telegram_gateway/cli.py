@@ -69,6 +69,17 @@ def main(argv: list[str] | None = None) -> None:
         help="Interactively configure the managed gateway runtime.",
     )
     install_parser.add_argument(
+        "--bot-token",
+        default=None,
+        help="Set the Telegram bot token non-interactively.",
+    )
+    install_parser.add_argument(
+        "--allowed-user-id",
+        type=int,
+        default=None,
+        help="Set the allowed Telegram user ID non-interactively.",
+    )
+    install_parser.add_argument(
         "--group-chat-id",
         type=int,
         default=None,
@@ -77,6 +88,17 @@ def main(argv: list[str] | None = None) -> None:
     configure_parser = subparsers.add_parser(
         "configure",
         help="Update the managed gateway runtime configuration.",
+    )
+    configure_parser.add_argument(
+        "--bot-token",
+        default=None,
+        help="Set the Telegram bot token non-interactively.",
+    )
+    configure_parser.add_argument(
+        "--allowed-user-id",
+        type=int,
+        default=None,
+        help="Set the allowed Telegram user ID non-interactively.",
     )
     configure_parser.add_argument(
         "--group-chat-id",
@@ -127,10 +149,20 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         if args.command == "install":
-            _run_install_or_configure(group_chat_id_override=args.group_chat_id, is_install=True)
+            _run_install_or_configure(
+                bot_token_override=args.bot_token,
+                allowed_user_id_override=args.allowed_user_id,
+                group_chat_id_override=args.group_chat_id,
+                is_install=True,
+            )
             return
         if args.command == "configure":
-            _run_install_or_configure(group_chat_id_override=args.group_chat_id, is_install=False)
+            _run_install_or_configure(
+                bot_token_override=args.bot_token,
+                allowed_user_id_override=args.allowed_user_id,
+                group_chat_id_override=args.group_chat_id,
+                is_install=False,
+            )
             return
         if args.command == "plugin":
             _run_plugin_command(plugin_command=args.plugin_command)
@@ -333,6 +365,8 @@ def _register_bot_commands(
 
 def _run_install_or_configure(
     *,
+    bot_token_override: str | None,
+    allowed_user_id_override: int | None,
     group_chat_id_override: int | None,
     is_install: bool,
 ) -> None:
@@ -341,6 +375,8 @@ def _run_install_or_configure(
     existing_env = load_existing_env(paths.env_file)
     answers = prompt_install_answers(
         existing_env=existing_env,
+        bot_token_override=bot_token_override,
+        allowed_user_id_override=allowed_user_id_override,
         group_chat_id_override=group_chat_id_override,
         input_func=input,
         secret_input_func=getpass.getpass,
