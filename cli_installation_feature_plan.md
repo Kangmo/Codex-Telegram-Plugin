@@ -741,5 +741,13 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-09-readme-and-operator-docs`
-- Feature commit: pending
-- Merge commit: pending
+- Feature commit: `6a1a4f5`
+- Merge commit: `15dfcf9`
+
+## Final Verification
+
+- Full repo verification on `main`:
+  - `PYTHONPATH=src .venv/bin/python -m pytest -q`
+  - result: `479 passed`
+- Installer/CLI feature inventory status:
+  - CI-01 through CI-09 complete

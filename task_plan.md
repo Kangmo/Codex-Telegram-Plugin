@@ -6,9 +6,9 @@ Ship a production-ready installer and operator CLI for the Codex App Telegram ga
 ## Phases
 - [x] Phase 1: Review current gateway runtime, existing docs, official Codex plugin install docs, and `ccgram` CLI/service patterns
 - [x] Phase 2: Write the dedicated installer/CLI feature tracker markdown
-- [ ] Phase 3: Implement installer and operations features one by one with tests, code review notes, and branch/merge discipline
-- [ ] Phase 4: Update `README.md` with complete setup and operating instructions
-- [ ] Phase 5: Run full verification and finalize deliverables
+- [x] Phase 3: Implement installer and operations features one by one with tests, code review notes, and branch/merge discipline
+- [x] Phase 4: Update `README.md` with complete setup and operating instructions
+- [x] Phase 5: Run full verification and finalize deliverables
 
 ## Key Questions
 1. What runtime layout cleanly separates source, config, logs, and state for a user-installed gateway?
@@ -27,4 +27,4 @@ Ship a production-ready installer and operator CLI for the Codex App Telegram ga
 - The repo currently has no top-level `README.md`; the new operator guide will need to be written from scratch rather than updated in place.
 
 ## Status
-**Phase 5** - the final README and operator guide is complete on its feature branch; next is full verification on `main`.
+**Complete** - installer/CLI features CI-01 through CI-09 are complete and the full test suite passed on `main` (`479 passed`).

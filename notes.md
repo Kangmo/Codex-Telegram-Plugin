@@ -338,6 +338,9 @@
 ### CI-09 landed decisions
 - Wrote the root README from scratch instead of spreading install and operator guidance across multiple small markdown files.
 - Kept the README opinionated around the managed install paths and the `codex-telegram-gateway` CLI so the operator story stays consistent with the implemented tooling.
+
+### Final verification
+- `PYTHONPATH=src .venv/bin/python -m pytest -q` -> `479 passed`
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
