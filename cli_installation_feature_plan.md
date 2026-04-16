@@ -71,9 +71,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-06: macOS launchd Service Install/Start/Stop/Status/Uninstall
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-07: Self-Update From Git Origin Clone
 - [ ] Implemented
@@ -580,5 +580,49 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-05-local-daemon-lifecycle`
+- Feature commit: `0bbc163`
+- Merge commit: `4bdfea4`
+
+### CI-06: macOS launchd Service Install/Start/Stop/Status/Uninstall
+
+Implementation decisions:
+- Added `launchd_service.py` to own:
+  - current-user launchctl domain resolution
+  - plist rendering
+  - `bootstrap`, `bootout`, and `print` command wrappers
+- Added CLI subcommands:
+  - `service install`
+  - `service uninstall`
+  - `service start`
+  - `service stop`
+  - `service restart`
+  - `service status`
+- The launchd plist now uses:
+  - label `com.kangmo.codex-telegram-gateway`
+  - `RunAtLoad = true`
+  - `KeepAlive = true`
+  - working directory = managed install root
+  - stdout/stderr = managed daemon log file
+  - environment `HOME = <install-root-parent>`
+- Service execution uses the same installed venv Python and managed env file as the local daemon lifecycle commands.
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_launchd_service_cli.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_launchd_service_cli.py:1)
+  - [tests/unit/test_launchd_service.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_launchd_service.py:1)
+- Green phase verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_launchd_service_cli.py tests/unit/test_launchd_service.py -q`
+  - result: `4 passed`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_launchd_service_cli.py tests/unit/test_launchd_service.py --cov=codex_telegram_gateway.launchd_service --cov-report=term-missing -q`
+  - result: `21/23 = 91%`
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/launchd_service.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/launchd_service.py:1) and the `service` branch in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:84).
+- Kept the launchd module deliberately narrow so service registration stays separate from the local daemon and update logic.
+- Removed the temporary `NotImplementedError` handling once the service commands were fully wired.
+
+Branch and merge record:
+- Feature branch: `feature/ci-06-launchd-service-management`
 - Feature commit: pending
 - Merge commit: pending
