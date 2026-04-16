@@ -27,4 +27,4 @@ Ship a production-ready installer and operator CLI for the Codex App Telegram ga
 - The repo currently has no top-level `README.md`; the new operator guide will need to be written from scratch rather than updated in place.
 
 ## Status
-**Phase 4** - CI-08 operator diagnostics and unified status summary is complete on its feature branch; next up is the final README and operator documentation pass.
+**Phase 5** - the final README and operator guide is complete on its feature branch; next is full verification on `main`.

@@ -86,9 +86,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-09: README and Install/Operator Documentation
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ## Detailed Feature Plans
 
@@ -700,5 +700,46 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-08-operator-diagnostics-and-status`
+- Feature commit: `5c98bfd`
+- Merge commit: `ed76d13`
+
+### CI-09: README and Install/Operator Documentation
+
+Implementation decisions:
+- Added a top-level [README.md](/Users/kangmo/sacle/src/codex-telegram/README.md:1) from scratch because the repo previously had no operator-facing root guide.
+- The README now covers:
+  - what the project is
+  - why it exists
+  - how the plugin/runtime split works
+  - one-line install
+  - Telegram bot creation
+  - BotFather settings including `Privacy Mode` and `Topics`
+  - group creation and topic enablement
+  - how to obtain the numeric user ID
+  - how to obtain the group chat ID
+  - Codex App `Plugins` enablement
+  - all install/reconfigure/plugin/runtime/service/update commands
+  - troubleshooting and day-2 operations
+
+Automated test coverage:
+- Added [tests/unit/test_readme.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_readme.py:1).
+- Verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_readme.py -q`
+  - result: `1 passed`
+- The README contract test checks every required operator topic requested in this task, including install/update/service commands and Telegram/Codex setup terms.
+
+Line-by-line proof reading:
+- Reviewed [README.md](/Users/kangmo/sacle/src/codex-telegram/README.md:1) end to end against the implemented CLI surface.
+- Verified that every documented command exists:
+  - `configure`
+  - `update`
+  - `start`
+  - `stop`
+  - `service install`
+  - `service status`
+- Verified the README uses the real managed install path and real one-line bootstrap URL.
+
+Branch and merge record:
+- Feature branch: `feature/ci-09-readme-and-operator-docs`
 - Feature commit: pending
 - Merge commit: pending
