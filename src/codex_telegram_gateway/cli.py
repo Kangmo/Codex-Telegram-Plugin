@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import json
 import sys
 import threading
@@ -9,13 +10,20 @@ from codex_telegram_gateway.commands_catalog import register_bot_commands_if_cha
 from codex_telegram_gateway.codex_api import CodexAppServerClient, CodexAppServerError
 from codex_telegram_gateway.config import GatewayConfig
 from codex_telegram_gateway.daemon import GatewayDaemon
+from codex_telegram_gateway.install_config import (
+    build_managed_env,
+    load_existing_env,
+    prompt_install_answers,
+    write_env_file,
+)
+from codex_telegram_gateway.runtime_paths import ensure_runtime_directories, resolve_runtime_paths
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 from codex_telegram_gateway.sync_lock import try_acquire_sync_lock
 from codex_telegram_gateway.telegram_api import TelegramApiError, TelegramBotClient
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Codex Telegram gateway utility.")
     parser.add_argument(
         "--env-file",
@@ -36,6 +44,26 @@ def main() -> None:
         "link-all-threads",
         help=argparse.SUPPRESS,
     )
+    install_parser = subparsers.add_parser(
+        "install",
+        help="Interactively configure the managed gateway runtime.",
+    )
+    install_parser.add_argument(
+        "--group-chat-id",
+        type=int,
+        default=None,
+        help="Override the prompted Telegram group chat ID.",
+    )
+    configure_parser = subparsers.add_parser(
+        "configure",
+        help="Update the managed gateway runtime configuration.",
+    )
+    configure_parser.add_argument(
+        "--group-chat-id",
+        type=int,
+        default=None,
+        help="Override the prompted Telegram group chat ID.",
+    )
     subparsers.add_parser(
         "sync-once",
         help="Run one Telegram poll, one inbound delivery, and one outbound Codex sync pass.",
@@ -55,8 +83,14 @@ def main() -> None:
         help="Create a Telegram topic for the current Codex thread.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
+        if args.command == "install":
+            _run_install_or_configure(group_chat_id_override=args.group_chat_id, is_install=True)
+            return
+        if args.command == "configure":
+            _run_install_or_configure(group_chat_id_override=args.group_chat_id, is_install=False)
+            return
         config = GatewayConfig.from_env(Path(args.env_file))
         state = SqliteGatewayState(config.state_database_path)
         telegram = TelegramBotClient(config.telegram_bot_token)
@@ -242,6 +276,32 @@ def _register_bot_commands(
         )
     except TelegramApiError:
         return
+
+
+def _run_install_or_configure(
+    *,
+    group_chat_id_override: int | None,
+    is_install: bool,
+) -> None:
+    paths = resolve_runtime_paths()
+    ensure_runtime_directories(paths)
+    existing_env = load_existing_env(paths.env_file)
+    answers = prompt_install_answers(
+        existing_env=existing_env,
+        group_chat_id_override=group_chat_id_override,
+        input_func=input,
+        secret_input_func=getpass.getpass,
+    )
+    write_env_file(
+        paths.env_file,
+        build_managed_env(
+            paths=paths,
+            answers=answers,
+            existing_env=existing_env,
+        ),
+    )
+    action = "Configured" if is_install else "Updated"
+    print(f"{action} gateway environment at {paths.env_file}")
 
 
 if __name__ == "__main__":

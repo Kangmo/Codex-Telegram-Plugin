@@ -51,9 +51,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-02: Interactive Install and Reconfigure Flows
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-03: One-Line Shell Bootstrap Installer
 - [ ] Implemented
@@ -409,5 +409,48 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-01-runtime-layout-and-path-discovery`
+- Feature commit: `549c0b6`
+- Merge commit: `8bf8cb3`
+
+### CI-02: Interactive Install and Reconfigure Flows
+
+Implementation decisions:
+- Added `install_config.py` to isolate interactive config prompting, managed env merging, rendering, and disk writes from the main runtime CLI.
+- `install` and `configure` now target the managed runtime env at `~/.codex-telegram/.env` by default.
+- Reconfigure preserves existing values when the operator presses Enter on token or numeric prompts.
+- `configure --group-chat-id <id>` can update the bound Telegram group without re-prompting for the group ID.
+- Managed env output now sets:
+  - `TELEGRAM_BOT_TOKEN`
+  - `TELEGRAM_ALLOWED_USER_IDS`
+  - `TELEGRAM_DEFAULT_CHAT_ID`
+  - `CODEX_TELEGRAM_STATE_DB`
+  - `CODEX_TELEGRAM_TOOLBAR_CONFIG`
+- Existing optional keys are preserved so later voice/shell settings survive reconfiguration.
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_install_config_flow.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_install_config_flow.py:1)
+  - [tests/unit/test_install_config.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_install_config.py:1)
+- Red phase:
+  - missing-module failure for `install_config`
+  - stub `NotImplementedError` failures for helper functions and CLI commands
+- Green phase verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_install_config_flow.py tests/unit/test_install_config.py -q`
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_cli.py tests/unit/test_config.py -q`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_install_config_flow.py tests/unit/test_install_config.py tests/unit/test_cli.py tests/unit/test_config.py --cov=codex_telegram_gateway.install_config --cov-report=term-missing -q`
+  - result: `79/79 = 100%` for `install_config.py`
+- CLI dispatch validation:
+  - the end-to-end tests execute `cli.main(["install"])` and `cli.main(["configure", "--group-chat-id", ...])`, so the new install/configure command path is exercised through the real argparse surface.
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/install_config.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/install_config.py:1) and the new install/configure section in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:26).
+- Found and fixed two proofread issues before freeze:
+  - uncovered branches in env parsing/rendering and blank-required integer handling
+  - inconsistent default-argument spacing in `prompt_install_answers`
+- Verified that monkeypatched interactive input still works because the CLI passes `input` and `getpass.getpass` at call time instead of relying on frozen defaults.
+
+Branch and merge record:
+- Feature branch: `feature/ci-02-interactive-install-and-reconfigure`
 - Feature commit: pending
 - Merge commit: pending

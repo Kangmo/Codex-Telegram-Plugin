@@ -305,6 +305,11 @@
 - Added `runtime_paths.py` as the managed path layer so later install/service/update commands do not each re-derive paths differently.
 - Marketplace source paths are rendered relative to `HOME` with a `./` prefix when possible, matching Codex local marketplace expectations.
 - Absolute marketplace source paths remain supported for non-home install roots to avoid breaking custom installations.
+
+### CI-02 landed decisions
+- Added `install_config.py` so install/reconfigure prompting and env-file management remain separate from the long-running gateway runtime code.
+- Managed `.env` generation now preserves unrelated optional keys instead of wiping advanced settings during reconfigure.
+- `configure --group-chat-id` supports a non-interactive chat-ID update while still allowing blank-token and blank-user prompts to keep current values.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`

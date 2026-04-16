@@ -27,4 +27,4 @@ Ship a production-ready installer and operator CLI for the Codex App Telegram ga
 - The repo currently has no top-level `README.md`; the new operator guide will need to be written from scratch rather than updated in place.
 
 ## Status
-**Phase 3** - CI-01 runtime path discovery is complete on its feature branch; next up is the interactive install and reconfigure flow.
+**Phase 3** - CI-02 interactive install and reconfigure is complete on its feature branch; next up is the one-line shell bootstrap installer.
