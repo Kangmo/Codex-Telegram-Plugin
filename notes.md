@@ -334,6 +334,10 @@
 ### CI-08 landed decisions
 - Expanded top-level `status` into an operator summary instead of creating yet another diagnostics command, keeping the quick daemon state at the top while adding install/runtime/plugin/service visibility.
 - Left live launchd probing in `service status`; the operator summary only reports whether the launchd plist is installed.
+
+### CI-09 landed decisions
+- Wrote the root README from scratch instead of spreading install and operator guidance across multiple small markdown files.
+- Kept the README opinionated around the managed install paths and the `codex-telegram-gateway` CLI so the operator story stays consistent with the implemented tooling.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
