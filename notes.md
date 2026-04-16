@@ -310,6 +310,10 @@
 - Added `install_config.py` so install/reconfigure prompting and env-file management remain separate from the long-running gateway runtime code.
 - Managed `.env` generation now preserves unrelated optional keys instead of wiping advanced settings during reconfigure.
 - `configure --group-chat-id` supports a non-interactive chat-ID update while still allowing blank-token and blank-user prompts to keep current values.
+
+### CI-03 landed decisions
+- Added a thin POSIX bootstrap script at `install/install.sh` so the install story can be a one-liner while still delegating real configuration logic to the Python CLI.
+- Chose `git pull --ff-only` for refreshing an existing dedicated checkout during bootstrap, keeping the initial installer conservative until the richer `update` command lands.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`

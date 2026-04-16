@@ -56,9 +56,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-03: One-Line Shell Bootstrap Installer
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-04: Codex App Marketplace Install/Repair
 - [ ] Implemented
@@ -452,5 +452,42 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-02-interactive-install-and-reconfigure`
+- Feature commit: `c9a0db0`
+- Merge commit: `746616a`
+
+### CI-03: One-Line Shell Bootstrap Installer
+
+Implementation decisions:
+- Added [install/install.sh](/Users/kangmo/sacle/src/codex-telegram/install/install.sh:1) as a POSIX `sh` bootstrap entrypoint suitable for `curl -fsSL ... | sh`.
+- The script now:
+  - verifies `git` and `python3`
+  - clones the repo on first install
+  - refreshes an existing dedicated checkout with `git -C <install-root> pull --ff-only`
+  - creates a virtualenv at `<install-root>/.venv`
+  - installs the package into that venv
+  - hands off to `python -m codex_telegram_gateway.cli install` for interactive Telegram configuration
+- Made repo URL and install root overrideable through:
+  - `CODEX_TELEGRAM_REPO_URL`
+  - `CODEX_TELEGRAM_INSTALL_ROOT`
+- Kept the script intentionally thin so update, service control, and plugin wiring remain in the Python CLI where they are easier to test and evolve.
+
+Automated test coverage:
+- Added [tests/e2e/test_install_script.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_install_script.py:1).
+- Covered shell-level operational branches:
+  1. fresh install path uses `git clone`
+  2. existing checkout path uses `git -C ... pull --ff-only`
+  3. missing `git` fails fast with a clear error
+- Verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_install_script.py -q`
+  - result: `3 passed`
+- Feature-specific operational branch coverage: `3/3 = 100%` for the script's explicitly supported control paths.
+
+Line-by-line proof reading:
+- Reviewed [install/install.sh](/Users/kangmo/sacle/src/codex-telegram/install/install.sh:1) and the fake-toolchain smoke test end to end.
+- Confirmed the script stays within the minimal bootstrap contract and does not duplicate logic that should live in the Python CLI.
+- Added the missing-prerequisite test after proof review so the `require_command` failure path was covered rather than assumed.
+
+Branch and merge record:
+- Feature branch: `feature/ci-03-one-line-shell-bootstrap-installer`
 - Feature commit: pending
 - Merge commit: pending
