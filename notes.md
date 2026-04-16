@@ -314,6 +314,10 @@
 ### CI-03 landed decisions
 - Added a thin POSIX bootstrap script at `install/install.sh` so the install story can be a one-liner while still delegating real configuration logic to the Python CLI.
 - Chose `git pull --ff-only` for refreshing an existing dedicated checkout during bootstrap, keeping the initial installer conservative until the richer `update` command lands.
+
+### CI-04 landed decisions
+- Added `plugin install` and `plugin status` so local Codex marketplace registration is no longer a manual JSON edit.
+- Updated the bootstrap installer to run `plugin install` after interactive gateway configuration, so the one-line setup now covers both runtime config and plugin marketplace wiring.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`

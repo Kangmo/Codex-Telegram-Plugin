@@ -27,4 +27,4 @@ Ship a production-ready installer and operator CLI for the Codex App Telegram ga
 - The repo currently has no top-level `README.md`; the new operator guide will need to be written from scratch rather than updated in place.
 
 ## Status
-**Phase 3** - CI-03 one-line bootstrap installer is complete on its feature branch; next up is Codex App marketplace install and repair commands.
+**Phase 3** - CI-04 Codex App marketplace install and repair is complete on its feature branch; next up is local daemon start/stop/restart/status/logs.

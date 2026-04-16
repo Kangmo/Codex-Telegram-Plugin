@@ -61,9 +61,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-04: Codex App Marketplace Install/Repair
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-05: Local Daemon Start/Stop/Restart/Status/Logs
 - [ ] Implemented
@@ -489,5 +489,48 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-03-one-line-shell-bootstrap-installer`
+- Feature commit: `e6ce260`
+- Merge commit: `8760f71`
+
+### CI-04: Codex App Marketplace Install/Repair
+
+Implementation decisions:
+- Added `plugin_installation.py` as the marketplace JSON owner for:
+  - default personal marketplace payload
+  - local plugin entry rendering
+  - idempotent plugin upsert
+  - current-entry lookup
+- Added CLI commands:
+  - `plugin install`
+  - `plugin status`
+- The personal marketplace entry now points to the managed install root through the home-relative path from `RuntimePaths.marketplace_source_path`.
+- Chose the personal marketplace metadata:
+  - marketplace name `codex-local`
+  - display name `Codex Local Plugins`
+  - plugin category `Productivity`
+  - policy `{installation: AVAILABLE, authentication: ON_INSTALL}`
+- Updated the bootstrap installer so one-line install now performs:
+  1. interactive gateway env setup
+  2. plugin marketplace registration
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_plugin_install_flow.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_plugin_install_flow.py:1)
+  - [tests/unit/test_plugin_installation.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_plugin_installation.py:1)
+- Updated [tests/e2e/test_install_script.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_install_script.py:1) so the bootstrap flow asserts the extra `plugin install` handoff.
+- Green phase verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_plugin_install_flow.py tests/unit/test_plugin_installation.py tests/e2e/test_install_script.py -q`
+  - result: `10 passed`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_plugin_install_flow.py tests/unit/test_plugin_installation.py --cov=codex_telegram_gateway.plugin_installation --cov-report=term-missing -q`
+  - result: `27/27 = 100%`
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/plugin_installation.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/plugin_installation.py:1), the new plugin CLI branch in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:71), and the updated [install/install.sh](/Users/kangmo/sacle/src/codex-telegram/install/install.sh:1).
+- Added the no-registration finder test during proofread so non-dict marketplace entries and unrelated plugins were explicitly handled instead of assumed.
+- Confirmed `plugin status` uses the same runtime path model as `plugin install`, so CLI output and actual file writes cannot drift.
+
+Branch and merge record:
+- Feature branch: `feature/ci-04-marketplace-install-and-repair`
 - Feature commit: pending
 - Merge commit: pending
