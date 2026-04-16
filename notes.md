@@ -258,6 +258,53 @@
 - Unbind now clears pending turn state, outbound message mappings, topic-scoped history/resume views, topic recall history, and pending mirror-creation jobs for the detached thread.
 - Unbind leaves the Codex thread alive, strips topic-status prefixes, and returns the topic to unbound project-picker mode on the next inbound message.
 - Mirror topics explicitly reject `/gateway unbind`; when a primary topic is unbound, its mirrors are detached too because the current sync loop is primary-binding anchored.
+
+## Installer and Operations CLI Notes
+
+### Additional sources reviewed
+- `https://github.com/alexei-led/ccgram`
+  - `/tmp/ccgram-review/src/ccgram/cli.py`
+  - `/tmp/ccgram-review/README.md`
+  - `/tmp/ccgram-review/docs/guides.md`
+- `https://developers.openai.com/codex/plugins/build`
+  - local plugin install section
+  - marketplace metadata section
+
+### Key findings for this workstream
+- `ccgram` exposes a practical operator-facing surface:
+  - top-level CLI with `run`, `status`, `doctor`, and upgrade guidance
+  - docs for direct runtime control and service-style operation
+- The Codex plugin docs explicitly support local plugin registration through:
+  - `~/.agents/plugins/marketplace.json`
+  - `source.path` values relative to the marketplace root and starting with `./`
+- Codex caches installed local plugins under `~/.codex/plugins/cache/...`, so local-source updates still require a Codex restart to refresh the installed copy.
+- This repo currently lacks:
+  - a user-friendly install command
+  - a reconfigure command
+  - a background daemon manager
+  - macOS service registration helpers
+  - a top-level `README.md`
+
+### Chosen direction
+- Install source checkout: `~/.codex-telegram-plugin`
+- Runtime home: `~/.codex-telegram`
+- Managed env file: `~/.codex-telegram/.env`
+- Personal marketplace path: `~/.agents/plugins/marketplace.json`
+- One-line installer:
+  - shell script clones or refreshes the checkout
+  - creates a venv
+  - installs the package
+  - runs the interactive CLI install flow
+- Update strategy:
+  - discover `origin`
+  - clone fresh into a temp directory
+  - sync files into the install root
+  - preserve runtime state and config outside the checkout
+
+### CI-01 landed decisions
+- Added `runtime_paths.py` as the managed path layer so later install/service/update commands do not each re-derive paths differently.
+- Marketplace source paths are rendered relative to `HOME` with a `./` prefix when possible, matching Codex local marketplace expectations.
+- Absolute marketplace source paths remain supported for non-home install roots to avoid breaking custom installations.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
