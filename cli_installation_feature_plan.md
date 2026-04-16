@@ -81,9 +81,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-08: Operator Diagnostics and Status Summary
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-09: README and Install/Operator Documentation
 - [ ] Implemented
@@ -664,5 +664,41 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-07-self-update-from-origin-clone`
+- Feature commit: `8ae3b62`
+- Merge commit: `8a74996`
+
+### CI-08: Operator Diagnostics and Status Summary
+
+Implementation decisions:
+- Added `operator_status.py` to own the operator summary model and rendering.
+- Expanded top-level `status` from daemon-only state into a wider operator summary that now reports:
+  - daemon running/stopped state
+  - pid when present
+  - env file path
+  - log file path
+  - install root
+  - runtime home
+  - marketplace registration state
+  - launchd plist installation state
+- Kept the first line as `Daemon status: ...` so the newer operator summary remains backward-compatible with the daemon-lifecycle tests and with quick human scanning.
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_status_cli.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_status_cli.py:1)
+  - [tests/unit/test_operator_status.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_operator_status.py:1)
+- Verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_status_cli.py tests/unit/test_operator_status.py tests/e2e/test_daemon_cli_flow.py -q`
+  - result: `3 passed`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_status_cli.py tests/unit/test_operator_status.py --cov=codex_telegram_gateway.operator_status --cov-report=term-missing -q`
+  - result: `18/18 = 100%`
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/operator_status.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/operator_status.py:1) and the `status` path in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:105).
+- Confirmed the operator summary is composed from existing runtime primitives rather than reimplementing daemon or plugin detection logic.
+- Verified that marketplace and launchd installation checks are file-state based here, leaving live `launchctl` probing to the dedicated `service status` command.
+
+Branch and merge record:
+- Feature branch: `feature/ci-08-operator-diagnostics-and-status`
 - Feature commit: pending
 - Merge commit: pending
