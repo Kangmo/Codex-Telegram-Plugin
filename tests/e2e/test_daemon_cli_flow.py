@@ -14,8 +14,8 @@ def test_local_daemon_start_status_logs_and_stop(tmp_path, monkeypatch, capsys) 
         "\n".join(
             [
                 "TELEGRAM_BOT_TOKEN=test-token",
-                "TELEGRAM_ALLOWED_USER_IDS=6013473151",
-                "TELEGRAM_DEFAULT_CHAT_ID=-5251936830",
+                "TELEGRAM_ALLOWED_USER_IDS=1234567890",
+                "TELEGRAM_DEFAULT_CHAT_ID=-1001234567890",
             ]
         )
         + "\n"

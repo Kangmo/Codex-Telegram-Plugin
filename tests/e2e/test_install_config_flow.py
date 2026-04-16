@@ -7,7 +7,7 @@ def test_install_command_writes_managed_env_under_runtime_home(
     capsys,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    prompts = iter(["6013473151", "-5251936830"])
+    prompts = iter(["1234567890", "-1001234567890"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(prompts))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "123456:telegram-token")
 
@@ -17,8 +17,8 @@ def test_install_command_writes_managed_env_under_runtime_home(
     assert env_file.exists()
     assert env_file.read_text() == (
         "TELEGRAM_BOT_TOKEN=123456:telegram-token\n"
-        "TELEGRAM_ALLOWED_USER_IDS=6013473151\n"
-        "TELEGRAM_DEFAULT_CHAT_ID=-5251936830\n"
+        "TELEGRAM_ALLOWED_USER_IDS=1234567890\n"
+        "TELEGRAM_DEFAULT_CHAT_ID=-1001234567890\n"
         f"CODEX_TELEGRAM_STATE_DB={tmp_path / '.codex-telegram' / 'gateway.db'}\n"
         f"CODEX_TELEGRAM_TOOLBAR_CONFIG={tmp_path / '.codex-telegram' / 'toolbar.toml'}\n"
     )
@@ -37,8 +37,8 @@ def test_configure_command_preserves_existing_values_on_blank_input(
         "\n".join(
             [
                 "TELEGRAM_BOT_TOKEN=existing-token",
-                "TELEGRAM_ALLOWED_USER_IDS=6013473151",
-                "TELEGRAM_DEFAULT_CHAT_ID=-5251936830",
+                "TELEGRAM_ALLOWED_USER_IDS=1234567890",
+                "TELEGRAM_DEFAULT_CHAT_ID=-1001234567890",
                 f"CODEX_TELEGRAM_STATE_DB={runtime_home / 'gateway.db'}",
                 f"CODEX_TELEGRAM_TOOLBAR_CONFIG={runtime_home / 'toolbar.toml'}",
             ]
@@ -54,7 +54,7 @@ def test_configure_command_preserves_existing_values_on_blank_input(
 
     assert env_file.read_text() == (
         "TELEGRAM_BOT_TOKEN=existing-token\n"
-        "TELEGRAM_ALLOWED_USER_IDS=6013473151\n"
+        "TELEGRAM_ALLOWED_USER_IDS=1234567890\n"
         "TELEGRAM_DEFAULT_CHAT_ID=-100777\n"
         f"CODEX_TELEGRAM_STATE_DB={runtime_home / 'gateway.db'}\n"
         f"CODEX_TELEGRAM_TOOLBAR_CONFIG={runtime_home / 'toolbar.toml'}\n"
@@ -75,17 +75,17 @@ def test_install_command_accepts_non_interactive_overrides(
             "--bot-token",
             "123456:telegram-token",
             "--allowed-user-id",
-            "6013473151",
+            "1234567890",
             "--group-chat-id",
-            "-5251936830",
+            "-1001234567890",
         ]
     )
 
     env_file = tmp_path / ".codex-telegram" / ".env"
     assert env_file.read_text() == (
         "TELEGRAM_BOT_TOKEN=123456:telegram-token\n"
-        "TELEGRAM_ALLOWED_USER_IDS=6013473151\n"
-        "TELEGRAM_DEFAULT_CHAT_ID=-5251936830\n"
+        "TELEGRAM_ALLOWED_USER_IDS=1234567890\n"
+        "TELEGRAM_DEFAULT_CHAT_ID=-1001234567890\n"
         f"CODEX_TELEGRAM_STATE_DB={tmp_path / '.codex-telegram' / 'gateway.db'}\n"
         f"CODEX_TELEGRAM_TOOLBAR_CONFIG={tmp_path / '.codex-telegram' / 'toolbar.toml'}\n"
     )

@@ -20,8 +20,8 @@ def test_install_script_bootstraps_fresh_checkout_with_clone_and_venv(tmp_path) 
             "CODEX_TELEGRAM_INSTALL_ROOT": str(install_root),
             "PYTHON_BIN": "python3",
             "CODEX_TELEGRAM_INSTALL_BOT_TOKEN": "test-token",
-            "CODEX_TELEGRAM_INSTALL_ALLOWED_USER_ID": "6013473151",
-            "CODEX_TELEGRAM_INSTALL_GROUP_CHAT_ID": "-5251936830",
+            "CODEX_TELEGRAM_INSTALL_ALLOWED_USER_ID": "1234567890",
+            "CODEX_TELEGRAM_INSTALL_GROUP_CHAT_ID": "-1001234567890",
         },
         check=True,
     )
@@ -34,7 +34,7 @@ def test_install_script_bootstraps_fresh_checkout_with_clone_and_venv(tmp_path) 
         "venv-python:-m pip install --upgrade pip",
         "venv-python:-m pip install -e " + str(install_root),
         "venv-python:-m codex_telegram_gateway.cli install --bot-token test-token "
-        "--allowed-user-id 6013473151 --group-chat-id -5251936830",
+        "--allowed-user-id 1234567890 --group-chat-id -1001234567890",
         "venv-python:-m codex_telegram_gateway.cli plugin install",
     ]
 
@@ -57,8 +57,8 @@ def test_install_script_refreshes_existing_checkout_with_pull(tmp_path) -> None:
             "CODEX_TELEGRAM_INSTALL_ROOT": str(install_root),
             "PYTHON_BIN": "python3",
             "CODEX_TELEGRAM_INSTALL_BOT_TOKEN": "test-token",
-            "CODEX_TELEGRAM_INSTALL_ALLOWED_USER_ID": "6013473151",
-            "CODEX_TELEGRAM_INSTALL_GROUP_CHAT_ID": "-5251936830",
+            "CODEX_TELEGRAM_INSTALL_ALLOWED_USER_ID": "1234567890",
+            "CODEX_TELEGRAM_INSTALL_GROUP_CHAT_ID": "-1001234567890",
         },
         check=True,
     )
@@ -70,7 +70,7 @@ def test_install_script_refreshes_existing_checkout_with_pull(tmp_path) -> None:
         "venv-python:-m pip install --upgrade pip",
         "venv-python:-m pip install -e " + str(install_root),
         "venv-python:-m codex_telegram_gateway.cli install --bot-token test-token "
-        "--allowed-user-id 6013473151 --group-chat-id -5251936830",
+        "--allowed-user-id 1234567890 --group-chat-id -1001234567890",
         "venv-python:-m codex_telegram_gateway.cli plugin install",
     ]
 
