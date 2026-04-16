@@ -23,6 +23,13 @@ from codex_telegram_gateway.install_config import (
     prompt_install_answers,
     write_env_file,
 )
+from codex_telegram_gateway.launchd_service import (
+    install_launchd_service,
+    print_launchd_service_status,
+    start_launchd_service,
+    stop_launchd_service,
+    uninstall_launchd_service,
+)
 from codex_telegram_gateway.plugin_installation import (
     find_marketplace_plugin_entry,
     upsert_marketplace_plugin,
@@ -82,6 +89,14 @@ def main(argv: list[str] | None = None) -> None:
     plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command", required=True)
     plugin_subparsers.add_parser("install", help="Create or update the personal marketplace entry.")
     plugin_subparsers.add_parser("status", help="Show current personal marketplace registration status.")
+    service_parser = subparsers.add_parser("service", help="Manage the macOS launchd service.")
+    service_subparsers = service_parser.add_subparsers(dest="service_command", required=True)
+    service_subparsers.add_parser("install", help="Install and bootstrap the launchd service.")
+    service_subparsers.add_parser("uninstall", help="Remove the launchd service.")
+    service_subparsers.add_parser("start", help="Start the launchd service.")
+    service_subparsers.add_parser("stop", help="Stop the launchd service.")
+    service_subparsers.add_parser("restart", help="Restart the launchd service.")
+    service_subparsers.add_parser("status", help="Show current launchd service status.")
     subparsers.add_parser("start", help="Start the local gateway daemon in the background.")
     subparsers.add_parser("stop", help="Stop the local gateway daemon.")
     subparsers.add_parser("restart", help="Restart the local gateway daemon.")
@@ -116,6 +131,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "plugin":
             _run_plugin_command(plugin_command=args.plugin_command)
+            return
+        if args.command == "service":
+            _run_service_command(service_command=args.service_command)
             return
         if args.command in {"start", "stop", "restart", "status", "logs"}:
             _run_local_daemon_command(command=args.command)
@@ -392,6 +410,38 @@ def _run_local_daemon_command(*, command: str) -> None:
         print(f"No daemon log found at {paths.daemon_log_path}")
         return
     raise ValueError(f"Unsupported local daemon command: {command}")
+
+
+def _run_service_command(*, service_command: str) -> None:
+    paths = resolve_runtime_paths()
+    ensure_runtime_directories(paths)
+    if service_command == "install":
+        install_launchd_service(paths=paths)
+        print(f"Installed launchd service at {paths.launchd_plist_path}")
+        return
+    if service_command == "uninstall":
+        uninstall_launchd_service(paths=paths)
+        print(f"Removed launchd service at {paths.launchd_plist_path}")
+        return
+    if service_command == "start":
+        start_launchd_service(paths=paths)
+        print(f"Started launchd service from {paths.launchd_plist_path}")
+        return
+    if service_command == "stop":
+        stop_launchd_service()
+        print("Stopped launchd service")
+        return
+    if service_command == "restart":
+        stop_launchd_service()
+        start_launchd_service(paths=paths)
+        print(f"Restarted launchd service from {paths.launchd_plist_path}")
+        return
+    if service_command == "status":
+        print_launchd_service_status()
+        print("launchd service: installed")
+        print(f"Plist: {paths.launchd_plist_path}")
+        return
+    raise ValueError(f"Unsupported service command: {service_command}")
 
 
 if __name__ == "__main__":

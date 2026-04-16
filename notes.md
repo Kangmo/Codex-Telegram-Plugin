@@ -322,6 +322,10 @@
 ### CI-05 landed decisions
 - Added a separate `daemon_manager.py` so process control, pid-file handling, and log-tail behavior do not leak into the main runtime CLI logic.
 - Fixed daemon status detection to reap exited child processes with `waitpid(..., WNOHANG)`, avoiding zombie processes being misreported as still running.
+
+### CI-06 landed decisions
+- Added a separate `launchd_service.py` so macOS service registration stays isolated from both the runtime daemon logic and the future update workflow.
+- Reused the same managed install root, runtime env file, and daemon log path in the launchd plist so direct daemon mode and service mode stay aligned.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`
