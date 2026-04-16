@@ -326,6 +326,10 @@
 ### CI-06 landed decisions
 - Added a separate `launchd_service.py` so macOS service registration stays isolated from both the runtime daemon logic and the future update workflow.
 - Reused the same managed install root, runtime env file, and daemon log path in the launchd plist so direct daemon mode and service mode stay aligned.
+
+### CI-07 landed decisions
+- Added `update` so operators no longer need to manually refresh the checkout and rerun `pip install`.
+- Kept update synchronization intentionally conservative by preserving `.git` and `.venv` while replacing the rest of the managed install root from a fresh clone.
 - Focused verification:
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/test_daemon.py -q` -> `70 passed`
   - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_gateway_flow.py -q` -> `3 passed`

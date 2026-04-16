@@ -35,6 +35,7 @@ from codex_telegram_gateway.plugin_installation import (
     upsert_marketplace_plugin,
 )
 from codex_telegram_gateway.runtime_paths import ensure_runtime_directories, resolve_runtime_paths
+from codex_telegram_gateway.self_update import perform_self_update
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
 from codex_telegram_gateway.sync_lock import try_acquire_sync_lock
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> None:
     service_subparsers.add_parser("stop", help="Stop the launchd service.")
     service_subparsers.add_parser("restart", help="Restart the launchd service.")
     service_subparsers.add_parser("status", help="Show current launchd service status.")
+    subparsers.add_parser("update", help="Refresh the installed checkout from its git origin.")
     subparsers.add_parser("start", help="Start the local gateway daemon in the background.")
     subparsers.add_parser("stop", help="Stop the local gateway daemon.")
     subparsers.add_parser("restart", help="Restart the local gateway daemon.")
@@ -134,6 +136,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "service":
             _run_service_command(service_command=args.service_command)
+            return
+        if args.command == "update":
+            _run_update_command()
             return
         if args.command in {"start", "stop", "restart", "status", "logs"}:
             _run_local_daemon_command(command=args.command)
@@ -442,6 +447,14 @@ def _run_service_command(*, service_command: str) -> None:
         print(f"Plist: {paths.launchd_plist_path}")
         return
     raise ValueError(f"Unsupported service command: {service_command}")
+
+
+def _run_update_command() -> None:
+    paths = resolve_runtime_paths()
+    ensure_runtime_directories(paths)
+    result = perform_self_update(paths)
+    print(f"Updated plugin source from {result.origin_url}")
+    print(f"Install root: {result.install_root}")
 
 
 if __name__ == "__main__":

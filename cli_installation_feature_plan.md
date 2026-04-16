@@ -76,9 +76,9 @@ This work covers:
 - [x] Line by line proof reading for code review done
 
 ### CI-07: Self-Update From Git Origin Clone
-- [ ] Implemented
-- [ ] Test automation coverage more than 80%
-- [ ] Line by line proof reading for code review done
+- [x] Implemented
+- [x] Test automation coverage more than 80%
+- [x] Line by line proof reading for code review done
 
 ### CI-08: Operator Diagnostics and Status Summary
 - [ ] Implemented
@@ -624,5 +624,45 @@ Line-by-line proof reading:
 
 Branch and merge record:
 - Feature branch: `feature/ci-06-launchd-service-management`
+- Feature commit: `18ee2b2`
+- Merge commit: `4a08c77`
+
+### CI-07: Self-Update From Git Origin Clone
+
+Implementation decisions:
+- Added `self_update.py` to own:
+  - `origin` discovery
+  - fresh-clone checkout sync
+  - pip reinstall in the existing venv
+  - marketplace refresh after update
+- `update` now:
+  1. reads `origin` with `git -C <install-root> remote get-url origin`
+  2. falls back to `https://github.com/Kangmo/Codex-Telegram-Plugin` when origin discovery fails
+  3. clones a fresh copy into a temp directory
+  4. syncs it into the managed install root while preserving:
+     - `.git`
+     - `.venv`
+  5. reruns `pip install -e <install-root>`
+  6. refreshes the personal marketplace entry
+- Added top-level CLI command `update`.
+
+Automated test coverage:
+- Added:
+  - [tests/e2e/test_update_cli.py](/Users/kangmo/sacle/src/codex-telegram/tests/e2e/test_update_cli.py:1)
+  - [tests/unit/test_self_update.py](/Users/kangmo/sacle/src/codex-telegram/tests/unit/test_self_update.py:1)
+- Green phase verification:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_update_cli.py tests/unit/test_self_update.py -q`
+  - result: `5 passed`
+- Coverage:
+  - `PYTHONPATH=src .venv/bin/python -m pytest tests/e2e/test_update_cli.py tests/unit/test_self_update.py --cov=codex_telegram_gateway.self_update --cov-report=term-missing -q`
+  - result: `41/42 = 98%`
+
+Line-by-line proof reading:
+- Reviewed [src/codex_telegram_gateway/self_update.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/self_update.py:1) and the update branch in [src/codex_telegram_gateway/cli.py](/Users/kangmo/sacle/src/codex-telegram/src/codex_telegram_gateway/cli.py:96).
+- Kept `.git` and `.venv` preservation explicit in code so update cannot wipe the operator’s install metadata or environment.
+- The update CLI stays output-focused and prints the origin URL and install root that were actually refreshed.
+
+Branch and merge record:
+- Feature branch: `feature/ci-07-self-update-from-origin-clone`
 - Feature commit: pending
 - Merge commit: pending
