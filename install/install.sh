@@ -28,3 +28,4 @@ fi
 "$VENV_PATH/bin/python" -m pip install --upgrade pip
 "$VENV_PATH/bin/python" -m pip install -e "$INSTALL_ROOT"
 "$VENV_PATH/bin/python" -m codex_telegram_gateway.cli install
+"$VENV_PATH/bin/python" -m codex_telegram_gateway.cli plugin install

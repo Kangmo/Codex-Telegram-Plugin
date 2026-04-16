@@ -16,6 +16,10 @@ from codex_telegram_gateway.install_config import (
     prompt_install_answers,
     write_env_file,
 )
+from codex_telegram_gateway.plugin_installation import (
+    find_marketplace_plugin_entry,
+    upsert_marketplace_plugin,
+)
 from codex_telegram_gateway.runtime_paths import ensure_runtime_directories, resolve_runtime_paths
 from codex_telegram_gateway.service import GatewayService
 from codex_telegram_gateway.state import SqliteGatewayState
@@ -64,6 +68,13 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Override the prompted Telegram group chat ID.",
     )
+    plugin_parser = subparsers.add_parser(
+        "plugin",
+        help="Manage Codex App local marketplace registration for the plugin.",
+    )
+    plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command", required=True)
+    plugin_subparsers.add_parser("install", help="Create or update the personal marketplace entry.")
+    plugin_subparsers.add_parser("status", help="Show current personal marketplace registration status.")
     subparsers.add_parser(
         "sync-once",
         help="Run one Telegram poll, one inbound delivery, and one outbound Codex sync pass.",
@@ -90,6 +101,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "configure":
             _run_install_or_configure(group_chat_id_override=args.group_chat_id, is_install=False)
+            return
+        if args.command == "plugin":
+            _run_plugin_command(plugin_command=args.plugin_command)
             return
         config = GatewayConfig.from_env(Path(args.env_file))
         state = SqliteGatewayState(config.state_database_path)
@@ -302,6 +316,30 @@ def _run_install_or_configure(
     )
     action = "Configured" if is_install else "Updated"
     print(f"{action} gateway environment at {paths.env_file}")
+
+
+def _run_plugin_command(*, plugin_command: str) -> None:
+    paths = resolve_runtime_paths()
+    ensure_runtime_directories(paths)
+    if plugin_command == "install":
+        upsert_marketplace_plugin(marketplace_path=paths.marketplace_path, paths=paths)
+        print(f"Registered plugin marketplace entry at {paths.marketplace_path}")
+        return
+    if plugin_command == "status":
+        entry = find_marketplace_plugin_entry(marketplace_path=paths.marketplace_path)
+        print(f"Marketplace file: {paths.marketplace_path}")
+        print("Plugin: codex-telegram-gateway")
+        if entry is None:
+            print("Registered: no")
+            return
+        source = entry.get("source")
+        source_path = ""
+        if isinstance(source, dict):
+            source_path = str(source.get("path") or "")
+        print("Registered: yes")
+        print(f"Source path: {source_path}")
+        return
+    raise ValueError(f"Unsupported plugin command: {plugin_command}")
 
 
 if __name__ == "__main__":

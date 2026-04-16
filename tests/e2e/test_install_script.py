@@ -29,6 +29,7 @@ def test_install_script_bootstraps_fresh_checkout_with_clone_and_venv(tmp_path) 
         "venv-python:-m pip install --upgrade pip",
         "venv-python:-m pip install -e " + str(install_root),
         "venv-python:-m codex_telegram_gateway.cli install",
+        "venv-python:-m codex_telegram_gateway.cli plugin install",
     ]
 
 
@@ -58,6 +59,7 @@ def test_install_script_refreshes_existing_checkout_with_pull(tmp_path) -> None:
         "venv-python:-m pip install --upgrade pip",
         "venv-python:-m pip install -e " + str(install_root),
         "venv-python:-m codex_telegram_gateway.cli install",
+        "venv-python:-m codex_telegram_gateway.cli plugin install",
     ]
 
 
